@@ -29,10 +29,12 @@ class EventStore:
         statement = factory(events).values(
             event_id=event.event_id, payload=event.model_dump(mode="json")
         )
-        statement = statement.on_conflict_do_nothing(index_elements=["event_id"])
+        inserted = statement.on_conflict_do_nothing(index_elements=["event_id"]).returning(
+            events.c.event_id
+        )
         with self.engine.begin() as connection:
-            result = connection.execute(statement)
-            return result.rowcount == 1
+            result = connection.execute(inserted)
+            return result.scalar_one_or_none() is not None
 
     def list(self, *, as_of: datetime | None = None) -> list[Event]:
         if as_of is not None:
