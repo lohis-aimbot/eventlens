@@ -1,0 +1,4 @@
+{"source": "synthetic-fixture", "source_id": "SYNTHETIC-1-0", "published_at": "2025-01-01T14:00:00Z", "received_at": "2025-01-01T14:00:00Z", "text": "Inflation remains elevated.", "kind": "fomc_statement", "episode_id": "SYNTHETIC-1"}
+{"source": "synthetic-fixture", "source_id": "SYNTHETIC-1-1", "published_at": "2025-01-01T14:20:00Z", "received_at": "2025-01-01T14:20:00Z", "text": "Downside risks to employment have increased.", "kind": "fomc_followup", "episode_id": "SYNTHETIC-1"}
+{"source": "synthetic-fixture", "source_id": "SYNTHETIC-2-0", "published_at": "2025-01-02T14:00:00Z", "received_at": "2025-01-02T14:00:00Z", "text": "Inflation remains elevated.", "kind": "fomc_statement", "episode_id": "SYNTHETIC-2"}
+{"source": "synthetic-fixture", "source_id": "SYNTHETIC-2-1", "published_at": "2025-01-02T14:20:00Z", "received_at": "2025-01-02T14:20:00Z", "text": "Downside risks to employment have increased.", "kind": "fomc_followup", "episode_id": "SYNTHETIC-2"}

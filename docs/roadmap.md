@@ -1,39 +1,32 @@
 # Roadmap
 
-All implementation stages below are pending.
+## Completed — Public foundation and offline MVP
 
-## 0 — Public project foundation
+- Public repository, English README and architecture.
+- JSONL ingestion protocol and timezone-aware event schema.
+- Conservative rule parser and validated injectable LLM parser interface.
+- SQLite/PostgreSQL repository with idempotent event insertion.
+- Historical analogue filter and descriptive event-return study.
+- Simple EUR/USD stance signal, risk checks and single-position paper replay.
+- CLI, synthetic fixtures, tests and database CI configuration.
 
-Define the project, scope, architecture and validation approach in a public repository.
+## Next — Real FOMC research
 
-## 1 — Reproducible local research MVP
+- Ingest official statements and compare changes against the preceding statement.
+- Select an LLM provider and build a manually reviewed extraction evaluation set.
+- Obtain timestamped EUR/USD bid/ask data and valid point-in-time expectations.
+- Compare rule-only and LLM-assisted policies chronologically, including measured delays and costs.
+- Keep small FOMC sample sizes and historical model knowledge explicit in conclusions.
 
-- Source adapter interface and synthetic fixture adapter.
-- Validated event schema and rule/LLM parser interfaces.
-- SQLite/PostgreSQL repository abstraction.
-- Historical event study with documented windows and return definitions.
-- Simple explainable signal policy and independent risk checks.
-- Backtest skeleton with a replay clock and simulated execution.
-- CLI example and meaningful basic tests.
+## Then — Follow-up information and cTrader demo
 
-Acceptance: a fresh checkout can run an offline example from source records to events, research output and simulated decisions, with no credentials.
+- Ingest incremental press-conference information with measured availability times.
+- Validate episode linking and thesis updates on real messages.
+- Authenticate a Pepperstone cTrader demo account, discover symbols, and reconcile orders and fills.
+- Add broker-aware sizing, margin checks, durable state, reconnect handling and an emergency stop.
 
-## 2 — Point-in-time data and evaluation
+## Later — Broader coverage
 
-Choose one event family and a small instrument universe. Add an authorized source and market data, record receipt times and revisions, compare rule-only and LLM-assisted baselines, and evaluate chronologically with transaction-cost assumptions.
+Use USD/JPY as a comparison market, then evaluate gold and oil. Add authorized social and geopolitical feeds, semantic novelty and cross-asset exposure models. Consider fine-tuning only when a labeled evaluation set demonstrates a persistent limitation.
 
-Acceptance: reproducible results with provenance, explicit limitations and no future-data access.
-
-## 3 — cTrader demo integration
-
-Authenticate a demo account, discover instruments, subscribe to quotes, submit risk-approved demo orders, reconcile fills, recover from disconnects, and track event-driven exits.
-
-Acceptance: an auditable end-to-end demo lifecycle, including duplicate-message handling, rejected orders, stale data and an emergency stop.
-
-## 4 — Broader event coverage
-
-Expand social and geopolitical sources, connect follow-up events to position theses, and evaluate multi-instrument exposure. Consider fine-tuning only after an evaluation dataset identifies a persistent model limitation.
-
-## 5 — Live readiness review
-
-Live execution is outside the initial implementation scope. Any later transition requires an explicit decision after reviewing forward-test evidence, operational reliability and execution constraints.
+Live trading remains outside the current scope and requires a separate decision.

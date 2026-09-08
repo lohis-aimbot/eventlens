@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eventlens"
+version = "0.1.0"
+description = "Offline event-driven FX research and paper replay"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.8,<3", "sqlalchemy>=2.0,<3"]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+dev = ["pytest>=8,<10", "ruff>=0.9,<1", "mypy>=1.13,<2", "build>=1,<2"]
+
+[project.scripts]
+eventlens = "eventlens.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["packages/eventlens/src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
