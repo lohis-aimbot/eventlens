@@ -18,3 +18,8 @@ data/
 *.sqlite
 *.sqlite3
 logs/
+
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm

@@ -1,4 +1,4 @@
-"""Durable thesis repository contract; no database/backend is selected yet."""
+"""Durable thesis repository contract; SQLite implementation lives in sqlite_memory.py."""
 
 from datetime import datetime
 from typing import Protocol

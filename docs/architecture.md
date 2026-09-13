@@ -1,6 +1,6 @@
 # Event → Thesis Memory → Position
 
-This document is a design contract. Interfaces express obligations for later implementations; their presence does not mean those behaviors are operational today.
+This document describes the overall design. Durable SQLite thesis storage is now implemented; see [memory stage](memory.md) for its guarantees and limitations. Other interfaces remain future obligations.
 
 ## Core objects
 
@@ -34,7 +34,7 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 | execution | ShadowExecutor.record | Idempotent recording of current risk-approved intent only |
 | runtime | EventRuntime.handle / AuditSink.append | Future lifecycle coordination and append-only audit |
 
-No implementation is silently substituted for a missing component. There is no in-memory mock presented as persistent memory, and no fake risk approval or fabricated fill.
+SQLite provides durable memory. The demonstration uses explicitly predetermined decisions and no model call. There is no fake risk approval or fabricated fill.
 
 ## Beliefs and positions are separate
 
@@ -64,6 +64,6 @@ Persist cycle progress separately: received → filtered → reasoned → memory
 
 Before any executor exists, deterministic risk implementation must test per-asset/gross/net exposure, losses, stale data, spread, order rate and emergency stop behavior. Shadow execution must model costs and latency explicitly. Live credentials, broker adapters, model training, RL and a full backtester are outside this rebuild.
 
-## Next stage — only after foundation review
+## Memory stage and next review
 
-Implement a minimal durable memory store, fixture event source and a deterministic fake agent for lifecycle tests: create thesis, reinforce thesis, contradict thesis, invalidate thesis, ignore duplicate, restart and recover. Prove history, evidence linkage and idempotency first. Connect an existing frontier LLM API afterward, then implement independent risk and shadow tracking. Nothing in this foundation begins those stages automatically.
+The SQLite implementation and synthetic CLI now exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. Contract and storage tests cover atomicity, conflicting updates and evidence availability. Semantic duplicate detection and an actual agent remain pending. After acceptance, connect an existing frontier LLM API for memory-only reasoning; risk and shadow execution remain later stages.

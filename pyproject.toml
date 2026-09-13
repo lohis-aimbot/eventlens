@@ -4,11 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eventlens"
-version = "0.2.0"
+version = "0.3.0"
 description = "Event → Thesis Memory → Position: stateful trading-agent architecture"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["pydantic>=2.8,<3"]
+
+[project.scripts]
+eventlens-memory = "eventlens.memory_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1", "mypy>=1.13,<2", "build>=1,<2"]
