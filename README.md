@@ -1,89 +1,100 @@
 # EventLens
 
-**Event-driven market research and trading automation for FX, gold, and oil.**
+**Event → Thesis Memory → Position**
 
-EventLens is a Python research project that turns news, influential social posts, and macroeconomic releases into structured events, evaluates their market implications, and tracks trading decisions as new information arrives.
+A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: v0.1 offline MVP. EUR/USD + FOMC synthetic replay runs locally. Live feeds, a network LLM provider, and cTrader integration are not connected. No performance claims are made.**
+**Status: architecture foundation only (v0.2).** This repository contains validated data contracts, asynchronous interfaces, documentation and contract tests. There is no running agent, persistent storage implementation, model API call, risk implementation, shadow simulator or broker connection yet.
 
-## Core idea
+## The core idea
 
-A trading decision has a reason. EventLens aims to record that reason and continuously test whether new evidence supports, weakens, or invalidates it.
+A new event is evidence in an ongoing story. It may support an existing thesis, contradict it, create a new one, or be irrelevant. The agent considers that evidence together with remembered theses, current market conditions and observed positions before proposing a new portfolio.
 
-The intended workflow is:
-
-1. Capture information from approved news feeds, social sources, and official releases.
-2. Extract events, link entities, distinguish new information from repeats, and measure surprise where a valid expectation is available.
-3. Retrieve historical analogues and evaluate the event alongside current market conditions.
-4. Propose an action: abstain, open, hold, increase, reduce, or close a position.
-5. Apply independent risk limits before submitting any order.
-6. Reconcile fills and positions, monitor follow-up events, and reassess the original thesis.
-
-## Initial scope
-
-- **First market and event:** EUR/USD + FOMC statements and follow-up information. USD/JPY, gold and oil are later extensions.
-- **Information:** central-bank communications, macroeconomic releases, major geopolitical developments, and market-relevant posts by influential figures.
-- **AI:** an existing LLM for language understanding, with replaceable providers. Numerical calculations, execution checks, and risk limits remain explicit code.
-- **First broker target:** Pepperstone through cTrader Open API, initially using a demo account.
-- **Validation:** historical event replay in Python, followed by real-time demo trading. Historical replay and broker demo trading are separate validation stages.
-
-The first implementation uses synthetic fixtures and offline paper execution. Live trading is a later milestone requiring a separate decision. Training a foundation model from scratch is outside the initial scope.
-
-## Architecture
+For example, an unconfirmed supply disruption might create a watch thesis with no position. A verified follow-up could strengthen the thesis and justify proposed exposure. A subsequent restoration of supply could invalidate it and lead to a proposed exit. These are illustrative reasoning transitions, not trading rules or performance claims.
 
 ```mermaid
 flowchart TD
-    A[News / Social posts / Official releases] --> B[Ingestion and timestamps]
-    B --> C[Event extraction and deduplication]
-    C --> D[Event store and historical retrieval]
-    D --> E[Signal and position-thesis evaluation]
-    M[Market data and instrument metadata] --> E
-    E --> F[Independent risk checks]
-    F --> G[Paper execution / cTrader demo adapter]
-    G --> H[Orders, fills and positions]
-    H --> E
+    A[Real-time events: news, social, macro, geopolitical, company] --> B[Event filter]
+    B --> C[LLM trading agent]
+    C <--> D[Thesis Memory]
+    E[Market and observed portfolio snapshots] --> C
+    C --> F[Target portfolio]
+    F --> G[Hard risk engine]
+    E --> G
+    G --> H[Execution / Shadow trading]
+    H --> I[Execution feedback and observed positions]
+    I --> E
 ```
 
-## Technology stack
+## Responsibility boundaries
 
-Python 3.11+, Pydantic for validated event contracts, SQLAlchemy with SQLite/PostgreSQL, and pytest for tests. The small descriptive event study uses the Python standard library. Ruff and mypy check code quality and types. The CLI is the first runnable interface; LLM and broker boundaries are replaceable.
+- **LLM trading agent:** interprets events, links evidence to theses, reasons about changing beliefs, and proposes portfolio decisions. It uses existing APIs such as GPT; no LLM training or RL is planned.
+- **Thesis Memory:** a durable, versioned record of beliefs, supporting and contradicting evidence, invalidation conditions, review times and decision history. It is not just a chat transcript or a vector search index.
+- **Target portfolio:** the desired signed exposure, distinct from current positions. Open, add, reduce, close, reverse and hedge are represented as changes in target exposure. Ignore/hold can leave the target unchanged.
+- **Hard risk engine:** independent code that approves or rejects a proposal using operator-controlled limits and current account/market state. The LLM cannot edit limits or approve its own proposal.
+- **Execution / shadow layer:** consumes only validated, current risk-approved targets. Recorded intentions are not fills; actual positions come from the shadow ledger or broker reconciliation.
 
-See [architecture](docs/architecture.md) and [roadmap](docs/roadmap.md) for implemented boundaries, limitations and the remaining delivery stages.
+This design intentionally lets the LLM reason about portfolio decisions. It does not require a separately trained return model between the agent and the risk gate. Those decisions will still need later research and shadow validation before any real execution.
 
-## Research principles
+## Repository structure
 
-- Preserve source publication time, first receipt time, revisions, provenance, and processing latency.
-- Replay only information available at each decision time; account for possible historical knowledge in pretrained LLMs.
-- Compare rule-only and LLM-assisted baselines with chronological evaluation.
-- Include spread, fees, slippage assumptions, and relevant holding costs; demo fills do not establish live execution quality.
-- Treat LLM confidence as an uncalibrated model output, not a probability of profit.
-- Log decisions, supporting evidence, model versions, and reasons to abstain or exit.
-- Keep credentials, account details, and restricted source datasets out of the public repository.
+```text
+eventlens/
+├── README.md
+├── pyproject.toml
+├── docs/
+│   └── architecture.md
+├── src/eventlens/
+│   ├── __init__.py
+│   ├── contracts.py    # Events, theses, context, targets, risk and audit records
+│   ├── events.py       # EventSource and EventFilter interfaces
+│   ├── memory.py       # Durable ThesisMemory contract and revision conflicts
+│   ├── agent.py        # Provider-agnostic TradingAgent interface
+│   ├── portfolio.py    # Observed state and target validation interfaces
+│   ├── risk.py         # Deterministic HardRiskEngine interface
+│   ├── execution.py    # Shadow-only execution interface
+│   └── runtime.py      # Future orchestration and audit interfaces
+├── tests/
+│   └── test_contracts.py
+└── .github/workflows/
+    └── tests.yml
+```
 
-## Getting started
+One Python package, clear module boundaries, no microservices. Pydantic is the only runtime dependency. Future source, LLM, storage and execution implementations must sit behind these interfaces.
 
-Run from the repository root (macOS/Linux):
+## Thesis lifecycle
+
+1. Persist the raw event and filter duplicates, unverifiable sources and irrelevant material.
+2. Load committed thesis memory, observed positions, pending orders and current market data.
+3. Ask the agent for evidence-linked thesis revisions and an optional target portfolio.
+4. Validate the response and its references, then commit beliefs with optimistic concurrency checks.
+5. If a target exists, validate it against current positions and independently evaluate hard risk.
+6. Record approved shadow intent and subsequent execution feedback separately from beliefs.
+7. Revisit active theses on new evidence and scheduled review, even if no position is held.
+
+A rejected trade does not erase a valid thesis update. An agent failure does not create a default trade. Concurrent updates require a fresh decision; stale proposals are never blindly replayed.
+
+## Foundation checks
+
+From a fresh checkout, using Python 3.11+:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-eventlens demo
-```
-
-The command parses four invented FOMC messages, stores events in local SQLite, calculates descriptive 15-minute returns and prints an auditable paper replay with two closed trades. It requires no API key. Dates and prices are fictional; the output validates software behavior, not investment performance. Repeating the command inserts zero duplicate events.
-
-```bash
-eventlens schema
 pytest -q
 ruff check .
-mypy packages/eventlens/src
+mypy src
 ```
 
-For PostgreSQL, install `.[postgres]`, create a disposable research database, then supply its URL via `EVENTLENS_DATABASE_URL` using the `postgresql+psycopg://` scheme. Keep credentials outside the repository. Tests use `EVENTLENS_TEST_POSTGRES` for a separate disposable database; PostgreSQL tests skip locally when it is unset and run in GitHub CI.
+These commands validate the architecture contracts. They do not run a trading bot. The old `eventlens demo` command, EUR/USD fixtures, rule-based signals, event study, backtester and database adapters have been removed. The previous implementation remains accessible in Git history.
 
-`eventlens demo --help` lists custom source/quote files, modeled parsing latency and a JSON risk-config file. See [synthetic fixtures](examples/README.md). The LLM interface is tested with a fake client; it does not call a model by default.
+## Implementation boundaries
 
-## What this version proves
+Implemented: immutable typed contracts, UTC timestamp validation, revision/expiry checks, module interfaces and tests.
 
-It demonstrates the source → event → decision → risk → paper position → follow-up exit lifecycle. Historical analogues are simple kind/stance matches. Rules do not measure market surprise, learn profitable behavior or perform general financial reasoning. Statement comparison, real data evaluation and cTrader demo are the next milestones.
+Defined but **not implemented**: durable thesis memory, source filtering, provider adapters, reasoning orchestration, portfolio reconciliation, risk limits and shadow fills. No model/provider or broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
+
+The next stage should implement a minimal durable thesis-memory cycle with deterministic test inputs, after review of this foundation. Real-time feeds, frontier API integration and shadow execution come later. There is no live trading path.
+
+See [architecture and interface contracts](docs/architecture.md) for data semantics, concurrency, failure handling and future acceptance boundaries.

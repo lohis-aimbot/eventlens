@@ -1,51 +1,69 @@
-# Architecture — v0.1
+# Event → Thesis Memory → Position
 
-The monorepo has one installable Python package with explicit module boundaries. Separate distributions and services can be extracted when needed; the first version avoids inter-package deployment overhead.
+This document is a design contract. Interfaces express obligations for later implementations; their presence does not mean those behaviors are operational today.
 
-```text
-apps/cli/                          CLI entry-point documentation
-packages/eventlens/src/eventlens/
-  core.py                          Validated shared schemas
-  ingestion.py                     Source protocol and JSONL adapter
-  parsing.py                       Rule parser and injectable LLM parser
-  storage.py                       SQLite / PostgreSQL event repository
-  research.py                      Point-in-time analogues and event returns
-  signals.py                       Uncalibrated EUR/USD stance baseline
-  risk.py                          Deterministic risk configuration and checks
-  backtesting.py                    Single-position paper replay
-  execution.py                      Future broker contract; cTrader disabled
-  cli.py                           Installed eventlens command
-examples/                          Synthetic messages and bid/ask quotes
-tests/                            Behavioral and repository tests
-.github/workflows/tests.yml         SQLite / PostgreSQL CI
-```
+## Core objects
 
-## Time and evidence
+| Object | Meaning |
+|---|---|
+| Event | Immutable source evidence with stable identity, provenance and source/receipt timestamps |
+| FilterResult | Versioned accept/ignore/quarantine result and explanation |
+| Thesis | Versioned narrative, affected instruments, supporting/contradicting event IDs, confidence, invalidation conditions and review deadline |
+| MemorySnapshot | One committed revision per thesis, at a known memory version and cutoff |
+| PortfolioSnapshot | Observed quantities, account equity/currency and outstanding order references |
+| MarketSnapshot | Identified snapshot of received bid/ask observations |
+| AgentContext | Point-in-time evidence, thesis memory, portfolio and market state |
+| AgentDecision | Identified/versioned reasoning result, thesis changes and optional target |
+| TargetPortfolio | Complete desired signed exposure linked to theses and the observed portfolio snapshot |
+| RiskAssessment | Expiring trusted approval/rejection, linked to decision, target and checked account snapshot |
+| ExecutionReceipt | Shadow intention record; not an order fill or an updated position |
+| AuditRecord | Structured lifecycle outcome with event and decision trace IDs |
 
-Raw records carry publication time, receipt time, source identity, revision and episode identity. Events add parsing availability time and parser version. All input timestamps require an explicit timezone. The CLI models parsing latency; a future live adapter must measure actual completion time.
+Thesis confidence expresses the agent's belief, not a calibrated probability of profit. Link validation must confirm cited evidence exists and was available to the decision. Source authenticity is checked outside the model. Thesis IDs remain stable across revisions; source event IDs, decision IDs, target IDs, risk IDs and execution IDs must be traceable end to end.
 
-The caller is currently responsible for assigning records to FOMC episodes and identifying their source. Entity linking is restricted to US.FOMC and EURUSD; it is not general-purpose entity recognition. The rule parser uses a few exact phrases and abstains on unsupported or conflicting language. It does not compare successive official statements or estimate market expectations. The LLM parser accepts an injected client and validates JSON and verbatim evidence; no network provider is bundled.
+## Minimal interfaces
 
-## Storage
+| Module | Interface | Contract |
+|---|---|---|
+| events | EventSource.stream | Async event stream; each adapter owns rate limits, retry, logging and stable IDs |
+| events | EventFilter.evaluate | Deduplicate and validate provenance; ambiguous sources quarantine |
+| memory | ThesisMemory.record_event / snapshot / commit | Durable evidence and atomic, version-checked thesis history |
+| agent | TradingAgent.decide | Existing LLM API behind a provider-neutral boundary; validated structured proposal |
+| portfolio | PortfolioState.snapshot / TargetValidator.validate | Authoritative account state; validate complete desired exposures |
+| risk | HardRiskEngine.assess | Independent checks against account state, market data and operator policy |
+| execution | ShadowExecutor.record | Idempotent recording of current risk-approved intent only |
+| runtime | EventRuntime.handle / AuditSink.append | Future lifecycle coordination and append-only audit |
 
-`events_v1` stores the complete validated event as JSON under a deterministic ID. Insertion uses database-native conflict handling for SQLite and PostgreSQL. Raw provenance and revisions are retained in each payload. A matching ID is immutable: first write wins. `list(as_of=...)` filters by parsing availability. Filtering currently happens in Python and is intended for small research datasets; indexed timestamp columns and migrations are future work.
+No implementation is silently substituted for a missing component. There is no in-memory mock presented as persistent memory, and no fake risk approval or fabricated fill.
 
-## Decisions and fills
+## Beliefs and positions are separate
 
-Hawkish maps to a EUR/USD short, dovish to a long. This is a deliberately simplistic baseline, not an empirically validated forecast. Neutral or unknown means abstain; it does not silently close an existing position. A directional reversal in the same episode closes the position without immediately reversing it. Signals from unrelated episodes cannot replace an open position.
+A thesis may exist without a position; one thesis may support several positions, including a hedge. A position may reflect several theses. Invalidation changes memory first. Any resulting exposure adjustment still passes independent portfolio and risk checks.
 
-Replay waits for a quote strictly after event availability. Repeated content within an episode and event kind is skipped. If multiple updates for the same episode arrive before a quote, the latest supersedes earlier ones. Simultaneous distinct events and duplicate quote times are rejected until an aggregation policy exists. A signal expires rather than filling much later after a data gap.
+Targets use signed account-equity notional weights, not buy/sell commands or broker lot counts. Positive is long, negative is short, zero is an explicit exit. Every currently held instrument must be represented in a complete target. A missing held instrument is invalid, not an implicit liquidation. `target=None` means no portfolio change. A hedge is an additional instrument target linked to the relevant thesis. Broker units, contract multipliers, currency conversion, rounding and pending-order handling belong to future execution planning.
 
-There is at most one fixed-size EUR/USD position. Entry uses bid/ask plus adverse slippage; exits use the executable opposite side plus adverse slippage. Commission is charged on both legs. P&L is in USD. Stop, holding-time, loss-limit and same-episode reversal exits are evaluated on available quotes; stops can gap and do not guarantee a fill at the stop level. The loss limit is cumulative over the replay, not a daily reset. Open positions are liquidated on the final quote and that reason is recorded.
+The foundation schema intentionally does not hard-code an instrument universe or a leverage limit. Instrument eligibility and exposure constraints must come from a deterministic configured risk policy. Merely constructing a `RiskAssessment(outcome="approve")` is not authorization: only the trusted runtime's own risk-engine result may be passed to execution. No executor is implemented in this release.
 
-Not modeled: margin, swaps, order-book depth, partial fills, asynchronous broker acknowledgements, continuously persisted risk state, or real execution latency beyond configured parsing and quote timing. Sparse or missing quotes reduce fidelity. Do not use this replay as a live executor.
+## Time, concurrency and persistence
 
-## Research
+All modeled timestamps reject naive datetimes and normalize aware inputs to UTC. The source clock and receipt clock remain distinct. Agent start/completion times and provider/model/prompt versions are stamped by the adapter, not supplied as authoritative model text. Runtime validation must enforce context cutoff <= reasoning start <= completion < expiry, and verify all event/target/snapshot references before accepting a proposal. Current schema checks cover local ordering; cross-object orchestration checks are deferred with the runtime.
 
-Event studies use mid-price percentage returns in basis points, from the first quote at/after availability within one minute to the first quote at/after a 15-minute horizon within one minute. Both prices must be available by `as_of`. Missing windows are excluded, with sample count reported. These are descriptive, non-causal, overlapping observations; no benchmark adjustment, significance test or profitability claim is made.
+Initial runtime design: serialize portfolio decisions in one process. Memory still uses compare-and-swap revisions to detect stale state. A commit atomically appends decision and changed thesis revisions. Identical repeated decision IDs are idempotent; conflicting reuse fails. Store both revision effective time and actual commit time so historical snapshots cannot reveal information before it was committed. Never overwrite earlier thesis revisions.
 
-Analogue retrieval currently matches kind and stance, excludes the current episode, and uses only earlier available events. It is a baseline filter, not an embedding search. The signal engine does not learn from the event-study output, avoiding a hidden full-sample fitting step.
+Persist cycle progress separately: received → filtered → reasoned → memory committed → risk approved/rejected → shadow recorded. Memory commit does not mean execution happened. A crash between stages must resume from durable progress and fresh state, not duplicate an order or reason against an obsolete snapshot. A future durable outbox/ledger can coordinate memory and execution without making external calls part of a database transaction.
 
-## Future execution
+## Future failure behavior
 
-The first broker target is Pepperstone cTrader demo through Open API. `CTraderAdapter` deliberately raises `NotImplementedError`; no credentials or live order routes exist. Account-specific symbols, contract sizes and trading rules must be discovered before this integration. A real adapter also needs idempotent order handling, fill reconciliation and reconnect recovery.
+- Malformed or unsupported model output: record failure, retain evidence, create no target.
+- Timeout: bounded retry with the same operation identity; never synthesize a trade.
+- Memory conflict: reload and reason again; do not merge portfolio targets blindly.
+- Risk rejection: retain valid beliefs and log the rejection; do not execute.
+- Stale market/account data, database unavailable or kill switch: stop new execution.
+- Restart: reload durable memory and reconcile observed/pending positions before new action.
+- Expired thesis review time: schedule reassessment; expiry is not a fabricated fill.
+
+Before any executor exists, deterministic risk implementation must test per-asset/gross/net exposure, losses, stale data, spread, order rate and emergency stop behavior. Shadow execution must model costs and latency explicitly. Live credentials, broker adapters, model training, RL and a full backtester are outside this rebuild.
+
+## Next stage — only after foundation review
+
+Implement a minimal durable memory store, fixture event source and a deterministic fake agent for lifecycle tests: create thesis, reinforce thesis, contradict thesis, invalidate thesis, ignore duplicate, restart and recover. Prove history, evidence linkage and idempotency first. Connect an existing frontier LLM API afterward, then implement independent risk and shadow tracking. Nothing in this foundation begins those stages automatically.
