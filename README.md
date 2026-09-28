@@ -4,7 +4,7 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: memory-only LLM integration (v0.4).** SQLite stores raw evidence, immutable thesis revisions and decision history. A DeepSeek adapter can propose a thesis creation, update or ignore decision from one manually supplied event; code validates the proposal before committing. Offline tests cover this path. A real API smoke test requires a locally configured key and has not been run in CI. There is no live event feed, portfolio execution, risk implementation or broker connection.
+**Status: memory-only LLM integration (v0.4).** SQLite stores raw evidence, immutable thesis revisions and decision history. A DeepSeek adapter can propose a thesis creation, update or ignore decision from one manually supplied event; code validates the proposal before committing. Offline tests and a manual real-API smoke test cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no live event feed, portfolio execution, risk implementation or broker connection.
 
 ## The core idea
 
