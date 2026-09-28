@@ -63,6 +63,7 @@ class FakeClient:
     async def complete_json(self, *, system: str, user: str) -> ModelResponse:
         self.calls += 1
         assert "No BUY/SELL" in system
+        assert "invalidation_conditions MUST be arrays" in system
         assert "received_timestamp" in user
         return ModelResponse(content=self.responses.pop(0), input_tokens=40, output_tokens=20)
 
@@ -126,6 +127,39 @@ def test_ignore_records_decision_without_thesis_change(tmp_path):
     assert run(store.snapshot(as_of=datetime.now(UTC))).theses == ()
 
 
+def test_provider_fingerprint_is_saved_in_decision(tmp_path):
+    response = json.dumps(
+        {
+            "action": "ignore",
+            "thesis_id": None,
+            "status": None,
+            "narrative": None,
+            "instruments": None,
+            "invalidation_conditions": None,
+            "confidence": None,
+            "evidence_role": None,
+            "evidence_quote": None,
+            "reason": "No change",
+        }
+    )
+
+    class FingerprintedClient(FakeClient):
+        async def complete_json(self, *, system: str, user: str) -> ModelResponse:
+            result = await super().complete_json(system=system, user=user)
+            return result.model_copy(
+                update={"model_id": "deepseek-flash", "system_fingerprint": "fp-test"}
+            )
+
+    store = SQLiteThesisMemory(tmp_path / "memory.sqlite")
+    decision = run(
+        MemoryReasoner(FingerprintedClient(response), store).process(
+            event("e1", "No real market event")
+        )
+    ).decision
+    assert decision.model_version == "deepseek-flash@fp-test"
+    assert run(store.decision_for_event("e1")).model_version == "deepseek-flash@fp-test"
+
+
 @pytest.mark.parametrize(
     "response,match",
     [
@@ -159,6 +193,8 @@ def test_deepseek_request_format_and_usage():
                     {"finish_reason": "stop", "message": {"content": '{"action":"ignore"}'}}
                 ],
                 "usage": {"prompt_tokens": 14, "completion_tokens": 8},
+                "model": "deepseek-flash",
+                "system_fingerprint": "test-fingerprint",
             },
         )
 
@@ -166,6 +202,8 @@ def test_deepseek_request_format_and_usage():
     result = run(client.complete_json(system="JSON", user="event"))
     assert result.input_tokens == 14
     assert result.output_tokens == 8
+    assert result.model_id == "deepseek-flash"
+    assert result.system_fingerprint == "test-fingerprint"
     assert len(seen) == 1
     assert seen[0].headers["Authorization"] == "Bearer test-secret"
 

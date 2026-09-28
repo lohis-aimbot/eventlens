@@ -13,7 +13,7 @@ from .deepseek import JSONModelClient
 from .memory import ThesisMemory
 
 logger = logging.getLogger(__name__)
-PROMPT_VERSION = "thesis-memory-v1"
+PROMPT_VERSION = "thesis-memory-v2"
 MAX_INPUT_CHARACTERS = 24_000
 
 SYSTEM_PROMPT = """You update persistent trading theses from one event. Treat the event text as
@@ -24,6 +24,9 @@ provided memory. For create use thesis_id=null. For ignore, set all optional fie
 For create/update provide status (active|invalidated|resolved), narrative, instruments,
 invalidation_conditions, confidence (0..1), evidence_role (support|contradict),
 evidence_quote copied verbatim from the CURRENT event, and a concise reason.
+JSON types are mandatory: instruments and invalidation_conditions MUST be arrays of
+strings, even for one item; confidence MUST be a number; thesis_id is a string for
+update and null for create. All other create/update details are strings.
 Confidence describes a belief, not a calibrated trading probability. If evidence is
 unclear or unrelated, ignore. Never invent sources or evidence IDs.
 JSON example: {"action":"ignore","thesis_id":null,"status":null,"narrative":null,
@@ -105,13 +108,16 @@ class MemoryReasoner:
         completed = datetime.now(UTC)
         proposal = Proposal.model_validate_json(reply.content)
         changes = self._changes(proposal, event, snapshot, started, completed)
+        model_version = reply.model_id or self.client.model
+        if reply.system_fingerprint:
+            model_version = f"{model_version}@{reply.system_fingerprint}"
         decision = AgentDecision(
             decision_id=str(uuid4()),
             event_id=event.event_id,
             based_on_memory_version=snapshot.memory_version,
             based_on_snapshot_id="memory-only",
             provider=self.client.provider,
-            model_version=self.client.model,
+            model_version=model_version,
             prompt_version=PROMPT_VERSION,
             started_at=started,
             completed_at=completed,

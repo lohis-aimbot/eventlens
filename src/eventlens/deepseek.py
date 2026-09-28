@@ -13,6 +13,8 @@ class ModelResponse(BaseModel):
     content: str = Field(min_length=1)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    model_id: str | None = None
+    system_fingerprint: str | None = None
 
 
 class JSONModelClient(Protocol):
@@ -96,6 +98,8 @@ class DeepSeekClient:
                 content=first["message"]["content"],
                 input_tokens=usage["prompt_tokens"],
                 output_tokens=usage["completion_tokens"],
+                model_id=raw.get("model"),
+                system_fingerprint=raw.get("system_fingerprint"),
             )
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
             raise ModelCallError("Malformed or empty DeepSeek response") from exc

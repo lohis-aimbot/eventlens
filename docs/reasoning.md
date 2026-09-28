@@ -2,6 +2,8 @@
 
 The optional `reason` command sends one manually supplied event and the current committed thesis snapshot to a JSON-capable model. The adapter currently uses DeepSeek `deepseek-flash` with thinking disabled, JSON output mode, a 45-second timeout and at most two retries for transient failures. `JSONModelClient` is the provider-neutral interface. No model training is involved.
 
+DeepSeek's [current model/pricing documentation](https://api-docs.deepseek.com/quick_start/pricing/) labels the `deepseek-flash` API name as **DeepSeek-V4.1-Flash**. The API response itself reports `model: deepseek-flash`, not that full marketing version. When present, EventLens appends the provider-reported `system_fingerprint` to the persisted `model_version`, for example `deepseek-flash@<fingerprint>`. This preserves a serving fingerprint alongside the alias; it does not independently prove model internals or ensure the alias never changes. Recheck the provider mapping for later runs.
+
 The model may return `ignore`, `create` or `update`. A change must include a verbatim quote from the current event, the thesis state and rationale. Updates must name an existing thesis ID; the application assigns new IDs. The application validates structure, quotes, IDs and memory revisions, stamps all decision times, and commits through SQLite. It always sets `target=None`; the memory store rejects any non-null target. Model output cannot place an order or approve risk.
 
 ## Local setup and one-event run
@@ -31,6 +33,6 @@ The command requires a separate database path so live reasoning cannot accidenta
 
 ## Acceptance and limits
 
-Offline tests use a fake model and an HTTP mock to verify create/update/ignore, evidence and ID rejection, persistence, deduplication, request format, token accounting, transient retry, nonretryable rejection and truncated output. CI makes no paid API calls. A real call remains an explicit, user-controlled smoke test; its results should be inspected manually because structural validation cannot establish factual truth or reliable trading judgment.
+Offline tests use a fake model and an HTTP mock to verify create/update/ignore, evidence and ID rejection, persistence, deduplication, request format, token accounting, response model/fingerprint capture, transient retry, nonretryable rejection and truncated output. CI makes no paid API calls. A real call remains an explicit, user-controlled smoke test; its results should be inspected manually because structural validation cannot establish factual truth or reliable trading judgment. The [FOMC case study](fomc-memory-case.md) records one such manual run, including a rejected schema-violating response before the prompt was revised.
 
 The model's confidence is a subjective belief, not a calibrated probability. A verbatim quote only proves that text was present in the supplied event; it does not prove the source is authentic or the interpretation is correct. The full event and active thesis context are sent to the API. Do not use private or licensed content without the right to send it. There is no automatic collector, source validation, semantic deduplication, market data, position state, risk engine or execution in this stage.

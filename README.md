@@ -119,3 +119,5 @@ Defined but **not implemented**: semantic source filtering, source verification,
 The LLM stage stops at memory updates for review. See [memory storage and acceptance](docs/memory.md). The deterministic demo still uses predetermined decisions; the optional `reason` command invokes DeepSeek. All non-null portfolio targets remain rejected. There is no live trading path.
 
 See [architecture and interface contracts](docs/architecture.md) for data semantics, concurrency, failure handling and future acceptance boundaries.
+
+The [FOMC memory case study](docs/fomc-memory-case.md) records a two-event DeepSeek run against official September and November 2024 statements. It demonstrates one thesis created and later revised, with historical source times kept separate from the 2026 replay receipt times. It is not a return study or a backtest.
