@@ -28,20 +28,28 @@ def event(key: str, text: str) -> Event:
     )
 
 
-def proposal(action: str, quote: str, *, thesis_id: str | None = None,
-             role: str = "support", status: str = "active") -> str:
-    return json.dumps({
-        "action": action,
-        "thesis_id": thesis_id,
-        "status": status,
-        "narrative": "Supply disruption remains under review",
-        "instruments": ["USO"],
-        "invalidation_conditions": ["Verified restoration"],
-        "confidence": 0.6,
-        "evidence_role": role,
-        "evidence_quote": quote,
-        "reason": "The new report changes the supply thesis",
-    })
+def proposal(
+    action: str,
+    quote: str,
+    *,
+    thesis_id: str | None = None,
+    role: str = "support",
+    status: str = "active",
+) -> str:
+    return json.dumps(
+        {
+            "action": action,
+            "thesis_id": thesis_id,
+            "status": status,
+            "narrative": "Supply disruption remains under review",
+            "instruments": ["USO"],
+            "invalidation_conditions": ["Verified restoration"],
+            "confidence": 0.6,
+            "evidence_role": role,
+            "evidence_quote": quote,
+            "reason": "The new report changes the supply thesis",
+        }
+    )
 
 
 class FakeClient:
@@ -78,8 +86,15 @@ def test_create_update_and_duplicate_without_extra_paid_call(tmp_path):
     assert client.calls == 1
 
     second = event("e2", "Operator reports verified restoration")
-    client.responses.append(proposal("update", "verified restoration", thesis_id=thesis.thesis_id,
-                                     role="contradict", status="invalidated"))
+    client.responses.append(
+        proposal(
+            "update",
+            "verified restoration",
+            thesis_id=thesis.thesis_id,
+            role="contradict",
+            status="invalidated",
+        )
+    )
     updated = run(reasoner.process(second))
     changed = updated.decision.thesis_changes[0].thesis
     assert updated.memory_version == 2
@@ -92,21 +107,33 @@ def test_create_update_and_duplicate_without_extra_paid_call(tmp_path):
 
 def test_ignore_records_decision_without_thesis_change(tmp_path):
     store = SQLiteThesisMemory(tmp_path / "memory.sqlite")
-    response = json.dumps({"action": "ignore", "thesis_id": None, "status": None,
-                           "narrative": None, "instruments": None,
-                           "invalidation_conditions": None, "confidence": None,
-                           "evidence_role": None, "evidence_quote": None,
-                           "reason": "Irrelevant"})
+    response = json.dumps(
+        {
+            "action": "ignore",
+            "thesis_id": None,
+            "status": None,
+            "narrative": None,
+            "instruments": None,
+            "invalidation_conditions": None,
+            "confidence": None,
+            "evidence_role": None,
+            "evidence_quote": None,
+            "reason": "Irrelevant",
+        }
+    )
     result = run(MemoryReasoner(FakeClient(response), store).process(event("e1", "Sports score")))
     assert result.decision.thesis_changes == ()
     assert run(store.snapshot(as_of=datetime.now(UTC))).theses == ()
 
 
-@pytest.mark.parametrize("response,match", [
-    ("not json", "JSON"),
-    (proposal("create", "fabricated words"), "absent"),
-    (proposal("update", "Pipeline shutdown", thesis_id="nonexistent"), "unknown"),
-])
+@pytest.mark.parametrize(
+    "response,match",
+    [
+        ("not json", "JSON"),
+        (proposal("create", "fabricated words"), "absent"),
+        (proposal("update", "Pipeline shutdown", thesis_id="nonexistent"), "unknown"),
+    ],
+)
 def test_invalid_proposal_keeps_raw_event_but_no_belief(tmp_path, response, match):
     store = SQLiteThesisMemory(tmp_path / "memory.sqlite")
     item = event("e1", "Pipeline shutdown confirmed")
@@ -125,9 +152,15 @@ def test_deepseek_request_format_and_usage():
         assert body["model"] == "deepseek-flash"
         assert body["response_format"] == {"type": "json_object"}
         assert body["thinking"] == {"type": "disabled"}
-        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
-                                                   "message": {"content": '{"action":"ignore"}'}}],
-                                          "usage": {"prompt_tokens": 14, "completion_tokens": 8}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"finish_reason": "stop", "message": {"content": '{"action":"ignore"}'}}
+                ],
+                "usage": {"prompt_tokens": 14, "completion_tokens": 8},
+            },
+        )
 
     client = DeepSeekClient("test-secret", transport=httpx.MockTransport(handler))
     result = run(client.complete_json(system="JSON", user="event"))
@@ -154,10 +187,17 @@ def test_deepseek_rejects_http_errors_without_leaking_body(status, attempts):
 
 
 def test_deepseek_rejects_truncated_json():
-    client = DeepSeekClient("test-secret", transport=httpx.MockTransport(
-        lambda request: httpx.Response(200, json={"choices": [{"finish_reason": "length",
-                                                               "message": {"content": "{}"}}],
-                                                   "usage": {"prompt_tokens": 1,
-                                                             "completion_tokens": 1}})))
+    client = DeepSeekClient(
+        "test-secret",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"finish_reason": "length", "message": {"content": "{}"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                },
+            )
+        ),
+    )
     with pytest.raises(ModelCallError, match="incomplete"):
         run(client.complete_json(system="JSON", user="event"))

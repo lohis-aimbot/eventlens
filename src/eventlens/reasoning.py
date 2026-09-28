@@ -1,4 +1,5 @@
 """Memory-only reasoning: validated LLM proposals become traceable thesis revisions."""
+
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -46,9 +47,15 @@ class Proposal(BaseModel):
 
     @model_validator(mode="after")
     def coherent(self) -> Self:
-        details = (self.status, self.narrative, self.instruments,
-                   self.invalidation_conditions, self.confidence,
-                   self.evidence_role, self.evidence_quote)
+        details = (
+            self.status,
+            self.narrative,
+            self.instruments,
+            self.invalidation_conditions,
+            self.confidence,
+            self.evidence_role,
+            self.evidence_quote,
+        )
         if self.action == "ignore":
             if self.thesis_id is not None or any(value is not None for value in details):
                 raise ValueError("Ignore must not propose a thesis change")
@@ -86,9 +93,9 @@ class MemoryReasoner:
         await self.memory.record_event(event)
         previous = await self.memory.decision_for_event(event.event_id)
         if previous is not None:
-            return ReasoningResult(decision=previous,
-                                   memory_version=previous.based_on_memory_version + 1,
-                                   reused=True)
+            return ReasoningResult(
+                decision=previous, memory_version=previous.based_on_memory_version + 1, reused=True
+            )
         started = datetime.now(UTC)
         snapshot = await self.memory.snapshot(as_of=started)
         user = self._context(event, snapshot)
@@ -98,31 +105,56 @@ class MemoryReasoner:
         completed = datetime.now(UTC)
         proposal = Proposal.model_validate_json(reply.content)
         changes = self._changes(proposal, event, snapshot, started, completed)
-        decision = AgentDecision(decision_id=str(uuid4()), event_id=event.event_id,
-                                 based_on_memory_version=snapshot.memory_version,
-                                 based_on_snapshot_id="memory-only", provider=self.client.provider,
-                                 model_version=self.client.model, prompt_version=PROMPT_VERSION,
-                                 started_at=started, completed_at=completed,
-                                 valid_until=completed+timedelta(minutes=2),
-                                 thesis_changes=changes, target=None, rationale=proposal.reason)
+        decision = AgentDecision(
+            decision_id=str(uuid4()),
+            event_id=event.event_id,
+            based_on_memory_version=snapshot.memory_version,
+            based_on_snapshot_id="memory-only",
+            provider=self.client.provider,
+            model_version=self.client.model,
+            prompt_version=PROMPT_VERSION,
+            started_at=started,
+            completed_at=completed,
+            valid_until=completed + timedelta(minutes=2),
+            thesis_changes=changes,
+            target=None,
+            rationale=proposal.reason,
+        )
         version = await self.memory.commit(decision)
-        logger.info("reasoning_committed event_id=%s decision_id=%s action=%s input_tokens=%s output_tokens=%s",
-                    event.event_id, decision.decision_id, proposal.action,
-                    reply.input_tokens, reply.output_tokens)
-        return ReasoningResult(decision=decision, memory_version=version,
-                               input_tokens=reply.input_tokens, output_tokens=reply.output_tokens)
+        logger.info(
+            "reasoning_committed event_id=%s decision_id=%s action=%s input_tokens=%s output_tokens=%s",
+            event.event_id,
+            decision.decision_id,
+            proposal.action,
+            reply.input_tokens,
+            reply.output_tokens,
+        )
+        return ReasoningResult(
+            decision=decision,
+            memory_version=version,
+            input_tokens=reply.input_tokens,
+            output_tokens=reply.output_tokens,
+        )
 
     @staticmethod
     def _context(event: Event, snapshot: MemorySnapshot) -> str:
-        return json.dumps({
-            "event": event.model_dump(mode="json"),
-            "memory_version": snapshot.memory_version,
-            "theses": [thesis.model_dump(mode="json") for thesis in snapshot.theses],
-        }, ensure_ascii=False)
+        return json.dumps(
+            {
+                "event": event.model_dump(mode="json"),
+                "memory_version": snapshot.memory_version,
+                "theses": [thesis.model_dump(mode="json") for thesis in snapshot.theses],
+            },
+            ensure_ascii=False,
+        )
 
     @staticmethod
-    def _changes(proposal: Proposal, event: Event, snapshot: MemorySnapshot,
-                 started: datetime, completed: datetime) -> tuple[ThesisChange, ...]:
+    def _changes(
+        proposal: Proposal,
+        event: Event,
+        snapshot: MemorySnapshot,
+        started: datetime,
+        completed: datetime,
+    ) -> tuple[ThesisChange, ...]:
         if proposal.action == "ignore":
             return ()
         assert proposal.status is not None
@@ -143,12 +175,22 @@ class MemoryReasoner:
         destination = support if proposal.evidence_role == "support" else against
         if event.event_id not in destination:
             destination.append(event.event_id)
-        thesis = Thesis(thesis_id=old.thesis_id if old else str(uuid4()),
-                        revision=old.revision+1 if old else 1, status=proposal.status,
-                        narrative=proposal.narrative, instruments=proposal.instruments,
-                        supporting_event_ids=tuple(support), contradicting_event_ids=tuple(against),
-                        invalidation_conditions=proposal.invalidation_conditions,
-                        confidence=proposal.confidence, created_at=old.created_at if old else completed,
-                        updated_at=completed, review_at=completed+timedelta(hours=1))
-        return (ThesisChange(expected_revision=old.revision if old else 0,
-                             thesis=thesis, reason=proposal.reason),)
+        thesis = Thesis(
+            thesis_id=old.thesis_id if old else str(uuid4()),
+            revision=old.revision + 1 if old else 1,
+            status=proposal.status,
+            narrative=proposal.narrative,
+            instruments=proposal.instruments,
+            supporting_event_ids=tuple(support),
+            contradicting_event_ids=tuple(against),
+            invalidation_conditions=proposal.invalidation_conditions,
+            confidence=proposal.confidence,
+            created_at=old.created_at if old else completed,
+            updated_at=completed,
+            review_at=completed + timedelta(hours=1),
+        )
+        return (
+            ThesisChange(
+                expected_revision=old.revision if old else 0, thesis=thesis, reason=proposal.reason
+            ),
+        )

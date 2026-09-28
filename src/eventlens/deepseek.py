@@ -1,4 +1,5 @@
 """DeepSeek Chat Completions adapter; credentials never enter model input or Git."""
+
 import asyncio
 import os
 from typing import Any, Protocol, Self
@@ -30,8 +31,14 @@ class DeepSeekClient:
     model = "deepseek-flash"
     endpoint = "https://api.deepseek.com/chat/completions"
 
-    def __init__(self, api_key: str, *, transport: httpx.AsyncBaseTransport | None = None,
-                 timeout_seconds: float = 45, max_retries: int = 2) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        timeout_seconds: float = 45,
+        max_retries: int = 2,
+    ) -> None:
         if not api_key or timeout_seconds <= 0 or max_retries < 0:
             raise ValueError("API key, positive timeout and nonnegative retries required")
         self._api_key = api_key
@@ -49,8 +56,7 @@ class DeepSeekClient:
     async def complete_json(self, *, system: str, user: str) -> ModelResponse:
         payload = {
             "model": self.model,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
             "max_tokens": 1200,
@@ -63,7 +69,9 @@ class DeepSeekClient:
                     response = await client.post(self.endpoint, headers=headers, json=payload)
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     if attempt == self._max_retries:
-                        raise ModelCallError("DeepSeek request failed after bounded retries") from exc
+                        raise ModelCallError(
+                            "DeepSeek request failed after bounded retries"
+                        ) from exc
                 else:
                     if response.status_code in {408, 429, 500, 502, 503, 504}:
                         if attempt == self._max_retries:
@@ -84,8 +92,10 @@ class DeepSeekClient:
             if first["finish_reason"] != "stop":
                 raise ModelCallError("DeepSeek response was incomplete")
             usage = raw["usage"]
-            return ModelResponse(content=first["message"]["content"],
-                                 input_tokens=usage["prompt_tokens"],
-                                 output_tokens=usage["completion_tokens"])
+            return ModelResponse(
+                content=first["message"]["content"],
+                input_tokens=usage["prompt_tokens"],
+                output_tokens=usage["completion_tokens"],
+            )
         except (KeyError, IndexError, TypeError, ValueError, ValidationError) as exc:
             raise ModelCallError("Malformed or empty DeepSeek response") from exc

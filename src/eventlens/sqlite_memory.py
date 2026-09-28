@@ -249,7 +249,9 @@ class SQLiteThesisMemory:
     def _decision_for_event(self, event_id: str) -> AgentDecision | None:
         db = self._connect()
         try:
-            row = db.execute("SELECT payload FROM decisions WHERE event_id=?", (event_id,)).fetchone()
+            row = db.execute(
+                "SELECT payload FROM decisions WHERE event_id=?", (event_id,)
+            ).fetchone()
             return AgentDecision.model_validate_json(row[0]) if row else None
         finally:
             db.close()

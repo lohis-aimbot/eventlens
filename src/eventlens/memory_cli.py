@@ -126,7 +126,9 @@ def main() -> None:
     commands.add_parser("history").add_argument("thesis_id")
     commands.add_parser("event").add_argument("event_id")
     commands.add_parser("snapshot").add_argument("--as-of")
-    commands.add_parser("reason", help="Run one DeepSeek thesis update from a local event JSON file").add_argument("event_file", type=Path)
+    commands.add_parser(
+        "reason", help="Run one DeepSeek thesis update from a local event JSON file"
+    ).add_argument("event_file", type=Path)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     asyncio.run(run(args))
