@@ -4,7 +4,7 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: durable Thesis Memory MVP (v0.3).** SQLite now stores raw evidence, immutable thesis revisions and decision history. A deterministic synthetic demo exercises creation, reinforcement, invalidation and restart recovery. There is no real LLM call, live event feed, portfolio execution, risk implementation or broker connection.
+**Status: memory-only LLM integration (v0.4).** SQLite stores raw evidence, immutable thesis revisions and decision history. A DeepSeek adapter can propose a thesis creation, update or ignore decision from one manually supplied event; code validates the proposal before committing. Offline tests cover this path. A real API smoke test requires a locally configured key and has not been run in CI. There is no live event feed, portfolio execution, risk implementation or broker connection.
 
 ## The core idea
 
@@ -43,7 +43,9 @@ eventlens/
 ├── README.md
 ├── pyproject.toml
 ├── docs/
-│   └── architecture.md
+│   ├── architecture.md
+│   ├── memory.md
+│   └── reasoning.md
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -51,6 +53,8 @@ eventlens/
 │   ├── memory.py       # Durable ThesisMemory contract and revision conflicts
 │   ├── sqlite_memory.py # Transactional SQLite implementation and history queries
 │   ├── memory_cli.py    # Synthetic demo and inspection commands
+│   ├── deepseek.py      # DeepSeek API adapter behind a JSON model interface
+│   ├── reasoning.py     # Proposal validation and memory-only orchestration
 │   ├── agent.py        # Provider-agnostic TradingAgent interface
 │   ├── portfolio.py    # Observed state and target validation interfaces
 │   ├── risk.py         # Deterministic HardRiskEngine interface
@@ -58,18 +62,19 @@ eventlens/
 │   └── runtime.py      # Future orchestration and audit interfaces
 ├── tests/
 │   ├── test_contracts.py
-│   └── test_memory.py
+│   ├── test_memory.py
+│   └── test_reasoning.py
 └── .github/workflows/
     └── tests.yml
 ```
 
-One Python package, clear module boundaries, no microservices. Pydantic is the only runtime dependency. Future source, LLM, storage and execution implementations must sit behind these interfaces.
+One Python package, clear module boundaries, no microservices. Pydantic and HTTPX are the runtime dependencies. The model client interface allows another API provider without changing memory storage.
 
 ## Thesis lifecycle
 
-1. Persist the raw event and filter duplicates, unverifiable sources and irrelevant material.
+1. Persist the raw event. Semantic duplicate and source-authenticity filters are planned; this stage only rejects conflicting event IDs.
 2. Load committed thesis memory, observed positions, pending orders and current market data.
-3. Ask the agent for evidence-linked thesis revisions and an optional target portfolio.
+3. Ask the agent for evidence-linked thesis revisions. This stage forbids target portfolios.
 4. Validate the response and its references, then commit beliefs with optimistic concurrency checks.
 5. If a target exists, validate it against current positions and independently evaluate hard risk.
 6. Record approved shadow intent and subsequent execution feedback separately from beliefs.
@@ -96,12 +101,21 @@ mypy src
 
 The demo uses a simulated January 1, 2026 clock and invented supply events. It creates `data/memory-demo.sqlite` locally. Repeating the demo is idempotent. Use a dedicated demo database, never a production memory store. No positions or orders are created. Add `--verbose` before the subcommand for logs. `--database PATH` selects another local SQLite file. All runtime data remains outside Git. The old `eventlens demo` command, EUR/USD fixtures, rule-based signals, event study, backtester and database adapters have been removed. The previous implementation remains accessible in Git history.
 
+To try one real model call, create a **separate** local event JSON file matching `Event` in `contracts.py`, with a unique `event_id`, source URL/reference, actual source publication time, actual time received and source text. Use timezone-aware ISO 8601 timestamps. Then set `DEEPSEEK_API_KEY` in the shell that runs the CLI and call:
+
+```bash
+eventlens-memory --database data/research.sqlite reason path/to/event.json
+eventlens-memory --database data/research.sqlite snapshot
+```
+
+Never put the key in JSON, a committed file or the command line. The `reason` command sends the event and current theses to DeepSeek and incurs API charges. Local event files are treated as manually supplied, unverified research input; there is no automatic collection or source authentication. See [LLM reasoning and setup](docs/reasoning.md) for the exact contract and failure behavior.
+
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, query CLI and tests.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, query CLI and tests.
 
-Defined but **not implemented**: semantic source filtering, provider adapters, real reasoning orchestration, portfolio reconciliation, risk limits and shadow fills. No model/provider or broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
+Defined but **not implemented**: semantic source filtering, source verification, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 
-The memory stage stops here for review. See [memory storage and acceptance](docs/memory.md). A future stage can connect a real LLM to propose thesis updates; this release uses only predetermined decisions and rejects non-null portfolio targets. There is no live trading path.
+The LLM stage stops at memory updates for review. See [memory storage and acceptance](docs/memory.md). The deterministic demo still uses predetermined decisions; the optional `reason` command invokes DeepSeek. All non-null portfolio targets remain rejected. There is no live trading path.
 
 See [architecture and interface contracts](docs/architecture.md) for data semantics, concurrency, failure handling and future acceptance boundaries.

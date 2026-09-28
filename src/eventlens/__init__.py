@@ -1,3 +1,3 @@
-"""EventLens: persistent thesis memory; no live agent or executor."""
+"""EventLens: durable thesis memory and guarded LLM reasoning."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

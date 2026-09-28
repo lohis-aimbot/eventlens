@@ -242,6 +242,18 @@ class SQLiteThesisMemory:
         if row[1] > stamp(started) or event.received_timestamp > started:
             raise ValueError("Evidence was unavailable at reasoning start")
 
+    async def decision_for_event(self, event_id: str) -> AgentDecision | None:
+        """Return an already committed decision before any paid model call."""
+        return await asyncio.to_thread(self._decision_for_event, event_id)
+
+    def _decision_for_event(self, event_id: str) -> AgentDecision | None:
+        db = self._connect()
+        try:
+            row = db.execute("SELECT payload FROM decisions WHERE event_id=?", (event_id,)).fetchone()
+            return AgentDecision.model_validate_json(row[0]) if row else None
+        finally:
+            db.close()
+
     async def history(self, thesis_id: str) -> tuple[RevisionRecord, ...]:
         return await asyncio.to_thread(self._history, thesis_id)
 

@@ -1,6 +1,6 @@
 # Event → Thesis Memory → Position
 
-This document describes the overall design. Durable SQLite thesis storage is now implemented; see [memory stage](memory.md) for its guarantees and limitations. Other interfaces remain future obligations.
+This document describes the overall design. Durable SQLite thesis storage and memory-only DeepSeek reasoning are implemented; see [memory stage](memory.md) and [reasoning stage](reasoning.md). Portfolio, risk and execution interfaces remain future obligations.
 
 ## Core objects
 
@@ -27,14 +27,15 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 |---|---|---|
 | events | EventSource.stream | Async event stream; each adapter owns rate limits, retry, logging and stable IDs |
 | events | EventFilter.evaluate | Deduplicate and validate provenance; ambiguous sources quarantine |
-| memory | ThesisMemory.record_event / snapshot / commit | Durable evidence and atomic, version-checked thesis history |
-| agent | TradingAgent.decide | Existing LLM API behind a provider-neutral boundary; validated structured proposal |
+| memory | ThesisMemory.record_event / snapshot / decision_for_event / commit | Durable evidence and atomic, version-checked thesis history |
+| reasoning / deepseek | MemoryReasoner.process / JSONModelClient.complete_json | One event to validated memory-only proposal through an interchangeable model client |
+| agent | TradingAgent.decide | Future full portfolio decision behind a provider-neutral boundary |
 | portfolio | PortfolioState.snapshot / TargetValidator.validate | Authoritative account state; validate complete desired exposures |
 | risk | HardRiskEngine.assess | Independent checks against account state, market data and operator policy |
 | execution | ShadowExecutor.record | Idempotent recording of current risk-approved intent only |
 | runtime | EventRuntime.handle / AuditSink.append | Future lifecycle coordination and append-only audit |
 
-SQLite provides durable memory. The demonstration uses explicitly predetermined decisions and no model call. There is no fake risk approval or fabricated fill.
+SQLite provides durable memory. The synthetic demonstration uses predetermined decisions; the separate `reason` CLI can call DeepSeek and commit only valid thesis changes. There is no fake risk approval or fabricated fill.
 
 ## Beliefs and positions are separate
 
@@ -64,6 +65,6 @@ Persist cycle progress separately: received → filtered → reasoned → memory
 
 Before any executor exists, deterministic risk implementation must test per-asset/gross/net exposure, losses, stale data, spread, order rate and emergency stop behavior. Shadow execution must model costs and latency explicitly. Live credentials, broker adapters, model training, RL and a full backtester are outside this rebuild.
 
-## Memory stage and next review
+## Current stage and next review
 
-The SQLite implementation and synthetic CLI now exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. Contract and storage tests cover atomicity, conflicting updates and evidence availability. Semantic duplicate detection and an actual agent remain pending. After acceptance, connect an existing frontier LLM API for memory-only reasoning; risk and shadow execution remain later stages.
+The SQLite implementation and synthetic CLI exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. The DeepSeek memory-only path can propose create/update/ignore, but its output is checked against the current event and existing thesis IDs before commit. Offline tests cover this path; real provider behavior must be checked separately with a user-owned key. Semantic duplicate detection, source verification, portfolio decisions, risk and shadow execution remain later stages.

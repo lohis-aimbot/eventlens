@@ -19,6 +19,10 @@ class ThesisMemory(Protocol):
         """Return committed revisions visible at an aware UTC cutoff, not future revisions."""
         ...
 
+    async def decision_for_event(self, event_id: str) -> AgentDecision | None:
+        """Find a committed trigger decision to avoid repeating a paid inference."""
+        ...
+
     async def commit(self, decision: AgentDecision) -> int:
         """Atomically append decision + thesis revisions and return new memory version.
 

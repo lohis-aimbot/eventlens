@@ -8,6 +8,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .contracts import AgentDecision, Event, Thesis, ThesisChange
+from .deepseek import DeepSeekClient
+from .reasoning import MemoryReasoner
 from .sqlite_memory import SQLiteThesisMemory
 
 
@@ -90,15 +92,24 @@ async def run(args: argparse.Namespace) -> None:
     if args.command == "demo":
         await demo(args.database)
         return
+    if args.command == "reason":
+        if args.database == Path("data/memory-demo.sqlite"):
+            raise ValueError("Choose a separate --database PATH for real model reasoning")
+        event = Event.model_validate_json(args.event_file.read_text(encoding="utf-8"))
+        reasoning_result = await MemoryReasoner(
+            DeepSeekClient.from_environment(), SQLiteThesisMemory(args.database)
+        ).process(event)
+        print(reasoning_result.model_dump_json(indent=2))
+        return
     if not args.database.is_file():
         raise ValueError("Database does not exist; run demo or create a memory store first")
     memory = SQLiteThesisMemory(args.database)
     if args.command == "history":
-        result = [row.model_dump(mode="json") for row in await memory.history(args.thesis_id)]
-        print(json.dumps(result, indent=2))
+        history_rows = [row.model_dump(mode="json") for row in await memory.history(args.thesis_id)]
+        print(json.dumps(history_rows, indent=2))
     elif args.command == "event":
-        event = await memory.get_event(args.event_id)
-        print(event.model_dump_json(indent=2) if event else "null")
+        stored_event = await memory.get_event(args.event_id)
+        print(stored_event.model_dump_json(indent=2) if stored_event else "null")
     else:
         cutoff = datetime.fromisoformat(args.as_of) if args.as_of else datetime.now(UTC)
         print((await memory.snapshot(as_of=cutoff)).model_dump_json(indent=2))
@@ -115,6 +126,7 @@ def main() -> None:
     commands.add_parser("history").add_argument("thesis_id")
     commands.add_parser("event").add_argument("event_id")
     commands.add_parser("snapshot").add_argument("--as-of")
+    commands.add_parser("reason", help="Run one DeepSeek thesis update from a local event JSON file").add_argument("event_file", type=Path)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     asyncio.run(run(args))
