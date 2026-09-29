@@ -21,4 +21,5 @@ jobs:
       - run: eventlens-memory demo
       - run: eventlens-memory history demo-supply
       - run: eventlens-fed --help
+      - run: eventlens-market examples/synthetic-ctrader-ticks.json
       - run: python -m build

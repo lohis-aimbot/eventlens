@@ -6,6 +6,8 @@ A foundation for a stateful, real-time event-driven trading agent powered by exi
 
 **Status: official-source polling and memory-only LLM integration (v0.5).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or broker connection.
 
+**Current research milestone:** EUR/USD intraday historical-tick feasibility. The repository now contains an offline cTrader Bid/Ask decoder and quote-quality inspector with synthetic tests. It has **not** yet authenticated to a Pepperstone account or validated real tick coverage. See [market-data feasibility](docs/market-data.md) before making any backtest claim.
+
 ## The core idea
 
 A new event is evidence in an ongoing story. It may support an existing thesis, contradict it, create a new one, or be irrelevant. The agent considers that evidence together with remembered theses, current market conditions and observed positions before proposing a new portfolio.
@@ -42,12 +44,15 @@ This design intentionally lets the LLM reason about portfolio decisions. It does
 eventlens/
 ├── README.md
 ├── pyproject.toml
+├── examples/
+│   └── synthetic-ctrader-ticks.json
 ├── docs/
 │   ├── architecture.md
 │   ├── memory.md
 │   ├── reasoning.md
 │   ├── fed-intake.md
-│   └── fomc-memory-case.md
+│   ├── fomc-memory-case.md
+│   └── market-data.md
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -59,6 +64,10 @@ eventlens/
 │   ├── reasoning.py     # Proposal validation and memory-only orchestration
 │   ├── fed.py           # Official FOMC RSS intake, validation and durable inbox
 │   ├── fed_cli.py       # One-shot or continuous polling command
+│   ├── market_data.py   # Side-specific historical ticks and as-of quotes
+│   ├── ctrader_ticks.py # Pure Open API historical-tick decoder
+│   ├── market_quality.py # Quote coverage and spread diagnostics
+│   ├── market_cli.py    # Offline tick-page inspection
 │   ├── agent.py        # Provider-agnostic TradingAgent interface
 │   ├── portfolio.py    # Observed state and target validation interfaces
 │   ├── risk.py         # Deterministic HardRiskEngine interface
@@ -68,7 +77,8 @@ eventlens/
 │   ├── test_contracts.py
 │   ├── test_memory.py
 │   ├── test_reasoning.py
-│   └── test_fed.py
+│   ├── test_fed.py
+│   └── test_market_data.py
 └── .github/workflows/
     └── tests.yml
 ```
@@ -100,6 +110,7 @@ eventlens-memory history demo-supply
 eventlens-memory event demo-event-2
 eventlens-memory snapshot --as-of 2026-01-01T00:01:00Z
 eventlens-fed --database data/fed.sqlite
+eventlens-market examples/synthetic-ctrader-ticks.json
 pytest -q
 ruff check .
 mypy src
@@ -126,7 +137,7 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path currently has an offline historical tick decoder and quality report using synthetic pages only.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 

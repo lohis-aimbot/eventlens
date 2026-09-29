@@ -1,0 +1,33 @@
+{
+  "event_source_time": "2026-01-01T00:00:00Z",
+  "available_time": "2026-01-01T00:00:02Z",
+  "availability_basis": "assumed",
+  "pages": [
+    {
+      "instrument": "EUR/USD",
+      "side": "bid",
+      "digits": 5,
+      "request_start": "2026-01-01T00:00:00Z",
+      "request_end": "2026-01-01T00:00:10Z",
+      "has_more": false,
+      "tick_data": [
+        {"timestamp": 1767225610000, "tick": 110020},
+        {"timestamp": 5000, "tick": 110010},
+        {"timestamp": 5000, "tick": 110000}
+      ]
+    },
+    {
+      "instrument": "EUR/USD",
+      "side": "ask",
+      "digits": 5,
+      "request_start": "2026-01-01T00:00:00Z",
+      "request_end": "2026-01-01T00:00:10Z",
+      "has_more": false,
+      "tick_data": [
+        {"timestamp": 1767225610000, "tick": 110040},
+        {"timestamp": 5000, "tick": 110030},
+        {"timestamp": 5000, "tick": 110020}
+      ]
+    }
+  ]
+}
