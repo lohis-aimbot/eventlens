@@ -20,4 +20,5 @@ jobs:
       - run: pytest -q
       - run: eventlens-memory demo
       - run: eventlens-memory history demo-supply
+      - run: eventlens-fed --help
       - run: python -m build

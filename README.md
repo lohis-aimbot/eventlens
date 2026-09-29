@@ -4,7 +4,7 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: memory-only LLM integration (v0.4).** SQLite stores raw evidence, immutable thesis revisions and decision history. A DeepSeek adapter can propose a thesis creation, update or ignore decision from one manually supplied event; code validates the proposal before committing. Offline tests and a manual real-API smoke test cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no live event feed, portfolio execution, risk implementation or broker connection.
+**Status: official-source polling and memory-only LLM integration (v0.5).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or broker connection.
 
 ## The core idea
 
@@ -45,7 +45,9 @@ eventlens/
 ├── docs/
 │   ├── architecture.md
 │   ├── memory.md
-│   └── reasoning.md
+│   ├── reasoning.md
+│   ├── fed-intake.md
+│   └── fomc-memory-case.md
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -55,6 +57,8 @@ eventlens/
 │   ├── memory_cli.py    # Synthetic demo and inspection commands
 │   ├── deepseek.py      # DeepSeek API adapter behind a JSON model interface
 │   ├── reasoning.py     # Proposal validation and memory-only orchestration
+│   ├── fed.py           # Official FOMC RSS intake, validation and durable inbox
+│   ├── fed_cli.py       # One-shot or continuous polling command
 │   ├── agent.py        # Provider-agnostic TradingAgent interface
 │   ├── portfolio.py    # Observed state and target validation interfaces
 │   ├── risk.py         # Deterministic HardRiskEngine interface
@@ -63,7 +67,8 @@ eventlens/
 ├── tests/
 │   ├── test_contracts.py
 │   ├── test_memory.py
-│   └── test_reasoning.py
+│   ├── test_reasoning.py
+│   └── test_fed.py
 └── .github/workflows/
     └── tests.yml
 ```
@@ -94,6 +99,7 @@ eventlens-memory demo
 eventlens-memory history demo-supply
 eventlens-memory event demo-event-2
 eventlens-memory snapshot --as-of 2026-01-01T00:01:00Z
+eventlens-fed --database data/fed.sqlite
 pytest -q
 ruff check .
 mypy src
@@ -108,13 +114,21 @@ eventlens-memory --database data/research.sqlite reason path/to/event.json
 eventlens-memory --database data/research.sqlite snapshot
 ```
 
-Never put the key in JSON, a committed file or the command line. The `reason` command sends the event and current theses to DeepSeek and incurs API charges. Local event files are treated as manually supplied, unverified research input; there is no automatic collection or source authentication. See [LLM reasoning and setup](docs/reasoning.md) for the exact contract and failure behavior.
+Never put the key in JSON, a committed file or the command line. The `reason` command sends the event and current theses to DeepSeek and incurs API charges. Local event files remain manually supplied, unverified research input; the separate Fed watcher checks its official source allowlist. See [LLM reasoning and setup](docs/reasoning.md) for the exact contract and failure behavior.
+
+The Fed watcher provides the first automatic source. Run `eventlens-fed --database data/fed.sqlite` once to baseline the current official feed without an API call, then repeat it to inspect newly collected raw events. To opt in to model reasoning, set `DEEPSEEK_API_KEY` and add `--reason`; `--watch --interval 60` keeps polling. On the Mac used for this project, the key can be read from Keychain without placing it in the command history:
+
+```bash
+DEEPSEEK_API_KEY="$(security find-generic-password -s eventlens-deepseek -a "$USER" -w)" eventlens-fed --database data/fed.sqlite --reason --watch --interval 60
+```
+
+See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and timestamp semantics. Polling RSS is for research intake; it does not guarantee subsecond availability.
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, query CLI and tests.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests.
 
-Defined but **not implemented**: semantic source filtering, source verification, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
+Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 
 The LLM stage stops at memory updates for review. See [memory storage and acceptance](docs/memory.md). The deterministic demo still uses predetermined decisions; the optional `reason` command invokes DeepSeek. All non-null portfolio targets remain rejected. There is no live trading path.
 

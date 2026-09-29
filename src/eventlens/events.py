@@ -1,4 +1,4 @@
-"""Provider-neutral input and filtering interfaces. No source adapters implemented."""
+"""Provider-neutral input contracts; the first poll-only Fed adapter lives in fed.py."""
 
 from collections.abc import AsyncIterator
 from typing import Protocol

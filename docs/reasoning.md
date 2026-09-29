@@ -1,6 +1,6 @@
 # Memory-only model reasoning — stage 2
 
-The optional `reason` command sends one manually supplied event and the current committed thesis snapshot to a JSON-capable model. The adapter currently uses DeepSeek `deepseek-flash` with thinking disabled, JSON output mode, a 45-second timeout and at most two retries for transient failures. `JSONModelClient` is the provider-neutral interface. No model training is involved.
+The optional `reason` command sends one manually supplied event and the current committed thesis snapshot to a JSON-capable model. The [Fed watcher](fed-intake.md) can now call the same memory-only reasoner for newly collected official statements when `--reason` is enabled. The adapter currently uses DeepSeek `deepseek-flash` with thinking disabled, JSON output mode, a 45-second timeout and at most two retries for transient failures. `JSONModelClient` is the provider-neutral interface. No model training is involved.
 
 DeepSeek's [current model/pricing documentation](https://api-docs.deepseek.com/quick_start/pricing/) labels the `deepseek-flash` API name as **DeepSeek-V4.1-Flash**. The API response itself reports `model: deepseek-flash`, not that full marketing version. When present, EventLens appends the provider-reported `system_fingerprint` to the persisted `model_version`, for example `deepseek-flash@<fingerprint>`. This preserves a serving fingerprint alongside the alias; it does not independently prove model internals or ensure the alias never changes. Recheck the provider mapping for later runs.
 

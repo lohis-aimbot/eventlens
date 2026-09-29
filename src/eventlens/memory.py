@@ -23,6 +23,10 @@ class ThesisMemory(Protocol):
         """Find a committed trigger decision to avoid repeating a paid inference."""
         ...
 
+    async def get_event(self, event_id: str) -> Event | None:
+        """Read previously recorded evidence for crash-safe collector recovery."""
+        ...
+
     async def commit(self, decision: AgentDecision) -> int:
         """Atomically append decision + thesis revisions and return new memory version.
 

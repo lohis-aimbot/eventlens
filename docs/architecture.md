@@ -1,6 +1,6 @@
 # Event → Thesis Memory → Position
 
-This document describes the overall design. Durable SQLite thesis storage and memory-only DeepSeek reasoning are implemented; see [memory stage](memory.md) and [reasoning stage](reasoning.md). Portfolio, risk and execution interfaces remain future obligations.
+This document describes the overall design. Durable SQLite thesis storage, memory-only DeepSeek reasoning and a first Fed RSS polling adapter are implemented; see [memory stage](memory.md), [reasoning stage](reasoning.md) and [Fed intake stage](fed-intake.md). Portfolio, risk and execution interfaces remain future obligations.
 
 ## Core objects
 
@@ -25,8 +25,10 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 
 | Module | Interface | Contract |
 |---|---|---|
-| events | EventSource.stream | Async event stream; each adapter owns rate limits, retry, logging and stable IDs |
-| events | EventFilter.evaluate | Deduplicate and validate provenance; ambiguous sources quarantine |
+| events | EventSource.stream | Future general async stream abstraction |
+| fed | FedMonetarySource.fetch_items / fetch_article | First poll-only adapter; HTTP retry, pacing, source URL checks and stable IDs |
+| fed | FedInbox / FedWatcher.poll_once | Baseline, durable pending/quarantine states, deduplication and optional memory-only reasoning |
+| events | EventFilter.evaluate | Future cross-source semantic deduplication and provenance checks |
 | memory | ThesisMemory.record_event / snapshot / decision_for_event / commit | Durable evidence and atomic, version-checked thesis history |
 | reasoning / deepseek | MemoryReasoner.process / JSONModelClient.complete_json | One event to validated memory-only proposal through an interchangeable model client |
 | agent | TradingAgent.decide | Future full portfolio decision behind a provider-neutral boundary |
@@ -35,7 +37,7 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 | execution | ShadowExecutor.record | Idempotent recording of current risk-approved intent only |
 | runtime | EventRuntime.handle / AuditSink.append | Future lifecycle coordination and append-only audit |
 
-SQLite provides durable memory. The synthetic demonstration uses predetermined decisions; the separate `reason` CLI can call DeepSeek and commit only valid thesis changes. There is no fake risk approval or fabricated fill.
+SQLite provides durable memory and the Fed collector inbox. The synthetic demonstration uses predetermined decisions; the separate `reason` CLI or Fed watcher can call DeepSeek and commit only valid thesis changes. There is no fake risk approval or fabricated fill.
 
 ## Beliefs and positions are separate
 
