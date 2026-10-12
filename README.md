@@ -6,7 +6,7 @@ A foundation for a stateful, real-time event-driven trading agent powered by exi
 
 **Status: official-source polling and memory-only LLM integration (v0.5).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or broker connection.
 
-**Current research milestone:** EUR/USD intraday historical-tick feasibility. The repository now contains an offline cTrader Bid/Ask decoder and quote-quality inspector with synthetic tests. It has **not** yet authenticated to a Pepperstone account or validated real tick coverage. See [market-data feasibility](docs/market-data.md) before making any backtest claim.
+**Current research milestone:** EUR/USD intraday historical-tick feasibility. The repository contains an offline cTrader Bid/Ask decoder and quote-quality inspector with synthetic tests. A read-only cTrader Algo probe has also been compiled and run in a Pepperstone **Demo** account against server historical trading data around the June 18, 2025 FOMC statement. That verifies a narrow replay-data window, not live event availability, executable fills or strategy performance. See [market-data feasibility](docs/market-data.md).
 
 ## The core idea
 
@@ -46,6 +46,8 @@ eventlens/
 ├── pyproject.toml
 ├── examples/
 │   └── synthetic-ctrader-ticks.json
+├── ctrader/
+│   └── EventLensTickProbe.cs # Backtesting-only, read-only Demo data check
 ├── docs/
 │   ├── architecture.md
 │   ├── memory.md
@@ -137,7 +139,7 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path currently has an offline historical tick decoder and quality report using synthetic pages only.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder with synthetic tests and a separate, read-only cTrader Demo replay probe. The replay probe does not feed the Python pipeline or produce return labels yet.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 
