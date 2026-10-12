@@ -1,0 +1,5 @@
+Invented fixture; these are not broker quotes.
+EVENTLENS_PROBE|start|symbol=EURUSD|mode=demo_backtest_only|focus_utc=2025-06-18T18:00:00.0000000Z|orders=none
+EVENTLENS_PROBE|summary|symbol=EURUSD|ticks=2|invalid_quotes=0|crossed_quotes=0|backward_times=0
+EVENTLENS_PROBE|checkpoint|focus_utc=2025-06-18T18:00:00.0000000Z|offset_seconds=5|quote_utc=2025-06-18T18:00:05.1000000Z|bid=1.10000|ask=1.10020
+EVENTLENS_PROBE|checkpoint|focus_utc=2025-06-18T18:00:00.0000000Z|offset_seconds=65|quote_utc=2025-06-18T18:01:05.1000000Z|bid=1.10100|ask=1.10120

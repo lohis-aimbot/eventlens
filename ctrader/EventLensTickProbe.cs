@@ -8,7 +8,19 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class EventLensTickProbe : Robot
     {
-        private static readonly DateTime FocusUtc = new DateTime(2025, 6, 18, 18, 0, 0, DateTimeKind.Utc);
+        // One first replay snapshot at/after each scheduled offset. These are
+        // market-data checkpoints, not executable fills or measured feed latency.
+        private static readonly int[] CheckpointOffsetsSeconds =
+            { 1, 5, 30, 60, 61, 65, 90, 120, 301, 305, 330, 360, 1801, 1805, 1830, 1860 };
+
+        [Parameter("Focus UTC", DefaultValue = "2025-06-18T18:00:00Z")]
+        public string FocusUtcText { get; set; }
+
+        private DateTime _focusUtc;
+        private readonly DateTime[] _checkpointTimes = new DateTime[CheckpointOffsetsSeconds.Length];
+        private readonly double[] _checkpointBids = new double[CheckpointOffsetsSeconds.Length];
+        private readonly double[] _checkpointAsks = new double[CheckpointOffsetsSeconds.Length];
+        private readonly bool[] _checkpointSeen = new bool[CheckpointOffsetsSeconds.Length];
         private long _count;
         private long _invalidQuotes;
         private long _crossedQuotes;
@@ -37,7 +49,25 @@ namespace cAlgo.Robots
                 return;
             }
 
-            Print("EVENTLENS_PROBE|start|symbol={0}|mode=backtest_only|orders=none", SymbolName);
+            if (Account.IsLive)
+            {
+                Print("EVENTLENS_PROBE|refused|reason=demo_account_required");
+                Stop();
+                return;
+            }
+
+            if (!DateTime.TryParseExact(FocusUtcText, "yyyy-MM-ddTHH:mm:ssZ",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out _focusUtc))
+            {
+                Print("EVENTLENS_PROBE|refused|reason=invalid_focus_utc");
+                Stop();
+                return;
+            }
+
+            Print("EVENTLENS_PROBE|start|symbol={0}|mode=demo_backtest_only|focus_utc={1}|orders=none",
+                SymbolName, _focusUtc.ToString("o", CultureInfo.InvariantCulture));
         }
 
         protected override void OnTick()
@@ -71,16 +101,19 @@ namespace cAlgo.Robots
             }
 
             if (ask < bid)
+            {
                 _crossedQuotes++;
+                return;
+            }
 
             var spreadPips = (ask - bid) / Symbol.PipSize;
             _minSpreadPips = Math.Min(_minSpreadPips, spreadPips);
             _maxSpreadPips = Math.Max(_maxSpreadPips, spreadPips);
 
-            if (timestamp >= FocusUtc.AddMinutes(-1) && timestamp < FocusUtc.AddMinutes(1))
+            if (timestamp >= _focusUtc.AddMinutes(-1) && timestamp < _focusUtc.AddMinutes(1))
                 _focusWindowTicks++;
 
-            if (timestamp < FocusUtc)
+            if (timestamp < _focusUtc)
             {
                 _hasBeforeFocus = true;
                 _lastBeforeFocus = timestamp;
@@ -93,6 +126,17 @@ namespace cAlgo.Robots
                 _firstAtOrAfterFocus = timestamp;
                 _bidAtOrAfterFocus = bid;
                 _askAtOrAfterFocus = ask;
+            }
+
+            for (var i = 0; i < CheckpointOffsetsSeconds.Length; i++)
+            {
+                if (!_checkpointSeen[i] && timestamp >= _focusUtc.AddSeconds(CheckpointOffsetsSeconds[i]))
+                {
+                    _checkpointSeen[i] = true;
+                    _checkpointTimes[i] = timestamp;
+                    _checkpointBids[i] = bid;
+                    _checkpointAsks[i] = ask;
+                }
             }
 
             if (_count <= 3)
@@ -117,7 +161,7 @@ namespace cAlgo.Robots
                 _count > _invalidQuotes ? _maxSpreadPips.ToString("R", CultureInfo.InvariantCulture) : "none");
 
             Print("EVENTLENS_PROBE|focus|focus_utc={0}|window_2m_ticks={1}|last_before_utc={2}|bid_before={3}|ask_before={4}|first_at_or_after_utc={5}|bid_after={6}|ask_after={7}|after_lag_ms={8}",
-                FocusUtc.ToString("o", CultureInfo.InvariantCulture),
+                _focusUtc.ToString("o", CultureInfo.InvariantCulture),
                 _focusWindowTicks,
                 _hasBeforeFocus ? _lastBeforeFocus.ToString("o", CultureInfo.InvariantCulture) : "none",
                 _hasBeforeFocus ? _bidBeforeFocus.ToString("R", CultureInfo.InvariantCulture) : "none",
@@ -125,7 +169,17 @@ namespace cAlgo.Robots
                 _hasAtOrAfterFocus ? _firstAtOrAfterFocus.ToString("o", CultureInfo.InvariantCulture) : "none",
                 _hasAtOrAfterFocus ? _bidAtOrAfterFocus.ToString("R", CultureInfo.InvariantCulture) : "none",
                 _hasAtOrAfterFocus ? _askAtOrAfterFocus.ToString("R", CultureInfo.InvariantCulture) : "none",
-                _hasAtOrAfterFocus ? (long)(_firstAtOrAfterFocus - FocusUtc).TotalMilliseconds : -1);
+                _hasAtOrAfterFocus ? (long)(_firstAtOrAfterFocus - _focusUtc).TotalMilliseconds : -1);
+
+            for (var i = 0; i < CheckpointOffsetsSeconds.Length; i++)
+            {
+                Print("EVENTLENS_PROBE|checkpoint|focus_utc={0}|offset_seconds={1}|quote_utc={2}|bid={3}|ask={4}",
+                    _focusUtc.ToString("o", CultureInfo.InvariantCulture),
+                    CheckpointOffsetsSeconds[i],
+                    _checkpointSeen[i] ? _checkpointTimes[i].ToString("o", CultureInfo.InvariantCulture) : "none",
+                    _checkpointSeen[i] ? _checkpointBids[i].ToString("R", CultureInfo.InvariantCulture) : "none",
+                    _checkpointSeen[i] ? _checkpointAsks[i].ToString("R", CultureInfo.InvariantCulture) : "none");
+            }
         }
     }
 }

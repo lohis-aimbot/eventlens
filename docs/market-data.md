@@ -1,6 +1,6 @@
 # EUR/USD historical tick feasibility
 
-This stage prepares the intraday data path before any event study or strategy backtest. A separate, read-only probe has been run against Pepperstone cTrader **Demo** server historical trading data. It does **not** establish live information latency, trade execution quality or event alpha. The checked-in JSON example remains invented data.
+This stage prepares the intraday data path before any event study or strategy backtest. A separate, read-only probe has been run against Pepperstone cTrader **Demo** server historical trading data. It does **not** establish live information latency, trade execution quality or event alpha. The checked-in JSON and probe-log examples remain invented data. See the [three-event timing-label preview](fomc-replay-preview.md) for the first real Demo replay observations and their limits.
 
 ## Why Bid and Ask ticks matter
 
@@ -12,6 +12,8 @@ cTrader Open API requests [historical ticks](https://help.ctrader.com/open-api/s
 - `ctrader_ticks.py`: pure decoder for normalized cTrader response pages; validates UTC windows, relative timestamps, price and page truncation status.
 - `market_quality.py`: side counts, first/last tick, largest consecutive gap, crossed-quote count and quote/spread coverage at event availability and +1s, +5s, +10s, +30s, +1m, +5m, +30m. Out-of-window horizons are explicitly marked unavailable.
 - `eventlens-market`: offline JSON inspection command. It never connects to cTrader and cannot submit orders.
+- `replay_labels.py`: typed Demo snapshot checkpoints and availability-delay/forward-horizon labels. It rejects event/focus mismatches, duplicate or early checkpoints, late snapshots and invalid probe summaries.
+- `eventlens-replay`: offline CLI to turn a local read-only probe log into JSON labels. No broker or LLM call occurs.
 
 Run the invented example:
 
@@ -23,7 +25,17 @@ The JSON envelope has an explicit `event_source_time`, `available_time`, and `av
 
 ## Pepperstone Demo cTrader Algo probe
 
-`ctrader/EventLensTickProbe.cs` is a C# cBot used only for a historical-data feasibility check. It refuses to run outside cTrader Backtesting (`IsBacktesting` guard), requests no external access, and contains no order calls. In cTrader Mac, create a C# cBot named `EventLensTickProbe`, paste this source, save and build it, select a **Demo** EURUSD instance, open **Backtesting**, and choose **server trading data (accurate)**. Do not use the instance's real-time Start button. The built-in backtester may require a .NET SDK on Mac. The probe prints summary statistics; it does not export broker data.
+`ctrader/EventLensTickProbe.cs` is a C# cBot used only for a historical-data feasibility check. It refuses to run outside cTrader Backtesting (`IsBacktesting` guard) or on a live account (`Account.IsLive` guard), requests no external access, and contains no order calls. In cTrader Mac, create a C# cBot named `EventLensTickProbe`, paste this source, save and build it, select a **Demo** EURUSD instance, open **Backtesting**, and choose **server trading data (accurate)**. Do not use the instance's real-time Start button. The built-in backtester may require a .NET SDK on Mac. Set `Focus UTC` to the verified ISO value such as `2025-06-18T18:00:00Z`, then leave the field to commit it. Inspect the `EVENTLENS_PROBE|start` log line before accepting results; changing the date range alone does not change the focus parameter. The probe prints 16 compact checkpoints at predefined offsets and summary statistics; it does not export a full broker tick stream.
+
+To inspect an **invented** log fixture without cTrader:
+
+```bash
+eventlens-replay examples/synthetic-ctrader-probe.log \
+  --event-id synthetic-fomc --instrument EUR/USD \
+  --source-time 2025-06-18T18:00:00Z
+```
+
+For a real Demo log, supply the local cTrader Backtesting `log.txt` path and the official source time. Keep the full output in ignored `data/`. The CLI requires one Demo-backtest start marker, one zero-error summary, and one focus time matching the independently verified source time. An absent or late checkpoint yields an explicit unavailable label; it never fills an old price forward as if a trade occurred. Its `mid_return` and `spread_only_*_return` fields are **indicative quote changes**, not fills, PnL or alpha.
 
 On October 12, 2026, the probe was compiled successfully in Pepperstone cTrader 5.9.154 and replayed June 18–19, 2025 (UTC). The [Federal Reserve statement](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250618a.htm) was scheduled for June 18 at 2:00 p.m. EDT, or 18:00 UTC. cTrader's log reported:
 
@@ -38,7 +50,7 @@ On October 12, 2026, the probe was compiled successfully in Pepperstone cTrader 
 | First quote at or after 18:00 UTC | 18:00:00.108, Bid 1.14970 / Ask 1.14994 |
 | Backtest trades | 0 |
 
-The 108 ms gap from scheduled publication to the first later replay quote is a **market-data timestamp gap**, not measured Fed feed receipt, parser latency, order latency or a fill. Some replay updates had zero Bid/Ask spread, so historical execution costs require separate validation. The two-day maximum gap is not a claim about the FOMC minute. The probe did not persist raw quotes, which keeps the local footprint small.
+The 108 ms gap from scheduled publication to the first later replay quote is a **market-data timestamp gap**, not measured Fed feed receipt, parser latency, order latency or a fill. Some replay updates had zero Bid/Ask spread, so historical execution costs require separate validation. The two-day maximum gap is not a claim about the FOMC minute. The probe emits only compact checkpoints rather than persisting the full tick stream.
 
 ## Later Open API gate (Demo, view-only)
 
@@ -47,4 +59,4 @@ The 108 ms gap from scheduled publication to the first later replay quote is a *
 3. Resolve the account-specific EUR/USD symbol ID and digits, then request a **small** historical interval around a selected FOMC release, with pre-event warm-up and enough post-event time for the 30-minute horizon. Request Bid and Ask separately. Record whether the API actually returned both sides, timestamps and `hasMore` status. If truncated, split the interval or paginate without dropping same-millisecond ticks; never silently mark partial history complete.
 4. Compare gaps, spreads and quote coverage with the Algo replay result. Keep broker data and account identifiers locally under ignored `data/`; commit only code, documentation and synthetic fixtures. Strategy backtesting comes only after the point-in-time data gate passes.
 
-Historical backfills contain **market quote timestamps**, not the time EventLens would have received those quotes live. Similarly, the Fed archive's publication time is not a measured live receipt time. The `available_time` used here must be supplied separately from a measured collector receipt (or explicitly labeled a simulated latency assumption). Do not interpret this quality report as a return label, fill or profitability estimate.
+Historical backfills contain **market quote timestamps**, not the time EventLens would have received those quotes live. Similarly, the Fed archive's publication time is not a measured live receipt time. The `available_time` used here must be supplied separately from a measured collector receipt (or explicitly labeled a simulated latency assumption). The new labels use **assumed** availability only. Do not interpret a quote-quality or replay-label result as a fill or profitability estimate.

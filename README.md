@@ -4,9 +4,9 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: official-source polling and memory-only LLM integration (v0.5).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or broker connection.
+**Status: official-source polling, memory-only LLM integration and Demo replay timing labels (v0.6).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
 
-**Current research milestone:** EUR/USD intraday historical-tick feasibility. The repository contains an offline cTrader Bid/Ask decoder and quote-quality inspector with synthetic tests. A read-only cTrader Algo probe has also been compiled and run in a Pepperstone **Demo** account against server historical trading data around the June 18, 2025 FOMC statement. That verifies a narrow replay-data window, not live event availability, executable fills or strategy performance. See [market-data feasibility](docs/market-data.md).
+**Current research milestone:** EUR/USD × FOMC point-in-time alignment. The repository contains an offline cTrader Bid/Ask decoder, quote-quality inspector and a read-only, Demo-backtesting-only cTrader Algo probe. Three historical FOMC windows were replayed; assumed information delays were aligned to later quote checkpoints to produce indicative labels. This does not establish live event availability, executable fills or strategy performance. See [market-data methods](docs/market-data.md) and the [three-event preview](docs/fomc-replay-preview.md).
 
 ## The core idea
 
@@ -45,7 +45,8 @@ eventlens/
 ├── README.md
 ├── pyproject.toml
 ├── examples/
-│   └── synthetic-ctrader-ticks.json
+│   ├── synthetic-ctrader-ticks.json
+│   └── synthetic-ctrader-probe.log
 ├── ctrader/
 │   └── EventLensTickProbe.cs # Backtesting-only, read-only Demo data check
 ├── docs/
@@ -54,7 +55,8 @@ eventlens/
 │   ├── reasoning.md
 │   ├── fed-intake.md
 │   ├── fomc-memory-case.md
-│   └── market-data.md
+│   ├── market-data.md
+│   └── fomc-replay-preview.md
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -70,6 +72,8 @@ eventlens/
 │   ├── ctrader_ticks.py # Pure Open API historical-tick decoder
 │   ├── market_quality.py # Quote coverage and spread diagnostics
 │   ├── market_cli.py    # Offline tick-page inspection
+│   ├── replay_labels.py # Assumed-availability quote checkpoint labels
+│   ├── replay_cli.py    # Offline Demo probe-log labeling
 │   ├── agent.py        # Provider-agnostic TradingAgent interface
 │   ├── portfolio.py    # Observed state and target validation interfaces
 │   ├── risk.py         # Deterministic HardRiskEngine interface
@@ -80,7 +84,8 @@ eventlens/
 │   ├── test_memory.py
 │   ├── test_reasoning.py
 │   ├── test_fed.py
-│   └── test_market_data.py
+│   ├── test_market_data.py
+│   └── test_replay_labels.py
 └── .github/workflows/
     └── tests.yml
 ```
@@ -113,6 +118,7 @@ eventlens-memory event demo-event-2
 eventlens-memory snapshot --as-of 2026-01-01T00:01:00Z
 eventlens-fed --database data/fed.sqlite
 eventlens-market examples/synthetic-ctrader-ticks.json
+eventlens-replay examples/synthetic-ctrader-probe.log --event-id synthetic-fomc --source-time 2025-06-18T18:00:00Z
 pytest -q
 ruff check .
 mypy src
@@ -139,7 +145,7 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder with synthetic tests and a separate, read-only cTrader Demo replay probe. The replay probe does not feed the Python pipeline or produce return labels yet.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and an offline parser that produces **indicative** timing labels from compact probe checkpoints. The 2024/2025 Demo observations are documented as a small data check, not a trading backtest.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 
