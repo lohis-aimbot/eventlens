@@ -114,7 +114,9 @@ def label_replay(
     """
     if max_checkpoint_lag <= timedelta(0):
         raise ValueError("Maximum checkpoint lag must be positive")
-    if any(delay < 0 for delay in delays_seconds) or any(horizon <= 0 for horizon in horizons_seconds):
+    if any(delay < 0 for delay in delays_seconds) or any(
+        horizon <= 0 for horizon in horizons_seconds
+    ):
         raise ValueError("Delays must be nonnegative and horizons positive")
 
     points = {point.offset_seconds: point for point in run.checkpoints}
@@ -180,9 +182,16 @@ def parse_probe_log(
         kind, *parts = line.split(marker, 1)[1].split("|")
         fields = dict(field.split("=", 1) for field in parts)
         if kind == "start":
-            if started or fields.get("mode") != "demo_backtest_only" or fields.get("orders") != "none":
+            if (
+                started
+                or fields.get("mode") != "demo_backtest_only"
+                or fields.get("orders") != "none"
+            ):
                 raise ValueError("Log must contain one Demo backtest-only run")
-            if fields.get("symbol", "").replace("/", "").upper() != instrument.replace("/", "").upper():
+            if (
+                fields.get("symbol", "").replace("/", "").upper()
+                != instrument.replace("/", "").upper()
+            ):
                 raise ValueError("Probe symbol differs from requested instrument")
             started = True
             continue

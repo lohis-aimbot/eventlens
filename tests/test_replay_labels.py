@@ -67,8 +67,7 @@ def test_reject_future_or_late_checkpoint():
             )
         )
     result = label_replay(
-        run(checkpoint(5, "1.10000", "1.10020", lag_ms=3000),
-            checkpoint(65, "1.10100", "1.10120")),
+        run(checkpoint(5, "1.10000", "1.10020", lag_ms=3000), checkpoint(65, "1.10100", "1.10120")),
         delays_seconds=(5,),
         horizons_seconds=(60,),
     )[0]
@@ -78,11 +77,21 @@ def test_reject_future_or_late_checkpoint():
 
 def test_source_time_and_utc_guards():
     with pytest.raises(ValidationError, match="Focus must equal"):
-        ReplayRun(event_id="x", instrument="EUR/USD", source_time=T,
-                  focus_time=T + timedelta(seconds=1), checkpoints=())
+        ReplayRun(
+            event_id="x",
+            instrument="EUR/USD",
+            source_time=T,
+            focus_time=T + timedelta(seconds=1),
+            checkpoints=(),
+        )
     with pytest.raises(ValidationError):
-        ReplayRun(event_id="x", instrument="EUR/USD", source_time=datetime(2025, 6, 18, 18),
-                  focus_time=T, checkpoints=())
+        ReplayRun(
+            event_id="x",
+            instrument="EUR/USD",
+            source_time=datetime(2025, 6, 18, 18),
+            focus_time=T,
+            checkpoints=(),
+        )
     with pytest.raises(ValidationError, match="Duplicate checkpoint"):
         run(checkpoint(1, "1.1", "1.2"), checkpoint(1, "1.1", "1.2"))
 
@@ -101,7 +110,9 @@ def test_parse_probe_log_and_label(tmp_path):
         encoding="utf-8",
     )
     parsed = parse_probe_log(log, event_id="fed-2025-06-18", instrument="EUR/USD", source_time=T)
-    assert label_replay(parsed, delays_seconds=(5,), horizons_seconds=(60,))[0].status == "available"
+    assert (
+        label_replay(parsed, delays_seconds=(5,), horizons_seconds=(60,))[0].status == "available"
+    )
 
 
 def test_parse_rejects_wrong_event_time_and_invalid_probe(tmp_path):

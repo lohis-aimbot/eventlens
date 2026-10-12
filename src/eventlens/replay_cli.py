@@ -15,7 +15,9 @@ def main() -> None:
     parser.add_argument("log", type=Path, help="Local cTrader backtest log text")
     parser.add_argument("--event-id", required=True)
     parser.add_argument("--instrument", default="EUR/USD")
-    parser.add_argument("--source-time", required=True, help="Verified publication time, ISO 8601 UTC")
+    parser.add_argument(
+        "--source-time", required=True, help="Verified publication time, ISO 8601 UTC"
+    )
     args = parser.parse_args()
     run = parse_probe_log(
         args.log,
