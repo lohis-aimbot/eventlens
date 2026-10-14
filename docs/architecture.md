@@ -34,6 +34,7 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 | decision_protocol | ResearchPositionProposal / ResearchProposalAgent.propose | Typed target-direction proposal linked to supplied thesis revisions; future adapter only |
 | decision_protocol | DecisionReplayProtocol / check_proposal | Pinned experiment controls and pure supplied-context checks; no execution authorization |
 | historical_context | build_historical_context | Separate assumed replay clocks, commit-time memory selection and allowlisted historical model inputs |
+| replay_inference | ReplayInferenceRunner.run | Two-stage run-local memory/proposal reasoning with frozen metadata and actual processing-budget checks; no execution |
 | latency | processing_latency | Observed receipt/start/completion trace; source age is not network latency |
 | research_data | ResearchWindow / parse_probe_window | Offline provenance and bounded Demo snapshots; no historical live receipt claim |
 | research_replay | replay_roundtrip / accounting_grid | Fixed-position cost/timing diagnostics, independent of agent and future execution |
@@ -84,3 +85,5 @@ v0.8 adds assumed spread floors, per-fill minimum commissions and typed Demo pro
 v0.9 defines [research position proposals and frozen rules](decision-protocol.md). This separate contract does not change SQLite's memory-only target prohibition or the existing model prompt. Offline checks may derive fixed signed research units but neither commit a target nor call a model, risk engine or executor. A future historical context adapter must preserve real capture times separately from simulated availability; the current `AgentContext` cannot silently turn a 2026 archive capture into a 2025 decision input.
 
 v0.10 implements that separate [historical input adapter](historical-context.md). It keeps original archive clocks in an audit envelope and explicitly assumed availability in a model view. Quotes and run-local memory are selected at a pinned cutoff without future prices or uncommitted revisions. There is no conversion into a live `AgentContext`, model call, actual inference trace, target dispatch or fill. The v1 decision manifest remains unchanged.
+
+v0.11 connects the JSON client to this historical view for [one-event research inference](replay-inference.md). It preserves actual API clocks, run-local hypothetical memory commits, a later portfolio cutoff and retained failures/abstentions. It neither writes live SQLite targets nor dispatches positions. A [real acceptance case](llm-replay-case.md) passed only the slow predeclared processing budget; it did not satisfy the primary budget or validate alpha. Catalog orchestration, complete hard risk, fill integration and live shadow remain later work.

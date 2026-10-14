@@ -1,0 +1,51 @@
+{
+  "run_id": "synthetic-replay-run",
+  "current_event_id": "synthetic-fomc-event",
+  "archived_events": [
+    {
+      "event_id": "synthetic-fomc-event",
+      "source": "synthetic-fixture",
+      "source_type": "macro",
+      "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm",
+      "source_timestamp": "2025-01-29T19:00:00Z",
+      "received_timestamp": "2026-10-14T12:00:00Z",
+      "raw_text": "Invented text, NOT an actual Fed statement. Policy stance remains restrictive.",
+      "author": null
+    }
+  ],
+  "window": {
+    "event_id": "synthetic-fomc-event",
+    "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm",
+    "source_time": "2025-01-29T19:00:00Z",
+    "captured_at": "2026-10-14T12:01:00Z",
+    "instrument": "EUR/USD",
+    "provider": "synthetic",
+    "data_kind": "synthetic",
+    "sample_interval_ms": null,
+    "observations": [
+      {
+        "timestamp": "2025-01-29T19:00:59Z",
+        "bid": "1.1000",
+        "ask": "1.1002"
+      },
+      {
+        "timestamp": "2025-01-29T19:01:01.500Z",
+        "bid": "1.1001",
+        "ask": "1.1003"
+      },
+      {
+        "timestamp": "2025-01-29T19:01:02Z",
+        "bid": "1.1002",
+        "ask": "1.1004"
+      },
+      {
+        "timestamp": "2025-01-29T19:06:00Z",
+        "bid": "1.1200",
+        "ask": "1.1202"
+      }
+    ]
+  },
+  "latency_scenario": "slow_reasoning_assumed",
+  "assumed_market_delay_ms": 250,
+  "memory_history": []
+}

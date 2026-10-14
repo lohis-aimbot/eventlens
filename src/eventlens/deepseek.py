@@ -7,6 +7,19 @@ from typing import Any, Protocol, Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .contracts import Contract
+
+
+class JSONRequestSettings(Contract):
+    endpoint: str = "https://api.deepseek.com/chat/completions"
+    timeout_seconds: float = Field(gt=0)
+    max_retries: int = Field(ge=0)
+    max_tokens: int = Field(default=1200, gt=0)
+    response_format: str = "json_object"
+    thinking: str = "disabled"
+    stream: bool = False
+    temperature: str = "provider_default_omitted"
+
 
 class ModelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -26,6 +39,10 @@ class JSONModelClient(Protocol):
 
 class ModelCallError(RuntimeError):
     """No validated model response; caller must not commit a thesis update."""
+
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class DeepSeekClient:
@@ -47,6 +64,12 @@ class DeepSeekClient:
         self._transport = transport
         self._timeout = timeout_seconds
         self._max_retries = max_retries
+
+    @property
+    def request_settings(self) -> JSONRequestSettings:
+        return JSONRequestSettings(
+            endpoint=self.endpoint, timeout_seconds=self._timeout, max_retries=self._max_retries
+        )
 
     @classmethod
     def from_environment(cls) -> Self:
@@ -72,12 +95,14 @@ class DeepSeekClient:
                 except (httpx.TimeoutException, httpx.TransportError) as exc:
                     if attempt == self._max_retries:
                         raise ModelCallError(
-                            "DeepSeek request failed after bounded retries"
+                            "DeepSeek request failed after bounded retries", retryable=True
                         ) from exc
                 else:
                     if response.status_code in {408, 429, 500, 502, 503, 504}:
                         if attempt == self._max_retries:
-                            raise ModelCallError(f"DeepSeek temporary HTTP {response.status_code}")
+                            raise ModelCallError(
+                                f"DeepSeek temporary HTTP {response.status_code}", retryable=True
+                            )
                     elif response.is_error:
                         # Avoid logging provider response bodies or credential-bearing headers.
                         raise ModelCallError(f"DeepSeek HTTP {response.status_code}")

@@ -167,42 +167,55 @@ class MemoryReasoner:
         started: datetime,
         completed: datetime,
     ) -> tuple[ThesisChange, ...]:
-        if proposal.action == "ignore":
-            return ()
-        assert proposal.status is not None
-        assert proposal.narrative is not None
-        assert proposal.instruments is not None
-        assert proposal.invalidation_conditions is not None
-        assert proposal.confidence is not None
-        assert proposal.evidence_role is not None
-        assert proposal.evidence_quote is not None
-        if proposal.evidence_quote not in event.raw_text:
-            raise ValueError("Model evidence quote is absent from the current event")
-        by_id = {thesis.thesis_id: thesis for thesis in snapshot.theses}
-        old = by_id.get(proposal.thesis_id) if proposal.thesis_id else None
-        if proposal.action == "update" and old is None:
-            raise ValueError("Model referenced an unknown thesis ID")
-        support = list(old.supporting_event_ids) if old else []
-        against = list(old.contradicting_event_ids) if old else []
-        destination = support if proposal.evidence_role == "support" else against
-        if event.event_id not in destination:
-            destination.append(event.event_id)
-        thesis = Thesis(
-            thesis_id=old.thesis_id if old else str(uuid4()),
-            revision=old.revision + 1 if old else 1,
-            status=proposal.status,
-            narrative=proposal.narrative,
-            instruments=proposal.instruments,
-            supporting_event_ids=tuple(support),
-            contradicting_event_ids=tuple(against),
-            invalidation_conditions=proposal.invalidation_conditions,
-            confidence=proposal.confidence,
-            created_at=old.created_at if old else completed,
-            updated_at=completed,
-            review_at=completed + timedelta(hours=1),
-        )
-        return (
-            ThesisChange(
-                expected_revision=old.revision if old else 0, thesis=thesis, reason=proposal.reason
-            ),
-        )
+        return build_thesis_changes(proposal, event.event_id, event.raw_text, snapshot, completed)
+
+
+def build_thesis_changes(
+    proposal: Proposal,
+    event_id: str,
+    raw_text: str,
+    snapshot: MemorySnapshot,
+    completed: datetime,
+    *,
+    new_thesis_id: str | None = None,
+) -> tuple[ThesisChange, ...]:
+    """Pure evidence-linked changes; caller assigns live or explicit replay clocks."""
+    if proposal.action == "ignore":
+        return ()
+    assert proposal.status is not None
+    assert proposal.narrative is not None
+    assert proposal.instruments is not None
+    assert proposal.invalidation_conditions is not None
+    assert proposal.confidence is not None
+    assert proposal.evidence_role is not None
+    assert proposal.evidence_quote is not None
+    if proposal.evidence_quote not in raw_text:
+        raise ValueError("Model evidence quote is absent from the current event")
+    by_id = {thesis.thesis_id: thesis for thesis in snapshot.theses}
+    old = by_id.get(proposal.thesis_id) if proposal.thesis_id else None
+    if proposal.action == "update" and old is None:
+        raise ValueError("Model referenced an unknown thesis ID")
+    support = list(old.supporting_event_ids) if old else []
+    against = list(old.contradicting_event_ids) if old else []
+    destination = support if proposal.evidence_role == "support" else against
+    if event_id not in destination:
+        destination.append(event_id)
+    thesis = Thesis(
+        thesis_id=old.thesis_id if old else (new_thesis_id or str(uuid4())),
+        revision=old.revision + 1 if old else 1,
+        status=proposal.status,
+        narrative=proposal.narrative,
+        instruments=proposal.instruments,
+        supporting_event_ids=tuple(support),
+        contradicting_event_ids=tuple(against),
+        invalidation_conditions=proposal.invalidation_conditions,
+        confidence=proposal.confidence,
+        created_at=old.created_at if old else completed,
+        updated_at=completed,
+        review_at=completed + timedelta(hours=1),
+    )
+    return (
+        ThesisChange(
+            expected_revision=old.revision if old else 0, thesis=thesis, reason=proposal.reason
+        ),
+    )

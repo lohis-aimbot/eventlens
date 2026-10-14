@@ -132,3 +132,8 @@ The portfolio cutoff must reflect prior memory processing; total processing must
 the scenario budget. Over-budget cases are unavailable/rejected, never shifted back.
 Signals/fills must follow completed decisions. No inference trace, target dispatch,
 risk engine or ledger integration is implemented by this release.
+
+**Later-stage update:** v0.11 adds [single-event research inference](replay-inference.md)
+using these explicit views and actual processing clocks. This v0.10 builder remains
+pure and unchanged. The new runner still provides no risk approval, fills or broker
+connection; see the [real API acceptance and retained failure](llm-replay-case.md).
