@@ -123,3 +123,8 @@ events, but trusted multi-event persistence/recovery is not implemented here. Th
 research step is a frozen chronological catalog runner retaining all failures and
 abstentions. Hard risk and offline ledger integration require separate acceptance;
 live shadow and cTrader Demo execution remain later stages.
+
+**Later-stage update:** v0.12 implements that [chronological coordinator and separate
+registry](chronological-replay.md). The [eight-event acceptance](fomc-series-acceptance.md)
+retains five rejected portfolio responses and three validated abstentions. The original
+single-event runner remains separate; full risk, PnL and execution are unimplemented.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eventlens"
-version = "0.11.0"
+version = "0.12.0"
 description = "Event → Thesis Memory → Position: stateful trading-agent architecture"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -18,6 +18,7 @@ eventlens-replay = "eventlens.replay_cli:main"
 eventlens-research = "eventlens.research_cli:main"
 eventlens-decision = "eventlens.decision_cli:main"
 eventlens-infer = "eventlens.inference_cli:main"
+eventlens-series = "eventlens.series_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1", "mypy>=1.13,<2", "build>=1,<2"]

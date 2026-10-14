@@ -27,4 +27,5 @@ jobs:
       - run: eventlens-decision check examples/synthetic-position-proposal.json
       - run: eventlens-decision replay-context examples/synthetic-historical-context.json
       - run: eventlens-infer plan examples/synthetic-inference-case.json
+      - run: eventlens-series plan examples/synthetic-series-plan.json
       - run: python -m build

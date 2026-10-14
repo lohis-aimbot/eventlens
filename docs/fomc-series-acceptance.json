@@ -1,0 +1,379 @@
+{
+  "run_id": "fomc-2025-deepseek-series-v1",
+  "experiment_id": "6cf411e4e3683808347148bf616fb5025d83f0ff11a0412edb6c0c21bfcb7f3b",
+  "execution_authorized": false,
+  "episodes": [
+    {
+      "event_id": "fed-2025-01-29",
+      "state": "completed",
+      "status": "invalid_output",
+      "reason": "portfolio_response_validation_failed",
+      "direction": null,
+      "proposed_direction": "flat",
+      "processing_ms": 6852,
+      "memory_action": "ignore",
+      "input_revisions": 0,
+      "generated_revisions": 0,
+      "window_quality": {
+        "data_id": "8ac5b7b678b9d87dd2ae8326ea65729510f6380fed6826b7ef699a0a7a013578",
+        "observations": 2017,
+        "zero_spread_observations": 1189,
+        "max_observation_gap_ms": 5414,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "d0acefbb5baf61e343d0e965743e7ea9ef45ac3ae9a90323b8a014a6d8d00a09",
+      "portfolio_input_cutoff": "2025-01-29T19:01:04.344426+00:00",
+      "portfolio_quote_time": "2025-01-29T19:01:04.055000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 6852,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 6852,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 6852,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-03-19",
+      "state": "completed",
+      "status": "invalid_output",
+      "reason": "portfolio_response_validation_failed",
+      "direction": null,
+      "proposed_direction": "flat",
+      "processing_ms": 6344,
+      "memory_action": "create",
+      "input_revisions": 0,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "af9760357d57d6dfa81194a3db84664f8c463a30d02aac1d34b2d980a56ea269",
+        "observations": 2009,
+        "zero_spread_observations": 1499,
+        "max_observation_gap_ms": 10078,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "c243cdbbab699cc85b349086c1ff1febdcb49caae02adc5f27e9efe60e622954",
+      "portfolio_input_cutoff": "2025-03-19T18:01:03.759741+00:00",
+      "portfolio_quote_time": "2025-03-19T18:01:03.073000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 6344,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 6344,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 6344,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-05-07",
+      "state": "completed",
+      "status": "invalid_output",
+      "reason": "portfolio_response_validation_failed",
+      "direction": null,
+      "proposed_direction": "flat",
+      "processing_ms": 7957,
+      "memory_action": "update",
+      "input_revisions": 1,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "983ab48e293237a9a5f24d5baaede74193b349af067bdb3fe83040aeb3771ff2",
+        "observations": 1985,
+        "zero_spread_observations": 950,
+        "max_observation_gap_ms": 7677,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "9c728bc17dcea3fde671cd7839c6fd310edd90b5a303514296ce4ebdc5619036",
+      "portfolio_input_cutoff": "2025-05-07T18:01:04.646720+00:00",
+      "portfolio_quote_time": "2025-05-07T18:01:03+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 7957,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 7957,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 7957,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-06-18",
+      "state": "completed",
+      "status": "validated_proposal",
+      "reason": "schema_context_and_processing_budget_passed",
+      "direction": "flat",
+      "proposed_direction": "flat",
+      "processing_ms": 6052,
+      "memory_action": "update",
+      "input_revisions": 2,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "01b2b11a8b3ebc0c4f207a31deaae826f79b48e2b5752451e5d3c0e796bd2179",
+        "observations": 2094,
+        "zero_spread_observations": 866,
+        "max_observation_gap_ms": 5223,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "e8b074ce479a5f5f6c71a928ba9caa8e0e75ded9ae17349fd8027608e57ecec3",
+      "portfolio_input_cutoff": "2025-06-18T18:01:03.211481+00:00",
+      "portfolio_quote_time": "2025-06-18T18:01:02.100000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 6052,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 6052,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 6052,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-07-30",
+      "state": "completed",
+      "status": "invalid_output",
+      "reason": "portfolio_response_validation_failed",
+      "direction": null,
+      "proposed_direction": "flat",
+      "processing_ms": 6752,
+      "memory_action": "update",
+      "input_revisions": 3,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "65fcda2e36a201fe5f8b6e0ce0910dd7990ab8b1b102b85724541a53e1721cd2",
+        "observations": 2014,
+        "zero_spread_observations": 1252,
+        "max_observation_gap_ms": 6082,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "a98a703020bc4d0d8bf9d3e2d06385009f2dd56fa14a740f0e7bdbf43109c7dc",
+      "portfolio_input_cutoff": "2025-07-30T18:01:03.287957+00:00",
+      "portfolio_quote_time": "2025-07-30T18:01:02.196000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 6752,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 6752,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 6752,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-09-17",
+      "state": "completed",
+      "status": "validated_proposal",
+      "reason": "schema_context_and_processing_budget_passed",
+      "direction": "flat",
+      "proposed_direction": "flat",
+      "processing_ms": 7839,
+      "memory_action": "update",
+      "input_revisions": 4,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "14c65e8ad99be4f261ad4ded926ea48d2d918bec5dad13eee64d07ec6c67c22a",
+        "observations": 2165,
+        "zero_spread_observations": 1185,
+        "max_observation_gap_ms": 4923,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "a8b683abc00f09650e60103cb81afbcf0e8de1401155db991e5dbbfeed1632f0",
+      "portfolio_input_cutoff": "2025-09-17T18:01:03.807041+00:00",
+      "portfolio_quote_time": "2025-09-17T18:01:03.085000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 7839,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 7839,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 7839,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-10-29",
+      "state": "completed",
+      "status": "invalid_output",
+      "reason": "portfolio_response_validation_failed",
+      "direction": null,
+      "proposed_direction": "flat",
+      "processing_ms": 8438,
+      "memory_action": "update",
+      "input_revisions": 5,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "f53a1e8c2107529e1e65eaf549b078009ec79bf96c506faec7d27639190c309f",
+        "observations": 1936,
+        "zero_spread_observations": 1455,
+        "max_observation_gap_ms": 7806,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "b7cb33790767af9fd7df9f40da2786ca24b6e3fb3e78fdfcb290f3765f607361",
+      "portfolio_input_cutoff": "2025-10-29T18:01:03.625943+00:00",
+      "portfolio_quote_time": "2025-10-29T18:01:03.222000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 8438,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 8438,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 8438,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    },
+    {
+      "event_id": "fed-2025-12-10",
+      "state": "completed",
+      "status": "validated_proposal",
+      "reason": "schema_context_and_processing_budget_passed",
+      "direction": "flat",
+      "proposed_direction": "flat",
+      "processing_ms": 9312,
+      "memory_action": "update",
+      "input_revisions": 6,
+      "generated_revisions": 1,
+      "window_quality": {
+        "data_id": "5e8ee77742cec8c0650d565722a2b20c236bc0a6292a1c538d046abddd0063b7",
+        "observations": 2078,
+        "zero_spread_observations": 1512,
+        "max_observation_gap_ms": 5505,
+        "scope": "full_window_audit_only_not_model_input"
+      },
+      "portfolio_input_id": "6c781faaf1326eec5e87e7c962de6ee71e41691ecb5778682b4ab40bd62e0bd1",
+      "portfolio_input_cutoff": "2025-12-10T19:01:04.417814+00:00",
+      "portfolio_quote_time": "2025-12-10T19:01:03.031000+00:00",
+      "budget_diagnostics": [
+        {
+          "scenario": "five_seconds_assumed",
+          "reasoning_budget_ms": 3850,
+          "observed_processing_ms": 9312,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "poll_plus_reasoning_assumed",
+          "reasoning_budget_ms": 4850,
+          "observed_processing_ms": 9312,
+          "fits_processing_budget": false,
+          "scope": "processing_only_not_a_replayed_decision"
+        },
+        {
+          "scenario": "slow_reasoning_assumed",
+          "reasoning_budget_ms": 59850,
+          "observed_processing_ms": 9312,
+          "fits_processing_budget": true,
+          "scope": "processing_only_not_a_replayed_decision"
+        }
+      ]
+    }
+  ],
+  "api_calls_reserved": 16,
+  "unknown_calls": 0,
+  "known_input_tokens": 31331,
+  "known_output_tokens": 5956,
+  "calls_without_usage": 0,
+  "serving_models": [
+    "deepseek-flash"
+  ],
+  "serving_fingerprints": [
+    "aeb56401ca74e127821c4f9126dcb669"
+  ],
+  "stored_revisions": 7
+}
