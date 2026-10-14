@@ -2,6 +2,8 @@
 
 This milestone adds a small EUR/USD research ledger and a bounded Demo data sampler. It prepares the original **Event → Thesis Memory → Position** path for cost and timing checks. It does not connect LLM decisions to positions, implement a full backtester or establish alpha. Portfolio, hard risk and execution remain interfaces.
 
+v0.8 extends the cost contract with explicit spread floors and minimum commissions and uses `research-ledger-v2` case IDs. Default zero floors/minimums preserve earlier numeric accounting. The [cost/path follow-up](cost-path-check.md) records a March 100 ms replay and five assumed cost floors; the original evidence and historical v0.7 acceptance below remain unchanged.
+
 ## Evidence and sample selection
 
 `configs/fomc-2025.json` declares all eight scheduled 2025 FOMC statements before inspecting their quote-window results. The [official calendar](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm) and the linked statements identify each release. Times are stored in UTC; 14:00 New York is 19:00 UTC in winter and 18:00 UTC during daylight saving time. The separate August notation vote on strategy is outside this scheduled-statement sample.

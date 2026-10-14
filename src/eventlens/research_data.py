@@ -3,8 +3,9 @@
 import gzip
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
@@ -54,6 +55,87 @@ class ResearchCatalog(Contract):
         ):
             raise ValueError("Catalog source times must be unique and chronological")
         return self
+
+
+class DemoSymbolCost(Contract):
+    basis: Literal["demo_backtest_symbol_metadata"]
+    symbol: Literal["EURUSD"]
+    commission: Decimal = Field(ge=0)
+    commission_type: Literal[
+        "UsdPerMillionUsdVolume",
+        "UsdPerOneLot",
+        "PercentageOfTradingVolume",
+        "QuoteCurrencyPerOneLot",
+    ]
+    min_commission: Decimal = Field(ge=0)
+    min_commission_type: Identifier
+    min_commission_asset: Identifier
+    lot_size: Decimal = Field(gt=0)
+    pip_size: Decimal = Field(gt=0)
+    digits: int = Field(ge=0)
+
+
+class ProbeTickCoverage(Contract):
+    valid_ticks: int = Field(gt=0)
+    zero_spread_ticks: int = Field(ge=0)
+    max_tick_gap_ms: int = Field(ge=0)
+    first_utc: Timestamp
+    last_utc: Timestamp
+
+    @model_validator(mode="after")
+    def consistent(self) -> Self:
+        if self.zero_spread_ticks > self.valid_ticks or self.first_utc > self.last_utc:
+            raise ValueError("Invalid all-tick diagnostics")
+        return self
+
+
+class ProbeDiagnostics(Contract):
+    event_id: Identifier
+    data_id: Identifier
+    captured_at: Timestamp
+    symbol_cost: DemoSymbolCost
+    tick_coverage: ProbeTickCoverage
+
+
+def read_probe_diagnostics(path: Path, event: StudyEvent) -> ProbeDiagnostics:
+    window = parse_probe_window(path, event)
+    records: dict[str, dict[str, str]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "EVENTLENS_PROBE|" not in line:
+            continue
+        kind, *parts = line.split("EVENTLENS_PROBE|", 1)[1].split("|")
+        if kind not in {"symbol_cost", "window_quality"}:
+            continue
+        if kind in records:
+            raise ValueError("Duplicate probe diagnostic marker")
+        records[kind] = dict(part.split("=", 1) for part in parts)
+    if set(records) != {"symbol_cost", "window_quality"}:
+        raise ValueError("Updated probe cost and all-tick diagnostics required")
+    coverage = ProbeTickCoverage.model_validate(records["window_quality"])
+    start, end = event.source_time - timedelta(minutes=2), event.source_time + timedelta(minutes=35)
+    if not start <= coverage.first_utc <= coverage.last_utc <= end:
+        raise ValueError("All-tick diagnostics outside the declared event window")
+    if coverage.valid_ticks < len(window.observations):
+        raise ValueError("Sample count exceeds valid tick count")
+    if coverage.valid_ticks == len(window.observations):
+        gaps = [
+            (b.timestamp - a.timestamp) // timedelta(milliseconds=1)
+            for a, b in zip(window.observations, window.observations[1:])
+        ]
+        if (
+            coverage.first_utc != window.observations[0].timestamp
+            or coverage.last_utc != window.observations[-1].timestamp
+            or coverage.max_tick_gap_ms != max(gaps, default=0)
+            or coverage.zero_spread_ticks != sum(q.ask == q.bid for q in window.observations)
+        ):
+            raise ValueError("Complete all-tick counters conflict with sampled observations")
+    return ProbeDiagnostics(
+        event_id=event.event_id,
+        data_id=window.data_id,
+        captured_at=window.captured_at,
+        symbol_cost=DemoSymbolCost.model_validate(records["symbol_cost"]),
+        tick_coverage=coverage,
+    )
 
 
 def read_window(path: Path) -> ResearchWindow:

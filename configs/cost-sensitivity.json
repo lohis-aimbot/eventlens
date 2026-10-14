@@ -1,0 +1,11 @@
+{
+  "version": "eurusd-spread-floor-v1",
+  "scope": "All profiles are sensitivity assumptions, not verified broker fill costs. Commission is per-fill USD notional bps; spread floors widen around the observed midpoint without replacing raw data.",
+  "profiles": [
+    {"name": "floor_0", "commission_bps": "0.5", "slippage_bps": "0.25", "spread_floor_pips": "0"},
+    {"name": "floor_0_2", "commission_bps": "0.5", "slippage_bps": "0.25", "spread_floor_pips": "0.2"},
+    {"name": "floor_0_5", "commission_bps": "0.5", "slippage_bps": "0.25", "spread_floor_pips": "0.5"},
+    {"name": "floor_1", "commission_bps": "0.5", "slippage_bps": "0.25", "spread_floor_pips": "1"},
+    {"name": "floor_2", "commission_bps": "0.5", "slippage_bps": "0.25", "spread_floor_pips": "2"}
+  ]
+}

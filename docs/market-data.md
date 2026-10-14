@@ -64,3 +64,5 @@ Historical backfills contain **market quote timestamps**, not the time EventLens
 ## v0.7 follow-up
 
 The [offline accounting milestone](research-replay.md) adds bounded Demo snapshot sampling and independent long/short/flat cost scenarios. Existing compact checkpoints remain sparse evidence. The revised C# source passed an offline API-reference compile and native Demo Build/backtests, collecting 16,298 snapshots across all eight predeclared 2025 statements. All predeclared entry/exit endpoints were available; sampling gaps and zero-spread cost concerns remain explicitly flagged in the [data-quality audit](fomc-2025-data-quality.md). Defaults keep sampling off. No brokerage connector or orders were added.
+
+The [v0.8 follow-up](cost-path-check.md) adds full-window OnTick counters and Demo symbol commission metadata to the same read-only probe. A March replay at 100 ms retains all 4,992 valid ticks delivered to the probe but still has a 9.845-second gap. Exact source-side freshness, independent feed coverage and fees actually charged remain unverified.

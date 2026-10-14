@@ -2,6 +2,8 @@
 
 **Acceptance: 8/8 predeclared windows collected; endpoint timing and accounting pass. Path completeness and executable-cost assumptions remain unresolved.** This is a data audit, not an AI strategy backtest, a forecast evaluation or evidence of alpha.
 
+Follow-up: [v0.8 cost/path diagnostics](cost-path-check.md) reproduce March at 100 ms, reconcile all valid probe ticks and add explicit assumed spread floors. March still has a 9.845-second gap. This original one-second audit is retained; its eight evidence hashes have not changed.
+
 ## Dataset and provenance
 
 On October 14, 2026, the read-only `EventLensTickProbe` was run in Pepperstone cTrader 5.9.154 against the existing Demo EURUSD instance, using the Backtesting tab and accurate server trading data. The seven additional runs each used one historical date; the earlier June run used June 18–19. Every run had `orders=none`, a matching UTC focus, a 1,000 ms sample interval and zero invalid/crossed/backward counters. Native UI runs finished with zero backtest PnL because the probe places no orders.

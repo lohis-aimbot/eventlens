@@ -17,7 +17,8 @@ from pydantic import Field, model_validator
 from .contracts import Contract, Identifier, Timestamp
 
 BPS = Decimal("10000")
-ENGINE_VERSION = "research-ledger-v1"
+ENGINE_VERSION = "research-ledger-v2"
+EURUSD_PIP = Decimal("0.0001")
 
 
 class ReplayObservation(Contract):
@@ -83,16 +84,26 @@ class CostScenario(Contract):
     commission_bps: Decimal = Field(ge=0, le=100)
     slippage_bps: Decimal = Field(ge=0, le=100)
     fixed_fee_usd: Decimal = Field(default=Decimal(0), ge=0)
+    minimum_commission_usd: Decimal = Field(default=Decimal(0), ge=0)
+    spread_floor_pips: Decimal = Field(default=Decimal(0), ge=0, le=100)
 
     def fill_price(self, quote: ReplayObservation, *, buy: bool) -> Decimal:
-        return (
-            quote.ask * (1 + self.slippage_bps / BPS)
-            if buy
-            else quote.bid * (1 - self.slippage_bps / BPS)
-        )
+        # Widen around the observed midpoint only if its spread is below the
+        # explicit sensitivity floor. Keep raw quotes unchanged and do not
+        # charge spread again as a cash fee. EUR/USD is the ledger's only asset.
+        midpoint = (quote.bid + quote.ask) / 2
+        half_floor = self.spread_floor_pips * EURUSD_PIP / 2
+        ask = max(quote.ask, midpoint + half_floor)
+        bid = min(quote.bid, midpoint - half_floor)
+        if bid <= 0:
+            raise ValueError("Assumed spread floor produces a nonpositive bid")
+        return ask * (1 + self.slippage_bps / BPS) if buy else bid * (1 - self.slippage_bps / BPS)
 
     def fee(self, units: Decimal, price: Decimal) -> Decimal:
-        return abs(units) * price * self.commission_bps / BPS + self.fixed_fee_usd
+        commission = max(
+            abs(units) * price * self.commission_bps / BPS, self.minimum_commission_usd
+        )
+        return commission + self.fixed_fee_usd
 
 
 class ResearchPolicy(Contract):
@@ -102,6 +113,25 @@ class ResearchPolicy(Contract):
     max_notional_fraction: Decimal = Field(default=Decimal("1"), gt=0, le=1)
     max_quote_wait_ms: int = Field(default=2000, gt=0)
     max_path_gap_ms: int = Field(default=3000, gt=0)
+
+
+class CostSensitivityConfig(Contract):
+    version: Identifier
+    scope: Identifier
+    profiles: tuple[CostScenario, ...] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def isolate_spread_floor(self) -> Self:
+        if len({p.name for p in self.profiles}) != len(self.profiles):
+            raise ValueError("Cost profile names must be unique")
+        floors = [p.spread_floor_pips for p in self.profiles]
+        fees = {
+            (p.commission_bps, p.slippage_bps, p.minimum_commission_usd, p.fixed_fee_usd)
+            for p in self.profiles
+        }
+        if floors[0] != 0 or any(a >= b for a, b in zip(floors, floors[1:])) or len(fees) != 1:
+            raise ValueError("Isolate increasing spread floors with identical fees and slippage")
+        return self
 
 
 class SimulatedTimeline(Contract):

@@ -4,9 +4,11 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: official-source polling, memory-only LLM integration and offline accounting diagnostics (v0.7).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
+**Status: official-source polling, memory-only LLM integration and offline cost/path diagnostics (v0.8).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
 
 **Current research milestone:** EUR/USD × FOMC cost and timing checks. A small offline ledger tests fixed long/short/flat accounting with explicit stage delays, Bid/Ask spread, assumed commission/slippage and missing-data states. All eight predeclared 2025 Demo windows are now collected: **16,298 sampled snapshots**, held locally in about 122 KiB of compact gzip evidence. All 288 non-flat scenarios pass simulated fill-time and cash checks, but every thirty-minute path has sampling gaps and 60.79% of snapshots show zero spread. These cost/path limitations remain unresolved. Processing-time traces distinguish actual LLM processing from source-text age. This is not an LLM strategy backtest or evidence of profitability. See the [eight-event data quality report](docs/fomc-2025-data-quality.md), [research replay methods](docs/research-replay.md) and the [earlier three-event preview](docs/fomc-replay-preview.md).
+
+**Cost/path follow-up:** the March 100 ms Demo replay reproduces all 2,009 original snapshots and records all 4,992 valid ticks delivered to the probe; a 9.845-second gap remains. Explicit spread-floor and minimum-commission safeguards now support five assumed floor levels across the eight original events. All 480 fixed-direction cases close, and higher floors never improve same-case net PnL. Demo symbol fee metadata and manually configured simulator fees are recorded separately; no charged fill fee is verified. See [cost/path evidence and acceptance](docs/cost-path-check.md).
 
 ## The core idea
 
@@ -45,7 +47,8 @@ eventlens/
 ├── README.md
 ├── pyproject.toml
 ├── configs/
-│   └── fomc-2025.json # Predeclared official events; not acquired quotes
+│   ├── fomc-2025.json # Predeclared official events
+│   └── cost-sensitivity.json # Assumed spread floors, never verified fees
 ├── examples/
 │   ├── synthetic-ctrader-ticks.json
 │   ├── synthetic-ctrader-probe.log
@@ -61,11 +64,14 @@ eventlens/
 │   ├── market-data.md
 │   ├── fomc-replay-preview.md
 │   ├── fomc-2025-data-quality.md
-│   └── research-replay.md
+│   ├── research-replay.md
+│   └── cost-path-check.md
 ├── scripts/
-│   └── audit_fomc_windows.py # Reproduce quality checks from local compact evidence
+│   ├── audit_fomc_windows.py # Reproduce quality checks from local compact evidence
+│   └── audit_cost_path.py # Offline cost floors and one dense-path diagnostic
 ├── notebooks/
-│   └── fomc-window-quality.ipynb # Executed aggregate audit; no raw quotes
+│   ├── fomc-window-quality.ipynb # Executed aggregate audit; no raw quotes
+│   └── cost-path-check.ipynb # Cost sensitivities and dense replay counters
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -101,6 +107,8 @@ eventlens/
 │   ├── test_replay_labels.py
 │   ├── test_research_replay.py
 │   ├── test_window_audit.py
+│   ├── test_cost_floors.py
+│   ├── test_probe_diagnostics.py
 │   └── test_latency.py
 └── .github/workflows/
     └── tests.yml

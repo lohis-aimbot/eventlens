@@ -16,7 +16,7 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
       - run: ruff format --check .
-      - run: mypy src scripts/audit_fomc_windows.py
+      - run: mypy src scripts
       - run: pytest -q
       - run: eventlens-memory demo
       - run: eventlens-memory history demo-supply

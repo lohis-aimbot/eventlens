@@ -44,6 +44,11 @@ namespace cAlgo.Robots
         private bool _hasAtOrAfterFocus;
         private long _lastSampleBucket = -1;
         private long _windowSamples;
+        private long _validWindowTicks;
+        private long _zeroSpreadWindowTicks;
+        private long _windowMaxGapMilliseconds;
+        private DateTime _windowFirstTime;
+        private DateTime _windowLastTime;
 
         protected override void OnStart()
         {
@@ -73,6 +78,14 @@ namespace cAlgo.Robots
 
             Print("EVENTLENS_PROBE|start|symbol={0}|mode=demo_backtest_only|focus_utc={1}|orders=none|sample_interval_ms={2}",
                 SymbolName, _focusUtc.ToString("o", CultureInfo.InvariantCulture), SampleIntervalMilliseconds);
+            // Symbol metadata observed in Demo backtesting, not a confirmed fill
+            // charge or proof of the fee schedule on the historical event date.
+            Print("EVENTLENS_PROBE|symbol_cost|symbol={0}|commission={1}|commission_type={2}|min_commission={3}|min_commission_type={4}|min_commission_asset={5}|lot_size={6}|pip_size={7}|digits={8}|basis=demo_backtest_symbol_metadata",
+                SymbolName,
+                Symbol.Commission.ToString("R", CultureInfo.InvariantCulture), Symbol.CommissionType,
+                Symbol.MinCommission.ToString("R", CultureInfo.InvariantCulture), Symbol.MinCommissionType,
+                Symbol.MinCommissionAsset, Symbol.LotSize.ToString("R", CultureInfo.InvariantCulture),
+                Symbol.PipSize.ToString("R", CultureInfo.InvariantCulture), Symbol.Digits);
         }
 
         protected override void OnTick()
@@ -119,6 +132,18 @@ namespace cAlgo.Robots
                 _focusWindowTicks++;
 
             var windowStart = _focusUtc.AddMinutes(-2);
+            if (timestamp >= windowStart && timestamp <= _focusUtc.AddMinutes(35))
+            {
+                if (_validWindowTicks == 0)
+                    _windowFirstTime = timestamp;
+                else
+                    _windowMaxGapMilliseconds = Math.Max(_windowMaxGapMilliseconds,
+                        (long)(timestamp - _windowLastTime).TotalMilliseconds);
+                _windowLastTime = timestamp;
+                _validWindowTicks++;
+                if (ask == bid)
+                    _zeroSpreadWindowTicks++;
+            }
             if (SampleIntervalMilliseconds > 0 && timestamp >= windowStart && timestamp <= _focusUtc.AddMinutes(35))
             {
                 var bucket = (long)(timestamp - windowStart).TotalMilliseconds / SampleIntervalMilliseconds;
@@ -170,6 +195,10 @@ namespace cAlgo.Robots
 
         protected override void OnStop()
         {
+            Print("EVENTLENS_PROBE|window_quality|valid_ticks={0}|zero_spread_ticks={1}|max_tick_gap_ms={2}|first_utc={3}|last_utc={4}",
+                _validWindowTicks, _zeroSpreadWindowTicks, _windowMaxGapMilliseconds,
+                _validWindowTicks > 0 ? _windowFirstTime.ToString("o", CultureInfo.InvariantCulture) : "none",
+                _validWindowTicks > 0 ? _windowLastTime.ToString("o", CultureInfo.InvariantCulture) : "none");
             Print("EVENTLENS_PROBE|summary|symbol={0}|ticks={1}|first_utc={2}|last_utc={3}|max_gap_ms={4}|invalid_quotes={5}|crossed_quotes={6}|backward_times={7}|min_spread_pips={8}|max_spread_pips={9}|window_samples={10}",
                 SymbolName,
                 _count,
