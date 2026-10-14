@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "ThesisReference": {
+      "additionalProperties": false,
+      "properties": {
+        "thesis_id": {
+          "minLength": 1,
+          "title": "Thesis Id",
+          "type": "string"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "thesis_id",
+        "revision"
+      ],
+      "title": "ThesisReference",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Only these fields may come from the future LLM response.",
+  "properties": {
+    "target_direction": {
+      "enum": [
+        "long",
+        "short",
+        "flat"
+      ],
+      "title": "Target Direction",
+      "type": "string"
+    },
+    "thesis_references": {
+      "items": {
+        "$ref": "#/$defs/ThesisReference"
+      },
+      "title": "Thesis References",
+      "type": "array"
+    },
+    "evidence_quotes": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 5,
+      "minItems": 1,
+      "title": "Evidence Quotes",
+      "type": "array"
+    },
+    "rationale": {
+      "minLength": 1,
+      "title": "Rationale",
+      "type": "string"
+    },
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "invalidation_conditions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Invalidation Conditions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "target_direction",
+    "thesis_references",
+    "evidence_quotes",
+    "rationale",
+    "confidence",
+    "invalidation_conditions"
+  ],
+  "title": "ResearchPositionProposal",
+  "type": "object"
+}

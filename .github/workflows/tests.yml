@@ -23,4 +23,6 @@ jobs:
       - run: eventlens-fed --help
       - run: eventlens-market examples/synthetic-ctrader-ticks.json
       - run: eventlens-research window examples/synthetic-research-window.json
+      - run: eventlens-decision schema
+      - run: eventlens-decision check examples/synthetic-position-proposal.json
       - run: python -m build

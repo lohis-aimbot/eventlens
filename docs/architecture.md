@@ -31,6 +31,8 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 | events | EventFilter.evaluate | Future cross-source semantic deduplication and provenance checks |
 | memory | ThesisMemory.record_event / snapshot / decision_for_event / commit | Durable evidence and atomic, version-checked thesis history |
 | reasoning / deepseek | MemoryReasoner.process / JSONModelClient.complete_json | One event to validated memory-only proposal through an interchangeable model client |
+| decision_protocol | ResearchPositionProposal / ResearchProposalAgent.propose | Typed target-direction proposal linked to supplied thesis revisions; future adapter only |
+| decision_protocol | DecisionReplayProtocol / check_proposal | Pinned experiment controls and pure supplied-context checks; no execution authorization |
 | latency | processing_latency | Observed receipt/start/completion trace; source age is not network latency |
 | research_data | ResearchWindow / parse_probe_window | Offline provenance and bounded Demo snapshots; no historical live receipt claim |
 | research_replay | replay_roundtrip / accounting_grid | Fixed-position cost/timing diagnostics, independent of agent and future execution |
@@ -77,3 +79,5 @@ The SQLite implementation and synthetic CLI exercise thesis creation, reinforcem
 v0.7 adds a separate [offline accounting ledger](research-replay.md), not an implementation of `ShadowExecutor`. It tests fixed EUR/USD exposures with assumed timing/costs and observed market snapshots. It never reads a target portfolio, calls the model or submits orders. All eight predeclared Demo windows pass endpoint/accounting checks; the [quality report](fomc-2025-data-quality.md) preserves sample gaps and unresolved zero-spread cost concerns. Continuous-path quality, executable costs and fresh-event latency measurements remain acceptance gates before strategy claims.
 
 v0.8 adds assumed spread floors, per-fill minimum commissions and typed Demo probe metadata/counters. These are [offline cost/path safeguards](cost-path-check.md), not verified execution costs, a live data adapter or a risk implementation. Raw quotes stay immutable. The one dense replay does not enlarge the independent event sample.
+
+v0.9 defines [research position proposals and frozen rules](decision-protocol.md). This separate contract does not change SQLite's memory-only target prohibition or the existing model prompt. Offline checks may derive fixed signed research units but neither commit a target nor call a model, risk engine or executor. A future historical context adapter must preserve real capture times separately from simulated availability; the current `AgentContext` cannot silently turn a 2026 archive capture into a 2025 decision input.

@@ -1,0 +1,105 @@
+{
+  "protocol_id": "b979d082b7f0bb4cda01e6b29cf6aed55a8fbdca32e5cc573c108896fe29bffd",
+  "rules": {
+    "protocol_version": "eurusd-fomc-decision-v1",
+    "mode": "offline_research_only",
+    "instrument": "EUR/USD",
+    "catalog_version": "fomc-2025-v1",
+    "engine_version": "research-ledger-v2",
+    "initial_cash_usd": "10000",
+    "units_eur": "1000",
+    "starting_position": "flat",
+    "horizon_seconds": 300,
+    "input_cutoff_rule": "portfolio_reasoning_start",
+    "entry_rule": "first_observed_quote_after_decision_and_order_ready",
+    "exit_rule": "signal_time_plus_300s_with_order_and_execution_delay",
+    "intraperiod_management": "none",
+    "max_quote_age_ms": 2000,
+    "max_quote_wait_ms": 2000,
+    "max_path_gap_ms": 3000,
+    "primary_latency": "poll_plus_reasoning_assumed",
+    "primary_cost": "floor_1",
+    "latency_scenarios": [
+      {
+        "name": "five_seconds_assumed",
+        "basis": "assumed",
+        "ingest_ms": 1000,
+        "reasoning_ms": 3850,
+        "signal_ms": 50,
+        "order_ms": 50,
+        "execution_ms": 50
+      },
+      {
+        "name": "poll_plus_reasoning_assumed",
+        "basis": "assumed",
+        "ingest_ms": 60000,
+        "reasoning_ms": 4850,
+        "signal_ms": 50,
+        "order_ms": 50,
+        "execution_ms": 50
+      },
+      {
+        "name": "slow_reasoning_assumed",
+        "basis": "assumed",
+        "ingest_ms": 60000,
+        "reasoning_ms": 59850,
+        "signal_ms": 50,
+        "order_ms": 50,
+        "execution_ms": 50
+      }
+    ],
+    "cost_profiles": [
+      {
+        "name": "floor_0",
+        "basis": "assumed",
+        "commission_bps": "0.5",
+        "slippage_bps": "0.25",
+        "fixed_fee_usd": "0",
+        "minimum_commission_usd": "0",
+        "spread_floor_pips": "0"
+      },
+      {
+        "name": "floor_0_2",
+        "basis": "assumed",
+        "commission_bps": "0.5",
+        "slippage_bps": "0.25",
+        "fixed_fee_usd": "0",
+        "minimum_commission_usd": "0",
+        "spread_floor_pips": "0.2"
+      },
+      {
+        "name": "floor_0_5",
+        "basis": "assumed",
+        "commission_bps": "0.5",
+        "slippage_bps": "0.25",
+        "fixed_fee_usd": "0",
+        "minimum_commission_usd": "0",
+        "spread_floor_pips": "0.5"
+      },
+      {
+        "name": "floor_1",
+        "basis": "assumed",
+        "commission_bps": "0.5",
+        "slippage_bps": "0.25",
+        "fixed_fee_usd": "0",
+        "minimum_commission_usd": "0",
+        "spread_floor_pips": "1"
+      },
+      {
+        "name": "floor_2",
+        "basis": "assumed",
+        "commission_bps": "0.5",
+        "slippage_bps": "0.25",
+        "fixed_fee_usd": "0",
+        "minimum_commission_usd": "0",
+        "spread_floor_pips": "2"
+      }
+    ],
+    "failure_rule": "rejected_proposal_not_flat_prediction",
+    "baseline_directions": [
+      "flat",
+      "long",
+      "short"
+    ]
+  }
+}

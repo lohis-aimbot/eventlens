@@ -1,0 +1,83 @@
+{
+  "context": {
+    "event": {
+      "event_id": "synthetic-fomc-event",
+      "source": "synthetic-fixture",
+      "source_type": "macro",
+      "source_reference": "https://example.com/synthetic-fomc",
+      "source_timestamp": "2025-01-29T19:00:00Z",
+      "received_timestamp": "2025-01-29T19:00:01Z",
+      "raw_text": "Synthetic fixture only. Policy stance remains restrictive.",
+      "author": null
+    },
+    "memory": {
+      "memory_version": 1,
+      "as_of": "2025-01-29T19:00:04Z",
+      "theses": [
+        {
+          "thesis_id": "synthetic-fed-thesis",
+          "revision": 1,
+          "status": "active",
+          "narrative": "Invented policy thesis for schema tests only.",
+          "instruments": [
+            "EUR/USD"
+          ],
+          "supporting_event_ids": [
+            "synthetic-fomc-event"
+          ],
+          "contradicting_event_ids": [],
+          "invalidation_conditions": [
+            "A subsequent verified event contradicts the synthetic premise."
+          ],
+          "confidence": 0.65,
+          "created_at": "2025-01-29T19:00:03Z",
+          "updated_at": "2025-01-29T19:00:03Z",
+          "review_at": "2025-01-29T19:30:00Z"
+        }
+      ]
+    },
+    "portfolio": {
+      "snapshot_id": "synthetic-flat-portfolio",
+      "as_of": "2025-01-29T19:00:04Z",
+      "base_currency": "USD",
+      "equity": "10000",
+      "positions": [
+        {
+          "instrument": "EUR/USD",
+          "quantity": "0"
+        }
+      ],
+      "pending_order_ids": []
+    },
+    "market": {
+      "snapshot_id": "synthetic-market-snapshot",
+      "as_of": "2025-01-29T19:00:04Z",
+      "quotes": [
+        {
+          "instrument": "EUR/USD",
+          "received_at": "2025-01-29T19:00:03.900Z",
+          "bid": "1.1000",
+          "ask": "1.1002"
+        }
+      ]
+    },
+    "as_of": "2025-01-29T19:00:04Z"
+  },
+  "proposal": {
+    "target_direction": "short",
+    "thesis_references": [
+      {
+        "thesis_id": "synthetic-fed-thesis",
+        "revision": 1
+      }
+    ],
+    "evidence_quotes": [
+      "Policy stance remains restrictive."
+    ],
+    "rationale": "Invented direction for contract checks; no forecasting or trading recommendation.",
+    "confidence": 0.65,
+    "invalidation_conditions": [
+      "A verified subsequent event contradicts this premise."
+    ]
+  }
+}
