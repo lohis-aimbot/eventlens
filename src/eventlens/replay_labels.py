@@ -161,7 +161,7 @@ def label_replay(
                     exit_ask=exit_point.ask,
                     mid_return=exit_mid / entry_mid - 1,
                     spread_only_long_return=exit_point.bid / entry.ask - 1,
-                    spread_only_short_return=entry.bid / exit_point.ask - 1,
+                    spread_only_short_return=(entry.bid - exit_point.ask) / entry.bid,
                 )
             )
     return tuple(labels)

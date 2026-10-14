@@ -78,6 +78,9 @@ def test_create_update_and_duplicate_without_extra_paid_call(tmp_path):
     assert initial.memory_version == 1
     assert initial.decision.target is None
     assert initial.input_tokens == 40
+    assert initial.latency.event_id == first.event_id
+    assert initial.latency.reasoning_ms >= 0
+    assert initial.latency.receipt_to_completion_ms >= initial.latency.reasoning_ms
     assert thesis.supporting_event_ids == ("e1",)
     assert thesis.revision == 1
 
@@ -85,6 +88,7 @@ def test_create_update_and_duplicate_without_extra_paid_call(tmp_path):
     assert repeated.reused is True
     assert repeated.decision.decision_id == initial.decision.decision_id
     assert client.calls == 1
+    assert repeated.latency == initial.latency
 
     second = event("e2", "Operator reports verified restoration")
     client.responses.append(

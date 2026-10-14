@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contracts import AgentDecision, Event, MemorySnapshot, Thesis, ThesisChange
 from .deepseek import JSONModelClient
+from .latency import ProcessingLatency, processing_latency
 from .memory import ThesisMemory
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class ReasoningResult(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     reused: bool = False
+    latency: ProcessingLatency
 
 
 class MemoryReasoner:
@@ -97,7 +99,10 @@ class MemoryReasoner:
         previous = await self.memory.decision_for_event(event.event_id)
         if previous is not None:
             return ReasoningResult(
-                decision=previous, memory_version=previous.based_on_memory_version + 1, reused=True
+                decision=previous,
+                memory_version=previous.based_on_memory_version + 1,
+                reused=True,
+                latency=processing_latency(event, previous),
             )
         started = datetime.now(UTC)
         snapshot = await self.memory.snapshot(as_of=started)
@@ -140,6 +145,7 @@ class MemoryReasoner:
             memory_version=version,
             input_tokens=reply.input_tokens,
             output_tokens=reply.output_tokens,
+            latency=processing_latency(event, decision),
         )
 
     @staticmethod

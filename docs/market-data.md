@@ -60,3 +60,7 @@ The 108 ms gap from scheduled publication to the first later replay quote is a *
 4. Compare gaps, spreads and quote coverage with the Algo replay result. Keep broker data and account identifiers locally under ignored `data/`; commit only code, documentation and synthetic fixtures. Strategy backtesting comes only after the point-in-time data gate passes.
 
 Historical backfills contain **market quote timestamps**, not the time EventLens would have received those quotes live. Similarly, the Fed archive's publication time is not a measured live receipt time. The `available_time` used here must be supplied separately from a measured collector receipt (or explicitly labeled a simulated latency assumption). The new labels use **assumed** availability only. Do not interpret a quote-quality or replay-label result as a fill or profitability estimate.
+
+## v0.7 follow-up
+
+The [offline accounting milestone](research-replay.md) adds bounded Demo snapshot sampling and independent long/short/flat cost scenarios. Existing compact checkpoints remain sparse evidence. The revised C# source passed an offline API-reference compile; native Build and collection of sampled windows remain pending. Defaults keep sampling off. No brokerage connector or orders were added.

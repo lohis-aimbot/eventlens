@@ -1,0 +1,14 @@
+{
+  "version": "fomc-2025-v1",
+  "scope": "All eight scheduled 2025 FOMC statements; catalog inclusion is not quote coverage or alpha evidence",
+  "events": [
+    {"event_id": "fed-2025-01-29", "source_time": "2025-01-29T19:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm"},
+    {"event_id": "fed-2025-03-19", "source_time": "2025-03-19T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250319a.htm"},
+    {"event_id": "fed-2025-05-07", "source_time": "2025-05-07T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250507a.htm"},
+    {"event_id": "fed-2025-06-18", "source_time": "2025-06-18T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250618a.htm"},
+    {"event_id": "fed-2025-07-30", "source_time": "2025-07-30T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm"},
+    {"event_id": "fed-2025-09-17", "source_time": "2025-09-17T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20250917a.htm"},
+    {"event_id": "fed-2025-10-29", "source_time": "2025-10-29T18:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20251029a.htm"},
+    {"event_id": "fed-2025-12-10", "source_time": "2025-12-10T19:00:00Z", "source_reference": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20251210a.htm"}
+  ]
+}

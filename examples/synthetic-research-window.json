@@ -1,0 +1,22 @@
+{
+  "event_id": "synthetic-roundtrip",
+  "source_reference": "fixture:invented-prices-no-financial-evidence",
+  "source_time": "2026-01-01T00:00:00Z",
+  "captured_at": "2026-01-01T00:35:00Z",
+  "instrument": "EUR/USD",
+  "provider": "synthetic",
+  "data_kind": "synthetic",
+  "sample_interval_ms": null,
+  "observations": [
+    {"timestamp": "2026-01-01T00:00:00Z", "bid": "1.10000", "ask": "1.10020"},
+    {"timestamp": "2026-01-01T00:00:05.100Z", "bid": "1.10000", "ask": "1.10020"},
+    {"timestamp": "2026-01-01T00:01:05.100Z", "bid": "1.10100", "ask": "1.10120"},
+    {"timestamp": "2026-01-01T00:02:00.100Z", "bid": "1.10200", "ask": "1.10220"},
+    {"timestamp": "2026-01-01T00:05:05.100Z", "bid": "1.09900", "ask": "1.09920"},
+    {"timestamp": "2026-01-01T00:06:05.100Z", "bid": "1.09800", "ask": "1.09820"},
+    {"timestamp": "2026-01-01T00:07:00.100Z", "bid": "1.10100", "ask": "1.10120"},
+    {"timestamp": "2026-01-01T00:30:05.100Z", "bid": "1.10050", "ask": "1.10070"},
+    {"timestamp": "2026-01-01T00:31:05.100Z", "bid": "1.10250", "ask": "1.10270"},
+    {"timestamp": "2026-01-01T00:32:00.100Z", "bid": "1.10000", "ask": "1.10020"}
+  ]
+}

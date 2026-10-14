@@ -31,6 +31,9 @@ Thesis confidence expresses the agent's belief, not a calibrated probability of 
 | events | EventFilter.evaluate | Future cross-source semantic deduplication and provenance checks |
 | memory | ThesisMemory.record_event / snapshot / decision_for_event / commit | Durable evidence and atomic, version-checked thesis history |
 | reasoning / deepseek | MemoryReasoner.process / JSONModelClient.complete_json | One event to validated memory-only proposal through an interchangeable model client |
+| latency | processing_latency | Observed receipt/start/completion trace; source age is not network latency |
+| research_data | ResearchWindow / parse_probe_window | Offline provenance and bounded Demo snapshots; no historical live receipt claim |
+| research_replay | replay_roundtrip / accounting_grid | Fixed-position cost/timing diagnostics, independent of agent and future execution |
 | agent | TradingAgent.decide | Future full portfolio decision behind a provider-neutral boundary |
 | portfolio | PortfolioState.snapshot / TargetValidator.validate | Authoritative account state; validate complete desired exposures |
 | risk | HardRiskEngine.assess | Independent checks against account state, market data and operator policy |
@@ -69,4 +72,6 @@ Before any executor exists, deterministic risk implementation must test per-asse
 
 ## Current stage and next review
 
-The SQLite implementation and synthetic CLI exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. The DeepSeek memory-only path can propose create/update/ignore, but its output is checked against the current event and existing thesis IDs before commit. Offline tests cover this path; real provider behavior must be checked separately with a user-owned key. Semantic duplicate detection, source verification, portfolio decisions, risk and shadow execution remain later stages.
+The SQLite implementation and synthetic CLI exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. The DeepSeek memory-only path can propose create/update/ignore, but its output is checked against the current event and existing thesis IDs before commit. Offline tests cover this path; real provider behavior must be checked separately with a user-owned key. The Fed adapter validates its official allowlist; general cross-source verification, semantic duplicate detection, portfolio decisions, risk and shadow execution remain later stages.
+
+v0.7 adds a separate [offline accounting ledger](research-replay.md), not an implementation of `ShadowExecutor`. It tests fixed EUR/USD exposures with assumed timing/costs and measured market observations. It never reads a target portfolio, calls the model or submits orders. Sampled Demo windows and fresh-event latency measurements remain a data acceptance gate before strategy work.

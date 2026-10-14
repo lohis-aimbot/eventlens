@@ -16,6 +16,9 @@ namespace cAlgo.Robots
         [Parameter("Focus UTC", DefaultValue = "2025-06-18T18:00:00Z")]
         public string FocusUtcText { get; set; }
 
+        [Parameter("Sample interval ms (0 = off)", DefaultValue = 0, MinValue = 0)]
+        public int SampleIntervalMilliseconds { get; set; }
+
         private DateTime _focusUtc;
         private readonly DateTime[] _checkpointTimes = new DateTime[CheckpointOffsetsSeconds.Length];
         private readonly double[] _checkpointBids = new double[CheckpointOffsetsSeconds.Length];
@@ -39,6 +42,8 @@ namespace cAlgo.Robots
         private double _askAtOrAfterFocus;
         private bool _hasBeforeFocus;
         private bool _hasAtOrAfterFocus;
+        private long _lastSampleBucket = -1;
+        private long _windowSamples;
 
         protected override void OnStart()
         {
@@ -66,8 +71,8 @@ namespace cAlgo.Robots
                 return;
             }
 
-            Print("EVENTLENS_PROBE|start|symbol={0}|mode=demo_backtest_only|focus_utc={1}|orders=none",
-                SymbolName, _focusUtc.ToString("o", CultureInfo.InvariantCulture));
+            Print("EVENTLENS_PROBE|start|symbol={0}|mode=demo_backtest_only|focus_utc={1}|orders=none|sample_interval_ms={2}",
+                SymbolName, _focusUtc.ToString("o", CultureInfo.InvariantCulture), SampleIntervalMilliseconds);
         }
 
         protected override void OnTick()
@@ -113,6 +118,23 @@ namespace cAlgo.Robots
             if (timestamp >= _focusUtc.AddMinutes(-1) && timestamp < _focusUtc.AddMinutes(1))
                 _focusWindowTicks++;
 
+            var windowStart = _focusUtc.AddMinutes(-2);
+            if (SampleIntervalMilliseconds > 0 && timestamp >= windowStart && timestamp <= _focusUtc.AddMinutes(35))
+            {
+                var bucket = (long)(timestamp - windowStart).TotalMilliseconds / SampleIntervalMilliseconds;
+                if (bucket > _lastSampleBucket)
+                {
+                    _lastSampleBucket = bucket;
+                    _windowSamples++;
+                    // First valid observed snapshot in the bucket, never invented
+                    // quotes for empty buckets or independent Bid/Ask side times.
+                    Print("EVENTLENS_PROBE|quote|time_utc={0}|bid={1}|ask={2}",
+                        timestamp.ToString("o", CultureInfo.InvariantCulture),
+                        bid.ToString("R", CultureInfo.InvariantCulture),
+                        ask.ToString("R", CultureInfo.InvariantCulture));
+                }
+            }
+
             if (timestamp < _focusUtc)
             {
                 _hasBeforeFocus = true;
@@ -148,7 +170,7 @@ namespace cAlgo.Robots
 
         protected override void OnStop()
         {
-            Print("EVENTLENS_PROBE|summary|symbol={0}|ticks={1}|first_utc={2}|last_utc={3}|max_gap_ms={4}|invalid_quotes={5}|crossed_quotes={6}|backward_times={7}|min_spread_pips={8}|max_spread_pips={9}",
+            Print("EVENTLENS_PROBE|summary|symbol={0}|ticks={1}|first_utc={2}|last_utc={3}|max_gap_ms={4}|invalid_quotes={5}|crossed_quotes={6}|backward_times={7}|min_spread_pips={8}|max_spread_pips={9}|window_samples={10}",
                 SymbolName,
                 _count,
                 _count > 0 ? _firstTime.ToString("o", CultureInfo.InvariantCulture) : "none",
@@ -158,7 +180,8 @@ namespace cAlgo.Robots
                 _crossedQuotes,
                 _backwardTimes,
                 _count > _invalidQuotes ? _minSpreadPips.ToString("R", CultureInfo.InvariantCulture) : "none",
-                _count > _invalidQuotes ? _maxSpreadPips.ToString("R", CultureInfo.InvariantCulture) : "none");
+                _count > _invalidQuotes ? _maxSpreadPips.ToString("R", CultureInfo.InvariantCulture) : "none",
+                _windowSamples);
 
             Print("EVENTLENS_PROBE|focus|focus_utc={0}|window_2m_ticks={1}|last_before_utc={2}|bid_before={3}|ask_before={4}|first_at_or_after_utc={5}|bid_after={6}|ask_after={7}|after_lag_ms={8}",
                 _focusUtc.ToString("o", CultureInfo.InvariantCulture),

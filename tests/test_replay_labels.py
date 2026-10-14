@@ -42,7 +42,7 @@ def test_delayed_entry_and_spread_only_label():
     assert result.exit_quote_time == T + timedelta(seconds=65, milliseconds=100)
     assert result.mid_return == Decimal("1.10110") / Decimal("1.10010") - 1
     assert result.spread_only_long_return == Decimal("1.10100") / Decimal("1.10020") - 1
-    assert result.spread_only_short_return == Decimal("1.10000") / Decimal("1.10120") - 1
+    assert result.spread_only_short_return == Decimal("-0.00120") / Decimal("1.10000")
 
 
 def test_no_source_time_entry_and_missing_horizon_is_explicit():

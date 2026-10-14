@@ -4,9 +4,9 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: official-source polling, memory-only LLM integration and Demo replay timing labels (v0.6).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek currently maps the `deepseek-flash` API name to DeepSeek-V4.1-Flash ([provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
+**Status: official-source polling, memory-only LLM integration and offline accounting diagnostics (v0.7).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
 
-**Current research milestone:** EUR/USD × FOMC point-in-time alignment. The repository contains an offline cTrader Bid/Ask decoder, quote-quality inspector and a read-only, Demo-backtesting-only cTrader Algo probe. Three historical FOMC windows were replayed; assumed information delays were aligned to later quote checkpoints to produce indicative labels. This does not establish live event availability, executable fills or strategy performance. See [market-data methods](docs/market-data.md) and the [three-event preview](docs/fomc-replay-preview.md).
+**Current research milestone:** EUR/USD × FOMC cost and timing checks. A small offline ledger tests fixed long/short/flat accounting with explicit stage delays, Bid/Ask spread, assumed commission/slippage and missing-data states. Existing observations cover three sparse Demo checkpoint datasets; the predeclared eight-statement 2025 catalog is not yet acquired quote coverage. A bounded Demo sampler prepares the next data window; its native cTrader run remains pending. Processing-time traces distinguish actual LLM processing from source-text age. This is not an LLM strategy backtest or evidence of profitability. See [research replay and acceptance](docs/research-replay.md), [market-data methods](docs/market-data.md) and the [earlier three-event preview](docs/fomc-replay-preview.md).
 
 ## The core idea
 
@@ -44,9 +44,12 @@ This design intentionally lets the LLM reason about portfolio decisions. It does
 eventlens/
 ├── README.md
 ├── pyproject.toml
+├── configs/
+│   └── fomc-2025.json # Predeclared official events; not acquired quotes
 ├── examples/
 │   ├── synthetic-ctrader-ticks.json
-│   └── synthetic-ctrader-probe.log
+│   ├── synthetic-ctrader-probe.log
+│   └── synthetic-research-window.json
 ├── ctrader/
 │   └── EventLensTickProbe.cs # Backtesting-only, read-only Demo data check
 ├── docs/
@@ -56,7 +59,8 @@ eventlens/
 │   ├── fed-intake.md
 │   ├── fomc-memory-case.md
 │   ├── market-data.md
-│   └── fomc-replay-preview.md
+│   ├── fomc-replay-preview.md
+│   └── research-replay.md
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -66,6 +70,7 @@ eventlens/
 │   ├── memory_cli.py    # Synthetic demo and inspection commands
 │   ├── deepseek.py      # DeepSeek API adapter behind a JSON model interface
 │   ├── reasoning.py     # Proposal validation and memory-only orchestration
+│   ├── latency.py       # Observed application processing traces
 │   ├── fed.py           # Official FOMC RSS intake, validation and durable inbox
 │   ├── fed_cli.py       # One-shot or continuous polling command
 │   ├── market_data.py   # Side-specific historical ticks and as-of quotes
@@ -74,6 +79,9 @@ eventlens/
 │   ├── market_cli.py    # Offline tick-page inspection
 │   ├── replay_labels.py # Assumed-availability quote checkpoint labels
 │   ├── replay_cli.py    # Offline Demo probe-log labeling
+│   ├── research_data.py # Catalog, window provenance and compact data adapters
+│   ├── research_replay.py # Fixed-position offline cost/timing accounting
+│   ├── research_cli.py  # Independent accounting scenarios; no model/broker calls
 │   ├── agent.py        # Provider-agnostic TradingAgent interface
 │   ├── portfolio.py    # Observed state and target validation interfaces
 │   ├── risk.py         # Deterministic HardRiskEngine interface
@@ -85,7 +93,9 @@ eventlens/
 │   ├── test_reasoning.py
 │   ├── test_fed.py
 │   ├── test_market_data.py
-│   └── test_replay_labels.py
+│   ├── test_replay_labels.py
+│   ├── test_research_replay.py
+│   └── test_latency.py
 └── .github/workflows/
     └── tests.yml
 ```
@@ -119,12 +129,13 @@ eventlens-memory snapshot --as-of 2026-01-01T00:01:00Z
 eventlens-fed --database data/fed.sqlite
 eventlens-market examples/synthetic-ctrader-ticks.json
 eventlens-replay examples/synthetic-ctrader-probe.log --event-id synthetic-fomc --source-time 2025-06-18T18:00:00Z
+eventlens-research window examples/synthetic-research-window.json
 pytest -q
 ruff check .
 mypy src
 ```
 
-The demo uses a simulated January 1, 2026 clock and invented supply events. It creates `data/memory-demo.sqlite` locally. Repeating the demo is idempotent. Use a dedicated demo database, never a production memory store. No positions or orders are created. Add `--verbose` before the subcommand for logs. `--database PATH` selects another local SQLite file. All runtime data remains outside Git. The old `eventlens demo` command, EUR/USD fixtures, rule-based signals, event study, backtester and database adapters have been removed. The previous implementation remains accessible in Git history.
+The memory demo uses a simulated January 1, 2026 clock and invented supply events. It creates `data/memory-demo.sqlite` locally. Repeating the demo is idempotent. Use a dedicated demo database, never a production memory store. No positions or orders are created by the memory demo. Add `--verbose` before the memory subcommand for logs. `--database PATH` selects another local SQLite file. Research commands run offline and print hypothetical accounting cases; output is saved only when explicitly requested. All runtime data remains outside Git. The architecture predating Thesis Memory remains accessible in Git history.
 
 To try one real model call, create a **separate** local event JSON file matching `Event` in `contracts.py`, with a unique `event_id`, source URL/reference, actual source publication time, actual time received and source text. Use timezone-aware ISO 8601 timestamps. Then set `DEEPSEEK_API_KEY` in the shell that runs the CLI and call:
 
@@ -145,7 +156,7 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and an offline parser that produces **indicative** timing labels from compact probe checkpoints. The 2024/2025 Demo observations are documented as a small data check, not a trading backtest.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, processing-time traces, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and **indicative** checkpoint labels. The offline research ledger adds hypothetical fixed-position accounting and explicit gaps; it is separate from the future risk-approved shadow executor. Current real data supports endpoint checks, not full path or strategy validation.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 
