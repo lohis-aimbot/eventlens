@@ -6,7 +6,7 @@ A foundation for a stateful, real-time event-driven trading agent powered by exi
 
 **Status: official-source polling, memory-only LLM integration and offline accounting diagnostics (v0.7).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
 
-**Current research milestone:** EUR/USD × FOMC cost and timing checks. A small offline ledger tests fixed long/short/flat accounting with explicit stage delays, Bid/Ask spread, assumed commission/slippage and missing-data states. Existing observations cover three sparse Demo checkpoint datasets plus one sampled June 18, 2025 window: 2,094 snapshots from a native cTrader Demo backtest. The predeclared eight-statement 2025 catalog still has seven sampled windows pending. All 36 non-flat cases close in the collected window, but sampling gaps remain and thirty-minute paths are flagged. Processing-time traces distinguish actual LLM processing from source-text age. This is not an LLM strategy backtest or evidence of profitability. See [research replay and acceptance](docs/research-replay.md), [market-data methods](docs/market-data.md) and the [earlier three-event preview](docs/fomc-replay-preview.md).
+**Current research milestone:** EUR/USD × FOMC cost and timing checks. A small offline ledger tests fixed long/short/flat accounting with explicit stage delays, Bid/Ask spread, assumed commission/slippage and missing-data states. All eight predeclared 2025 Demo windows are now collected: **16,298 sampled snapshots**, held locally in about 122 KiB of compact gzip evidence. All 288 non-flat scenarios pass simulated fill-time and cash checks, but every thirty-minute path has sampling gaps and 60.79% of snapshots show zero spread. These cost/path limitations remain unresolved. Processing-time traces distinguish actual LLM processing from source-text age. This is not an LLM strategy backtest or evidence of profitability. See the [eight-event data quality report](docs/fomc-2025-data-quality.md), [research replay methods](docs/research-replay.md) and the [earlier three-event preview](docs/fomc-replay-preview.md).
 
 ## The core idea
 
@@ -60,7 +60,12 @@ eventlens/
 │   ├── fomc-memory-case.md
 │   ├── market-data.md
 │   ├── fomc-replay-preview.md
+│   ├── fomc-2025-data-quality.md
 │   └── research-replay.md
+├── scripts/
+│   └── audit_fomc_windows.py # Reproduce quality checks from local compact evidence
+├── notebooks/
+│   └── fomc-window-quality.ipynb # Executed aggregate audit; no raw quotes
 ├── src/eventlens/
 │   ├── __init__.py
 │   ├── contracts.py    # Events, theses, context, targets, risk and audit records
@@ -95,6 +100,7 @@ eventlens/
 │   ├── test_market_data.py
 │   ├── test_replay_labels.py
 │   ├── test_research_replay.py
+│   ├── test_window_audit.py
 │   └── test_latency.py
 └── .github/workflows/
     └── tests.yml
@@ -156,7 +162,7 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 
 ## Implementation boundaries
 
-Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, processing-time traces, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and **indicative** checkpoint labels. The offline research ledger adds hypothetical fixed-position accounting and explicit gaps; it is separate from the future risk-approved shadow executor. Current real data supports endpoint checks, not full path or strategy validation.
+Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, processing-time traces, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and **indicative** checkpoint labels. The offline research ledger adds hypothetical fixed-position accounting and explicit gaps; it is separate from the future risk-approved shadow executor. The eight-event audit checks provenance, one-second bucket coverage, spreads and independent cash/fill invariants. Current real data supports endpoint checks, not continuous-path or strategy validation.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
 

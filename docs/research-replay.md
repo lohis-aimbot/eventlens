@@ -8,16 +8,16 @@ This milestone adds a small EUR/USD research ledger and a bounded Demo data samp
 
 | Statement | Source UTC | Current quote evidence |
 |---|---|---|
-| [January 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm) | 19:00 | Sampled window pending |
-| [March 19](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250319a.htm) | 18:00 | Sampled window pending |
-| [May 7](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250507a.htm) | 18:00 | Sampled window pending |
+| [January 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm) | 19:00 | 2,017 Demo sampled snapshots collected |
+| [March 19](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250319a.htm) | 18:00 | 2,009 Demo sampled snapshots collected |
+| [May 7](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250507a.htm) | 18:00 | 1,985 Demo sampled snapshots collected |
 | [June 18](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250618a.htm) | 18:00 | 2,094 Demo sampled snapshots collected; gaps disclosed below |
-| [July 30](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm) | 18:00 | Sampled window pending |
-| [September 17](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250917a.htm) | 18:00 | Sampled window pending |
-| [October 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20251029a.htm) | 18:00 | Sampled window pending |
-| [December 10](https://www.federalreserve.gov/newsevents/pressreleases/monetary20251210a.htm) | 19:00 | Sampled window pending |
+| [July 30](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm) | 18:00 | 2,014 Demo sampled snapshots collected |
+| [September 17](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250917a.htm) | 18:00 | 2,165 Demo sampled snapshots collected |
+| [October 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20251029a.htm) | 18:00 | 1,936 Demo sampled snapshots collected |
+| [December 10](https://www.federalreserve.gov/newsevents/pressreleases/monetary20251210a.htm) | 19:00 | 2,078 Demo sampled snapshots collected |
 
-The catalog is a research plan, not eight acquired datasets. Existing September/November 2024 and June 2025 checkpoints remain usable through the `legacy` adapter. They cannot support reliable path drawdown or all delay/horizon combinations. Broker quotes and derived local reports remain outside Git. Public synthetic inputs are invented test fixtures.
+The catalog was declared before these quote results. All eight compact Demo windows are now acquired; the [full data-quality report](fomc-2025-data-quality.md) documents gaps and unresolved cost assumptions. Existing September/November 2024 and June 2025 checkpoints remain usable through the `legacy` adapter. They cannot support reliable path drawdown or all delay/horizon combinations. Broker quotes and detailed local accounting reports remain outside Git; public audit outputs contain derived aggregates and evidence hashes. Public synthetic inputs are invented test fixtures.
 
 ## Contracts and accounting
 
@@ -74,7 +74,7 @@ Sampling prints the first valid existing tick snapshot in each interval bucket o
 
 Memory-only reasoning now reports `ProcessingLatency`, using application-stamped receipt, reasoning-start and completion times, linked to event/decision/model IDs. Duplicate reuse returns the original trace without another model call. `source_age_at_receipt_ms` is the age of source text, **not** measured network latency; replaying a 2024 statement in 2026 is historical input. No new paid model call or fresh-release latency measurement was made for this milestone.
 
-Local acceptance: 68 pytest tests pass; Ruff and mypy pass. Tests cover independent long/short cash calculations, spread counted once, commissions, adverse slippage, every delay stage, post-readiness quote selection, unavailable exits retaining state, provenance/UTC validation, catalog daylight-saving conversion and reproducible cases. The invented fixture yields 36 closed and 18 flat cases. Each existing real checkpoint dataset yields 12 closed, 24 exit-unavailable and 18 flat cases. These are coverage/accounting checks, not trading performance metrics.
+Local acceptance: 71 pytest tests pass; Ruff and mypy pass. Tests cover independent long/short cash calculations, spread counted once, commissions, adverse slippage, every delay stage, post-readiness quote selection, unavailable exits retaining state, provenance/UTC validation, catalog daylight-saving conversion and reproducible cases. Audit tests additionally cover full-second/boundary denominators, duplicate sample buckets, mismatched events and explicit missing-file reporting. The invented fixture yields 36 closed and 18 flat cases. Each existing real checkpoint dataset yields 12 closed, 24 exit-unavailable and 18 flat cases. These are coverage/accounting checks, not trading performance metrics.
 
 The C# source passed a direct reference compile and subsequently a native Build/run in Pepperstone cTrader 5.9.154. The October 14, 2026 acceptance run used the existing **Demo EURUSD** instance, **Backtesting** tab, accurate server trading data, June 18–19 historical dates, focus `2025-06-18T18:00:00Z` and sample interval 1,000 ms. The probe made no orders; cTrader showed zero backtest PnL. This zero is the read-only probe outcome, not a trading strategy result.
 
@@ -95,4 +95,4 @@ The C# source passed a direct reference compile and subsequently a native Build/
 
 All 36 closed cases were checked using parsed UTC datetimes: entry was at/after readiness and before the scheduled exit order; exit was at/after its readiness. Decimal cash conservation also passed for all closed cases. For example, the assumed 65-second-delay long/five-minute case becomes entry-ready at `18:01:05.000Z` and uses the snapshot at `18:01:05.086Z`; exit-ready is `18:06:05.000Z`, with the snapshot at `18:06:05.032Z`. These are hypothetical observed-quote fills, not broker confirmations.
 
-**Code and first-window endpoint/accounting acceptance pass.** Sampling is incomplete at the one-second bucket level and all thirty-minute paths exceed the current three-second gap threshold; these flags must remain visible. The other seven catalog windows, measured live event availability and actual execution costs remain pending. Preserve the compact evidence locally under ignored `data/`; raw logs and broker quotes are not published. Next, expand the predeclared sample and review gaps before implementing LLM target proposals and deterministic risk. Positive benchmark PnL, training fit or a single replay must never be treated as evidence for live trading.
+**Code and first-window endpoint/accounting acceptance pass.** Subsequent runs completed the other seven catalog windows; see the [eight-event quality audit](fomc-2025-data-quality.md). All 288 non-flat scenarios now close and pass independent time/cash checks. Sampling remains incomplete, all thirty-minute paths exceed the current three-second gap threshold and zero spreads require cost verification. Measured live event availability and actual execution costs remain pending. Preserve compact evidence locally under ignored `data/`; raw logs and broker quotes are not published. Resolve cost and path requirements before implementing LLM target proposals and deterministic risk. Positive benchmark PnL, training fit or a single replay must never be treated as evidence for live trading.
