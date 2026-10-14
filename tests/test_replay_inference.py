@@ -126,7 +126,7 @@ def run_case(data=None, **client_kwargs):
     clock = FakeClock()
     client = FakeClient(clock, **client_kwargs)
     config = ReplayInferenceConfig(provider=client.provider, requested_model=client.model)
-    manifest = freeze_manifest(case, config)
+    manifest = freeze_manifest(case, config).model_copy(update={"created_at": clock.now()})
     result = asyncio.run(ReplayInferenceRunner(client, clock=clock).run(case, manifest))
     return result, client
 
@@ -289,7 +289,7 @@ def test_run_and_manifest_cannot_silently_change_inputs_prompts_or_client_settin
     clock = FakeClock()
     client = FakeClient(clock)
     config = ReplayInferenceConfig(provider=client.provider, requested_model=client.model)
-    manifest = freeze_manifest(case, config)
+    manifest = freeze_manifest(case, config).model_copy(update={"created_at": clock.now()})
     for modified in (
         manifest.model_copy(update={"memory_prompt_hash": "different"}),
         manifest.model_copy(update={"case_id": "different"}),
