@@ -63,4 +63,4 @@ Historical backfills contain **market quote timestamps**, not the time EventLens
 
 ## v0.7 follow-up
 
-The [offline accounting milestone](research-replay.md) adds bounded Demo snapshot sampling and independent long/short/flat cost scenarios. Existing compact checkpoints remain sparse evidence. The revised C# source passed an offline API-reference compile; native Build and collection of sampled windows remain pending. Defaults keep sampling off. No brokerage connector or orders were added.
+The [offline accounting milestone](research-replay.md) adds bounded Demo snapshot sampling and independent long/short/flat cost scenarios. Existing compact checkpoints remain sparse evidence. The revised C# source passed an offline API-reference compile and a native Demo Build/backtest, collecting 2,094 snapshots around June 18, 2025. All predeclared entry/exit endpoints were available; sampling gaps remain explicitly flagged. Seven catalog windows remain pending. Defaults keep sampling off. No brokerage connector or orders were added.

@@ -11,7 +11,7 @@ This milestone adds a small EUR/USD research ledger and a bounded Demo data samp
 | [January 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250129a.htm) | 19:00 | Sampled window pending |
 | [March 19](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250319a.htm) | 18:00 | Sampled window pending |
 | [May 7](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250507a.htm) | 18:00 | Sampled window pending |
-| [June 18](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250618a.htm) | 18:00 | Existing sparse checkpoints; sampled window pending |
+| [June 18](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250618a.htm) | 18:00 | 2,094 Demo sampled snapshots collected; gaps disclosed below |
 | [July 30](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250730a.htm) | 18:00 | Sampled window pending |
 | [September 17](https://www.federalreserve.gov/newsevents/pressreleases/monetary20250917a.htm) | 18:00 | Sampled window pending |
 | [October 29](https://www.federalreserve.gov/newsevents/pressreleases/monetary20251029a.htm) | 18:00 | Sampled window pending |
@@ -76,4 +76,23 @@ Memory-only reasoning now reports `ProcessingLatency`, using application-stamped
 
 Local acceptance: 68 pytest tests pass; Ruff and mypy pass. Tests cover independent long/short cash calculations, spread counted once, commissions, adverse slippage, every delay stage, post-readiness quote selection, unavailable exits retaining state, provenance/UTC validation, catalog daylight-saving conversion and reproducible cases. The invented fixture yields 36 closed and 18 flat cases. Each existing real checkpoint dataset yields 12 closed, 24 exit-unavailable and 18 flat cases. These are coverage/accounting checks, not trading performance metrics.
 
-The C# source passed a direct reference compile against the installed cTrader API assembly. A native cTrader Build and actual sampled Demo run remain unverified until the operator runs the new probe. **Code foundation is accepted; expanded quote-window and live-latency evidence are pending.** Next, acquire one bounded Demo window and inspect timing, costs and gaps before expanding the catalog or implementing LLM target proposals and deterministic risk. Positive benchmark PnL, training fit or a single replay must never be treated as evidence for live trading.
+The C# source passed a direct reference compile and subsequently a native Build/run in Pepperstone cTrader 5.9.154. The October 14, 2026 acceptance run used the existing **Demo EURUSD** instance, **Backtesting** tab, accurate server trading data, June 18–19 historical dates, focus `2025-06-18T18:00:00Z` and sample interval 1,000 ms. The probe made no orders; cTrader showed zero backtest PnL. This zero is the read-only probe outcome, not a trading strategy result.
+
+### First sampled-window acceptance
+
+| Check | Observed result |
+|---|---|
+| Bounded window snapshots | 2,094 |
+| First / last market time UTC | 2025-06-18 17:58:00.201 / 18:34:59.182 |
+| Probe invalid / crossed / backward counters | 0 / 0 / 0 |
+| Maximum consecutive sampled-window gap | 5,223 ms |
+| Sampled-window gaps over three seconds | 11 |
+| Independent cases | 36 closed, 18 flat, 0 unavailable |
+| Five-minute observed paths | `sampled`, maximum path gap 2,211 ms |
+| Thirty-minute observed paths | `sampled_with_gaps`, maximum path gap 3,803 ms |
+| Compact gzip evidence size | 16,318 bytes |
+| Evidence SHA256 | `01b2b11a8b3ebc0c4f207a31deaae826f79b48e2b5752451e5d3c0e796bd2179` |
+
+All 36 closed cases were checked using parsed UTC datetimes: entry was at/after readiness and before the scheduled exit order; exit was at/after its readiness. Decimal cash conservation also passed for all closed cases. For example, the assumed 65-second-delay long/five-minute case becomes entry-ready at `18:01:05.000Z` and uses the snapshot at `18:01:05.086Z`; exit-ready is `18:06:05.000Z`, with the snapshot at `18:06:05.032Z`. These are hypothetical observed-quote fills, not broker confirmations.
+
+**Code and first-window endpoint/accounting acceptance pass.** Sampling is incomplete at the one-second bucket level and all thirty-minute paths exceed the current three-second gap threshold; these flags must remain visible. The other seven catalog windows, measured live event availability and actual execution costs remain pending. Preserve the compact evidence locally under ignored `data/`; raw logs and broker quotes are not published. Next, expand the predeclared sample and review gaps before implementing LLM target proposals and deterministic risk. Positive benchmark PnL, training fit or a single replay must never be treated as evidence for live trading.
