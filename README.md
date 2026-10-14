@@ -4,13 +4,15 @@
 
 A foundation for a stateful, real-time event-driven trading agent powered by existing frontier LLM APIs. EventLens maintains persistent trading theses about ongoing situations, revises them as evidence changes, and expresses decisions as a target portfolio subject to deterministic risk limits.
 
-**Status: memory-only LLM integration, offline diagnostics and a research position-proposal contract (v0.9).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
+**Status: memory-only LLM integration, offline diagnostics, a position-proposal contract and explicit historical replay contexts (v0.10).** SQLite stores event evidence, immutable thesis revisions and decision history. A Federal Reserve monetary-policy RSS watcher can discover new FOMC statements, validate source links, record publication/receipt times, and optionally send them to DeepSeek for thesis updates. Its first run baselines existing feed items without paid inference. Offline tests and manual real-source/API checks cover this path; CI makes no paid calls. DeepSeek uses the `deepseek-flash` API alias; serving metadata is retained when available (see [provider model table](https://api-docs.deepseek.com/quick_start/pricing/)). There is no general news/social feed, portfolio execution, risk implementation or trading broker adapter.
 
 **Current research milestone:** EUR/USD × FOMC cost and timing checks. A small offline ledger tests fixed long/short/flat accounting with explicit stage delays, Bid/Ask spread, assumed commission/slippage and missing-data states. All eight predeclared 2025 Demo windows are now collected: **16,298 sampled snapshots**, held locally in about 122 KiB of compact gzip evidence. All 288 non-flat scenarios pass simulated fill-time and cash checks, but every thirty-minute path has sampling gaps and 60.79% of snapshots show zero spread. These cost/path limitations remain unresolved. Processing-time traces distinguish actual LLM processing from source-text age. This is not an LLM strategy backtest or evidence of profitability. See the [eight-event data quality report](docs/fomc-2025-data-quality.md), [research replay methods](docs/research-replay.md) and the [earlier three-event preview](docs/fomc-replay-preview.md).
 
 **Cost/path follow-up:** the March 100 ms Demo replay reproduces all 2,009 original snapshots and records all 4,992 valid ticks delivered to the probe; a 9.845-second gap remains. Explicit spread-floor and minimum-commission safeguards now support five assumed floor levels across the eight original events. All 480 fixed-direction cases close, and higher floors never improve same-case net PnL. Demo symbol fee metadata and manually configured simulator fees are recorded separately; no charged fill fee is verified. See [cost/path evidence and acceptance](docs/cost-path-check.md).
 
-**Position-proposal foundation:** a provider-neutral JSON schema links a proposed long/short/flat direction to exact thesis revisions and current-event evidence. A pinned manifest fixes EUR/USD, 1,000 EUR directional size, a five-minute signal-time horizon, and all assumed delay/cost sensitivities. Pure checks validate supplied context and always return `execution_authorized=false`. This stage makes no model calls and does not implement the historical context adapter, full hard risk or fills. See [proposal contract and frozen rules](docs/decision-protocol.md).
+**Position-proposal foundation:** a provider-neutral JSON schema links a proposed long/short/flat direction to exact thesis revisions and current-event evidence. A pinned manifest fixes EUR/USD, 1,000 EUR directional size, a five-minute signal-time horizon, and all assumed delay/cost sensitivities. Pure checks validate supplied context and always return `execution_authorized=false`. The v0.9 proposal stage makes no model calls and does not implement full hard risk or fills. The separate v0.10 context adapter below supplies an explicit historical input boundary. See [proposal contract and frozen rules](docs/decision-protocol.md).
+
+**Historical context foundation:** archived events and market captures retain their original clocks in an audit envelope. A separate model view uses explicitly assumed event/quote availability, reads only quotes and committed run-local thesis revisions available by the portfolio reasoning cutoff, and rejects missing/stale data. Future prices, outcome labels and archive capture clocks are excluded from that view. This offline stage makes no API calls, proposals or fills. See [historical context and timestamp acceptance](docs/historical-context.md).
 
 ## The core idea
 
@@ -57,6 +59,7 @@ eventlens/
 │   ├── synthetic-ctrader-probe.log
 │   ├── synthetic-research-window.json
 │   ├── synthetic-position-proposal.json
+│   ├── synthetic-historical-context.json
 │   └── position-proposal.schema.json
 ├── ctrader/
 │   └── EventLensTickProbe.cs # Backtesting-only, read-only Demo data check
@@ -71,7 +74,8 @@ eventlens/
 │   ├── fomc-2025-data-quality.md
 │   ├── research-replay.md
 │   ├── cost-path-check.md
-│   └── decision-protocol.md
+│   ├── decision-protocol.md
+│   └── historical-context.md
 ├── scripts/
 │   ├── audit_fomc_windows.py # Reproduce quality checks from local compact evidence
 │   └── audit_cost_path.py # Offline cost floors and one dense-path diagnostic
@@ -89,6 +93,7 @@ eventlens/
 │   ├── reasoning.py     # Proposal validation and memory-only orchestration
 │   ├── decision_protocol.py # Research proposal schema and pinned rules
 │   ├── decision_cli.py   # Offline schema/export/context checks
+│   ├── historical_context.py # Separate replay clocks and point-in-time input view
 │   ├── latency.py       # Observed application processing traces
 │   ├── fed.py           # Official FOMC RSS intake, validation and durable inbox
 │   ├── fed_cli.py       # One-shot or continuous polling command
@@ -118,6 +123,7 @@ eventlens/
 │   ├── test_cost_floors.py
 │   ├── test_probe_diagnostics.py
 │   ├── test_decision_protocol.py
+│   ├── test_historical_context.py
 │   └── test_latency.py
 └── .github/workflows/
     └── tests.yml
@@ -156,6 +162,7 @@ eventlens-research window examples/synthetic-research-window.json
 eventlens-decision schema
 eventlens-decision protocol
 eventlens-decision check examples/synthetic-position-proposal.json
+eventlens-decision replay-context examples/synthetic-historical-context.json
 pytest -q
 ruff check .
 mypy src
@@ -185,6 +192,8 @@ See [Fed intake and acceptance](docs/fed-intake.md) for bootstrap, failure and t
 Implemented: immutable typed contracts, UTC validation, transactional SQLite memory, revision/expiry/evidence checks, historical snapshots, a provider-neutral JSON client interface, DeepSeek adapter, memory-only proposal validation, processing-time traces, official Fed polling adapter, durable collector inbox, CLIs and tests. The EUR/USD market-data path has an offline historical tick decoder, a read-only cTrader Demo replay probe and **indicative** checkpoint labels. The offline research ledger adds hypothetical fixed-position accounting and explicit gaps; it is separate from the future risk-approved shadow executor. The eight-event audit checks provenance, one-second bucket coverage, spreads and independent cash/fill invariants. Current real data supports endpoint checks, not continuous-path or strategy validation.
 
 Defined but **not implemented**: semantic deduplication across different URLs/sources, independent fact-checking, non-Fed collectors, portfolio reasoning, portfolio reconciliation, risk limits and shadow fills. No broker is hard-coded. No claims are made about event alpha, forecast accuracy or profitability.
+
+An offline historical context adapter is also implemented; it constructs a separate allowlisted replay input rather than rewriting live event clocks. It is not connected to model inference, risk or fills.
 
 The LLM stage stops at memory updates for review. See [memory storage and acceptance](docs/memory.md). The deterministic demo still uses predetermined decisions; the optional `reason` command invokes DeepSeek. All non-null portfolio targets remain rejected. There is no live trading path.
 

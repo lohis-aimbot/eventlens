@@ -25,4 +25,5 @@ jobs:
       - run: eventlens-research window examples/synthetic-research-window.json
       - run: eventlens-decision schema
       - run: eventlens-decision check examples/synthetic-position-proposal.json
+      - run: eventlens-decision replay-context examples/synthetic-historical-context.json
       - run: python -m build
