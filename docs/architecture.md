@@ -1,4 +1,4 @@
-# Architecture and module map — v0.13
+# Architecture and module map — v0.14
 
 The target is a small LLM-driven intraday system: financial events plus expectations,
 quotes, positions and relevant thesis memory lead to a position proposal, independent
@@ -13,6 +13,8 @@ configurable research choices. Existing FOMC experiments retain their original s
 | `deepseek.py` | Provider-neutral JSON client contract and DeepSeek HTTP adapter |
 | `memory.py`, `sqlite_memory.py` | Memory contract, raw event evidence, immutable revisions, atomic commits, conflict and recovery checks |
 | `reasoning.py` | Validated create/update/ignore memory decisions; no portfolio targets |
+| `observer.py` | Provider-neutral capture contracts, dedicated SQLite payload/revision storage and cutoff-aware history |
+| `sources/wallstreetcn.py` | Bounded news/calendar website polling, normalization, rejection records and retry/pacing |
 | `sources/events.py` | General source/filter interfaces only |
 | `sources/fed.py` | Official Fed polling, URL validation, retry/pacing, durable inbox and optional memory reasoning |
 | `research/` | Historical ticks, source/capture provenance, cutoff selection, replay labels, fixed-position costs, opt-in model replay and durable call journal |
@@ -36,10 +38,11 @@ command. Two LLM roles can be ordinary isolated calls; no agent platform is need
 | `replay_inference`, `series_replay` | `eventlens.research.<name>` |
 
 Old Python imports of moved modules must be updated; no compatibility module aliases
-are installed. The eight existing console entrypoints and `python -m` CLI modules keep
+are installed. The eight older console entrypoints and `python -m` CLI modules keep
 their arguments and behavior. The grouped command tree is:
 
 ```text
+eventlens observe <capture, demo, report or history>
 eventlens memory <existing memory arguments>
 eventlens source fed <existing collector arguments>
 eventlens research accounting <existing eventlens-research arguments>
@@ -50,9 +53,13 @@ eventlens research infer <existing eventlens-infer arguments>
 eventlens research series <existing eventlens-series arguments>
 ```
 
+The observer has a separate SQLite format and does not migrate memory/replay databases.
+Its `CaptureSource` boundary returns source observations rather than mislabeling future
+calendar schedules as published `Event` objects. Read [observer timing](observer.md).
+
 Config paths stay under `configs/` to preserve existing commands and local workflows.
-No database migration, changed prompt, changed schema, revised cost/latency rule or
-historical rerun is part of this release. Proposal schemas and experiment identities
+The organization step changed no existing database format, prompt, schema, cost/latency
+rule or historical experiment. The new observer likewise leaves those contracts unchanged. Proposal schemas and experiment identities
 are checked against a pre-move snapshot. Evidence and data stay out of Git.
 
 ## Runtime design constraints, not implemented features

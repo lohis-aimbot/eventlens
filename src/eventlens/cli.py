@@ -30,10 +30,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         sys.argv[1:] if argv is None else argv,
         prog="eventlens",
         description=__doc__ or "EventLens commands",
-        choices=("memory", "source", "research"),
+        choices=("memory", "source", "research", "observe"),
     )
-    if args.command == "memory":
-        module, legacy_name = "memory_cli", "eventlens-memory"
+    if args.command in {"memory", "observe"}:
+        module, legacy_name = (
+            ("memory_cli", "eventlens-memory")
+            if args.command == "memory"
+            else ("observer_cli", "eventlens-observe")
+        )
         remaining = args.arguments
     else:
         routes = _SOURCES if args.command == "source" else _RESEARCH

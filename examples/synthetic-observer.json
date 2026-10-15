@@ -1,0 +1,42 @@
+{
+  "description": "Invented observer inputs, never real news, data or trading evidence.",
+  "received_at": "2026-01-01T12:00:00+00:00",
+  "calendar_day": "2026-01-01",
+  "news": {
+    "code": 20000,
+    "data": {
+      "items": [
+        {
+          "id": 1900000000,
+          "title": "SYNTHETIC policy headline",
+          "content_text": "Invented policy evidence for offline capture checks only.",
+          "content_more": "",
+          "display_time": 1767268798,
+          "score": 2,
+          "uri": "https://wallstreetcn.com/livenews/1900000000"
+        }
+      ]
+    }
+  },
+  "calendar": {
+    "code": 20000,
+    "data": {
+      "items": [
+        {
+          "id": 1900000001,
+          "title": "SYNTHETIC macro indicator",
+          "country": "Synthetic",
+          "public_date": 1767269100,
+          "actual": "",
+          "forecast": 0,
+          "previous": -1.5,
+          "revised": 0,
+          "unit": "%",
+          "importance": 3,
+          "period": "invented",
+          "foresight": "Invented scheduled entry, not a published release."
+        }
+      ]
+    }
+  }
+}

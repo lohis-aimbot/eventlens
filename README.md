@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.13 · Research foundation.** Event intake, durable memory and historical research tools are implemented. Realtime portfolio decisions, hard risk, shadow execution and broker trading are not yet implemented. No profitability has been established.
+> **v0.14 · Source capture foundation.** Bounded financial-news/calendar capture, durable memory and historical tools are implemented. Live quotes, integrated LLM observation, hard risk and execution remain unfinished. No profitability has been established.
 
 <table>
   <tr>
@@ -71,7 +71,7 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 
 | Layer | Implemented | Next capability |
 |---|---|---|
-| **Information** | Fed FOMC RSS polling, raw text, source/receipt clocks, durable inbox | General financial news and calendar adapters |
+| **Information** | Fed RSS plus WallStreetCN news/calendar capture, raw responses, receipt/availability clocks and revision history | Wider source validation, live quote alignment and long-running observation |
 | **LLM & memory** | DeepSeek JSON adapter, validated thesis updates, immutable SQLite history | Reliable realtime decisions and bounded intraday context |
 | **Market data** | Offline Bid/Ask decoding and Demo historical-data diagnostics | Live quotes and authoritative positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
@@ -91,6 +91,9 @@ python -m pip install -e '.[dev]'
 # Explore the command groups
 eventlens --help
 
+# Capture invented news/calendar inputs offline into a dedicated demo database
+eventlens observe demo examples/synthetic-observer.json
+
 # Validate a synthetic proposal; execution remains disabled
 eventlens research decision check examples/synthetic-position-proposal.json
 
@@ -100,11 +103,27 @@ eventlens research series plan examples/synthetic-series-plan.json
 
 | Command group | Purpose |
 |---|---|
+| `eventlens observe …` | Bounded source capture, offline demo and read-only revision inspection |
 | `eventlens memory …` | Memory inspection, synthetic demo and explicit memory reasoning |
 | `eventlens source fed …` | Existing Fed polling collector; use `--help` to inspect options |
 | `eventlens research …` | Historical data, accounting, proposal validation and opt-in inference |
 
-The `check` and `plan` examples above are offline. Running the Fed collector accesses its public source; paid research inference requires credentials and explicit opt-in. There is no `observe` command yet. All eight older `eventlens-*` commands remain available.
+The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Source capture accesses public website endpoints; paid research inference remains separate and opt-in. The observer does not yet fetch market quotes or invoke an LLM. All eight older `eventlens-*` commands remain available.
+
+<details>
+<summary><strong>Capture financial news and calendar observations</strong></summary>
+
+```bash
+# One bounded cycle: news and the current Shanghai-date calendar; no API key needed
+eventlens observe capture
+
+# Read the resulting local capture report without network access
+eventlens observe report
+```
+
+The first snapshot is a baseline. Later captures retain new records, edits and duplicates without replacing earlier evidence. Calendar schedules and publisher display times are distinct from original release time, which remains unknown. This uses website endpoints without a documented public service guarantee. See [observer operation and timing](docs/observer.md) and [source-capture acceptance](docs/observer-acceptance.md).
+
+</details>
 
 <details>
 <summary><strong>Model setup and existing command compatibility</strong></summary>
@@ -133,7 +152,7 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 - [x] **Foundation** — typed contracts, durable evidence and thesis memory, model adapter.
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
-- [ ] **Realtime observer** — collect broad financial events and quotes, then record structured decisions without orders.
+- [ ] **Realtime observer** — source capture is implemented; live quotes, structured LLM decisions and end-to-end timing acceptance are next.
 - [ ] **Evaluation & protection** — realistic replay/shadow accounting, independent hard limits and daily exits.
 - [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after earlier gates pass.
 
@@ -146,7 +165,8 @@ The next milestone is observation, not automatic orders. News/provider selection
 ```text
 eventlens/
 ├── src/eventlens/
-│   ├── sources/         Event interfaces and Fed adapter
+│   ├── sources/         Fed and WallStreetCN source adapters
+│   ├── observer.py      Raw captures, revisions and availability history
 │   ├── research/        Historical data, replay and experiments
 │   ├── trading/         Agent, portfolio, risk and execution interfaces
 │   ├── contracts.py     Shared typed records and UTC validation
@@ -185,6 +205,7 @@ CI runs offline/synthetic checks on Python 3.11 and 3.12, without paid model or 
 |---|---|
 | [Architecture](docs/architecture.md) | [Research replay](docs/research/research-replay.md) |
 | [Roadmap](docs/roadmap.md) | [Historical input boundaries](docs/research/historical-context.md) |
+| [Observer capture](docs/observer.md) | [Source-capture acceptance](docs/observer-acceptance.md) |
 | [Thesis memory](docs/memory.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
 | [Fed intake](docs/fed-intake.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
 

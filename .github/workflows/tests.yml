@@ -19,6 +19,9 @@ jobs:
       - run: mypy src scripts
       - run: pytest -q
       - run: eventlens --help
+      - run: eventlens observe --help
+      - run: eventlens observe demo examples/synthetic-observer.json
+      - run: eventlens observe --database data/observer-demo.sqlite report
       - run: eventlens source fed --help
       - run: eventlens research decision check examples/synthetic-position-proposal.json
       - run: eventlens research infer plan examples/synthetic-inference-case.json

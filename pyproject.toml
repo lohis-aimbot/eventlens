@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eventlens"
-version = "0.13.0"
+version = "0.14.0"
 description = "LLM-driven intraday event research and trading-agent foundation"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,6 +12,7 @@ dependencies = ["pydantic>=2.8,<3", "httpx>=0.27,<1"]
 
 [project.scripts]
 eventlens = "eventlens.cli:main"
+eventlens-observe = "eventlens.observer_cli:main"
 eventlens-memory = "eventlens.memory_cli:main"
 eventlens-fed = "eventlens.fed_cli:main"
 eventlens-market = "eventlens.market_cli:main"

@@ -7,7 +7,10 @@ permission to launch collectors, spend API credits or connect a broker automatic
 strict type checks, relative Markdown links, command smoke checks and isolated package
 build passed. All 16 moved modules retain their non-import logic; pre-move research
 fingerprints match. No model, news or broker API was called during this reorganization.
-Stages 1–5 below remain planned.
+**Stage 1A now implements source capture:** news/calendar polling, raw payloads,
+revision history and post-commit availability markers. See [acceptance](observer-acceptance.md).
+Live quote alignment, extended sampling, integrated LLM observation and the rest of
+Stage 1 acceptance remain pending; Stages 2–5 remain planned.
 
 | Stage | Work | Acceptance |
 |---|---|---|
@@ -18,7 +21,8 @@ Stages 1–5 below remain planned.
 | 4 — Independent protection | Implement position sizing, loss limits, spread/freshness checks, timed exits, daily close, restart reconciliation and kill switch | Fault tests show no duplicate exposure; no new orders on bad inputs; protection continues without the LLM; exits are confirmed rather than assumed |
 | 5 — cTrader Demo | Connect only an explicitly verified Demo account through an isolated adapter | Reconcile intents/orders/fills/positions, measured costs and latency; compare Demo and shadow outcomes; never use live credentials |
 
-Financial-news aggregators are candidates, not yet integrated sources. Social media can
+WallStreetCN website news/calendar endpoints are now an initial capture adapter.
+Long-term provider suitability and delivery latency still need evaluation. Social media can
 be added behind the same adapter boundary after provenance and duplicate handling are
 defined. Broad news collection does not require an unlimited initial instrument list.
 

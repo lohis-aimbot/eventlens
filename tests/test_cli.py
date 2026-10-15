@@ -21,12 +21,14 @@ from eventlens.cli import main
         (["research", "decision"], "decision_cli"),
         (["research", "infer"], "inference_cli"),
         (["research", "series"], "series_cli"),
+        (["observe"], "observer_cli"),
     ],
 )
 def test_existing_help_is_unchanged_and_dispatch_restores_argv(prefix, module, monkeypatch, capsys):
     legacy_name = {
         "research_cli": "eventlens-research",
         "inference_cli": "eventlens-infer",
+        "observer_cli": "eventlens-observe",
     }.get(module, f"eventlens-{module.removesuffix('_cli')}")
     monkeypatch.setattr(sys, "argv", [legacy_name, "--help"])
     with pytest.raises(SystemExit) as legacy:
@@ -91,8 +93,9 @@ assert 'eventlens.series_cli' not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
-def test_observer_is_not_advertised_as_implemented(capsys):
-    with pytest.raises(SystemExit) as rejected:
-        main(["observe"])
-    assert rejected.value.code == 2
-    assert "invalid choice" in capsys.readouterr().err
+def test_observer_help_describes_only_source_capture(capsys):
+    with pytest.raises(SystemExit) as help_result:
+        main(["observe", "--help"])
+    assert help_result.value.code == 0
+    text = capsys.readouterr().out
+    assert "no LLM" in text and "capture" in text and "report" in text
