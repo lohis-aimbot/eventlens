@@ -111,3 +111,5 @@ returns nonzero status after retaining its evidence. No automatic trade or defau
 prediction is generated.
 
 See [acceptance](observer-acceptance.md) for the bounded live-source check and its limits.
+The separate [Demo quote path](live-quotes.md) adds optional sampled quotes and retrospective
+news alignment; the news capture command itself still calls neither cTrader nor an LLM.

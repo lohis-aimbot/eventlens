@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.14 · Source capture foundation.** Bounded financial-news/calendar capture, durable memory and historical tools are implemented. Live quotes, integrated LLM observation, hard risk and execution remain unfinished. No profitability has been established.
+> **v0.15 · Observation foundation.** News/calendar capture, bounded Demo EURUSD quote sampling, time-alignment audits, memory and historical tools are implemented. Quote quality still needs validation; integrated LLM observation, hard risk and execution remain unfinished. No profitability has been established.
 
 <table>
   <tr>
@@ -71,9 +71,9 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 
 | Layer | Implemented | Next capability |
 |---|---|---|
-| **Information** | Fed RSS plus WallStreetCN news/calendar capture, raw responses, receipt/availability clocks and revision history | Wider source validation, live quote alignment and long-running observation |
+| **Information** | Fed RSS plus WallStreetCN news/calendar capture, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
 | **LLM & memory** | DeepSeek JSON adapter, validated thesis updates, immutable SQLite history | Reliable realtime decisions and bounded intraday context |
-| **Market data** | Offline Bid/Ask decoding and Demo historical-data diagnostics | Live quotes and authoritative positions |
+| **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture and as-of alignment | Representative live quote quality and authoritative positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
 | **Trading** | Typed agent, portfolio, risk and execution interfaces | Hard risk, exits, shadow fills and cTrader Demo execution |
 
@@ -103,12 +103,12 @@ eventlens research series plan examples/synthetic-series-plan.json
 
 | Command group | Purpose |
 |---|---|
-| `eventlens observe …` | Bounded source capture, offline demo and read-only revision inspection |
+| `eventlens observe …` | Bounded source/quote capture, offline demo and read-only timing audits |
 | `eventlens memory …` | Memory inspection, synthetic demo and explicit memory reasoning |
 | `eventlens source fed …` | Existing Fed polling collector; use `--help` to inspect options |
 | `eventlens research …` | Historical data, accounting, proposal validation and opt-in inference |
 
-The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Source capture accesses public website endpoints; paid research inference remains separate and opt-in. The observer does not yet fetch market quotes or invoke an LLM. All eight older `eventlens-*` commands remain available.
+The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Source capture accesses public website endpoints; paid research inference remains separate and opt-in. The optional quote watcher reads a separate, explicitly started Demo bridge; it does not invoke an LLM. All eight older `eventlens-*` commands remain available.
 
 <details>
 <summary><strong>Capture financial news and calendar observations</strong></summary>
@@ -121,7 +121,7 @@ eventlens observe capture
 eventlens observe report
 ```
 
-The first snapshot is a baseline. Later captures retain new records, edits and duplicates without replacing earlier evidence. Calendar schedules and publisher display times are distinct from original release time, which remains unknown. This uses website endpoints without a documented public service guarantee. See [observer operation and timing](docs/observer.md) and [source-capture acceptance](docs/observer-acceptance.md).
+The first snapshot is a baseline. Later captures retain new records, edits and duplicates without replacing earlier evidence. Calendar schedules and publisher display times are distinct from original release time, which remains unknown. This uses website endpoints without a documented public service guarantee. See [observer operation and timing](docs/observer.md) and [source-capture acceptance](docs/observer-acceptance.md). A separate [Demo quote bridge](docs/live-quotes.md) supports time-alignment audits; it does not place orders.
 
 </details>
 
@@ -152,7 +152,7 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 - [x] **Foundation** — typed contracts, durable evidence and thesis memory, model adapter.
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
-- [ ] **Realtime observer** — source capture is implemented; live quotes, structured LLM decisions and end-to-end timing acceptance are next.
+- [ ] **Realtime observer** — source/quote capture and timing audits are implemented; quote quality, important-release coverage and integrated LLM observation remain pending.
 - [ ] **Evaluation & protection** — realistic replay/shadow accounting, independent hard limits and daily exits.
 - [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after earlier gates pass.
 
@@ -167,6 +167,7 @@ eventlens/
 ├── src/eventlens/
 │   ├── sources/         Fed and WallStreetCN source adapters
 │   ├── observer.py      Raw captures, revisions and availability history
+│   ├── quotes.py        Demo quote evidence and as-of input alignment
 │   ├── research/        Historical data, replay and experiments
 │   ├── trading/         Agent, portfolio, risk and execution interfaces
 │   ├── contracts.py     Shared typed records and UTC validation
@@ -206,6 +207,7 @@ CI runs offline/synthetic checks on Python 3.11 and 3.12, without paid model or 
 | [Architecture](docs/architecture.md) | [Research replay](docs/research/research-replay.md) |
 | [Roadmap](docs/roadmap.md) | [Historical input boundaries](docs/research/historical-context.md) |
 | [Observer capture](docs/observer.md) | [Source-capture acceptance](docs/observer-acceptance.md) |
+| [Demo quote observation](docs/live-quotes.md) | [Quote/alignment acceptance](docs/live-quotes-acceptance.md) |
 | [Thesis memory](docs/memory.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
 | [Fed intake](docs/fed-intake.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
 

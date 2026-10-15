@@ -1,0 +1,384 @@
+"""Point-in-time quote observations. No account positions, model or order capabilities."""
+
+import fcntl
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Callable, Literal, Self
+from uuid import UUID
+
+from pydantic import Field, model_validator
+
+from .contracts import Contract, Identifier, Timestamp
+from .observer import Basis, ObserverStore
+
+
+class BridgeStart(Contract):
+    version: Literal[1]
+    kind: Literal["start"]
+    session_id: UUID
+    account_mode: Literal["demo"]
+    running_mode: Literal["realtime"]
+    symbol: Literal["EURUSD"]
+    started_at: Timestamp
+    sample_interval_ms: int = Field(strict=True, ge=1000, le=10000)
+    duration_seconds: int = Field(strict=True, ge=10, le=600)
+
+
+class BridgeQuote(Contract):
+    version: Literal[1]
+    kind: Literal["quote"]
+    session_id: UUID
+    sequence: int = Field(strict=True, ge=1)
+    symbol: Literal["EURUSD"]
+    source_at: Timestamp
+    bridge_at: Timestamp
+    bid: Decimal = Field(gt=0)
+    ask: Decimal = Field(gt=0)
+
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if self.ask < self.bid or self.source_at > self.bridge_at:
+            raise ValueError("Crossed quote or market clock ahead of bridge")
+        return self
+
+
+class BridgeStop(Contract):
+    version: Literal[1]
+    kind: Literal["stop"]
+    session_id: UUID
+    stopped_at: Timestamp
+    quotes: int = Field(strict=True, ge=0)
+
+
+class QuoteObservation(Contract):
+    provider: Identifier = "ctrader_algo"
+    basis: Basis
+    quote: BridgeQuote
+    received_at: Timestamp
+    recorded_at: Timestamp
+    available_at: Timestamp
+
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if not self.quote.bridge_at <= self.received_at <= self.recorded_at <= self.available_at:
+            raise ValueError("Quote observation clocks are out of order")
+        return self
+
+
+def utc(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Timezone-aware clocks are required")
+    return value.astimezone(UTC)
+
+
+class QuoteStore:
+    """Dedicated append-only quote evidence; availability follows the data commit."""
+
+    APPLICATION_ID = 0x45565154
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        readonly: bool = False,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.path, self.clock = path.resolve(), clock
+        if readonly and not self.path.exists():
+            raise FileNotFoundError(self.path)
+        if not readonly:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(
+            self.path.as_uri() + ("?mode=ro" if readonly else "?mode=rwc"), uri=True
+        )
+        self.db.row_factory = sqlite3.Row
+        try:
+            app = self.db.execute("PRAGMA application_id").fetchone()[0]
+            tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            if app not in {0, self.APPLICATION_ID} or (app == 0 and (tables or readonly)):
+                raise ValueError("Not an EventLens quote database")
+            if (
+                app == self.APPLICATION_ID
+                and self.db.execute("PRAGMA user_version").fetchone()[0] != 1
+            ):
+                raise ValueError("Unsupported quote database version")
+            self.db.execute("PRAGMA foreign_keys=ON")
+            if not readonly:
+                self.db.execute("PRAGMA synchronous=FULL")
+                self.db.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS quote_sessions (
+                        session_id TEXT PRIMARY KEY, basis TEXT NOT NULL, start TEXT NOT NULL,
+                        received_at TEXT NOT NULL, stop TEXT);
+                    CREATE TABLE IF NOT EXISTS quote_observations (
+                        session_id TEXT NOT NULL REFERENCES quote_sessions(session_id),
+                        sequence INTEGER NOT NULL, symbol TEXT NOT NULL, basis TEXT NOT NULL,
+                        source_at TEXT NOT NULL, bridge_at TEXT NOT NULL, received_at TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL, available_at TEXT, raw_line TEXT NOT NULL,
+                        quote TEXT NOT NULL, PRIMARY KEY(session_id, sequence));
+                    CREATE INDEX IF NOT EXISTS quote_lookup ON quote_observations
+                        (symbol, basis, available_at, received_at);
+                    CREATE TABLE IF NOT EXISTS quote_failures (
+                        received_at TEXT NOT NULL, reason TEXT NOT NULL, raw_line TEXT NOT NULL);
+                    """
+                )
+                self.db.execute(f"PRAGMA application_id={self.APPLICATION_ID}")
+                self.db.execute("PRAGMA user_version=1")
+                self.db.commit()
+        except BaseException:
+            self.db.close()
+            raise
+
+    def close(self) -> None:
+        self.db.close()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        with self.path.with_suffix(self.path.suffix + ".observer.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("Another quote observer owns this database") from exc
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def start(self, item: BridgeStart, received: datetime, *, basis: Basis) -> None:
+        item = BridgeStart.model_validate(item.model_dump())
+        received = utc(received)
+        if item.started_at > received:
+            raise ValueError("Future bridge start")
+        with self.db:
+            self.db.execute(
+                "INSERT INTO quote_sessions VALUES (?, ?, ?, ?, NULL)",
+                (str(item.session_id), basis, item.model_dump_json(), received.isoformat()),
+            )
+
+    def record(self, item: BridgeQuote, received: datetime, raw_line: str) -> None:
+        item = BridgeQuote.model_validate(item.model_dump())
+        received, now = utc(received), utc(self.clock())
+        if item.bridge_at > received or now < received:
+            raise ValueError("Future bridge receipt or storage clock rollback")
+        session = self.db.execute(
+            "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
+        ).fetchone()
+        if session is None or session["stop"] is not None:
+            raise ValueError("Quote requires an open Demo session")
+        start = BridgeStart.model_validate_json(session["start"])
+        if item.symbol != start.symbol or not start.started_at <= item.bridge_at:
+            raise ValueError("Quote does not match session identity/time")
+        if item.bridge_at > start.started_at + timedelta(seconds=start.duration_seconds + 2):
+            raise ValueError("Quote is outside the bounded session")
+        previous = self.db.execute(
+            "SELECT * FROM quote_observations WHERE session_id=? ORDER BY sequence DESC LIMIT 1",
+            (str(item.session_id),),
+        ).fetchone()
+        if previous and (
+            item.sequence <= previous["sequence"]
+            or item.source_at < datetime.fromisoformat(previous["source_at"])
+            or item.bridge_at < datetime.fromisoformat(previous["bridge_at"])
+            or received < datetime.fromisoformat(previous["received_at"])
+        ):
+            raise ValueError("Duplicate, reordered or backward-clock quote")
+        if len(raw_line.encode()) > 16384:
+            raise ValueError("Quote evidence exceeds size limit")
+        with self.db:
+            self.db.execute(
+                "INSERT INTO quote_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                (
+                    str(item.session_id),
+                    item.sequence,
+                    item.symbol,
+                    session["basis"],
+                    item.source_at.isoformat(),
+                    item.bridge_at.isoformat(),
+                    received.isoformat(),
+                    now.isoformat(),
+                    raw_line,
+                    item.model_dump_json(),
+                ),
+            )
+        available = utc(self.clock())
+        if available < now:
+            raise ValueError("Storage clock rollback; quote remains unpublished")
+        with self.db:
+            self.db.execute(
+                "UPDATE quote_observations SET available_at=? WHERE session_id=? AND sequence=?",
+                (available.isoformat(), str(item.session_id), item.sequence),
+            )
+
+    def stop(self, item: BridgeStop, received: datetime) -> None:
+        item = BridgeStop.model_validate(item.model_dump())
+        received = utc(received)
+        session = self.db.execute(
+            "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
+        ).fetchone()
+        if session is None or session["stop"] is not None:
+            raise ValueError("Stop requires an open session")
+        start = BridgeStart.model_validate_json(session["start"])
+        last = self.db.execute(
+            "SELECT MAX(sequence), MAX(bridge_at) FROM quote_observations WHERE session_id=?",
+            (str(item.session_id),),
+        ).fetchone()
+        if not start.started_at <= item.stopped_at <= received or (
+            last[0] is not None
+            and (item.quotes < last[0] or item.stopped_at < datetime.fromisoformat(last[1]))
+        ):
+            raise ValueError("Invalid bridge stop time/count")
+        with self.db:
+            self.db.execute(
+                "UPDATE quote_sessions SET stop=? WHERE session_id=?",
+                (item.model_dump_json(), str(item.session_id)),
+            )
+
+    def failure(self, received: datetime, reason: str, raw_line: str) -> None:
+        with self.db:
+            self.db.execute(
+                "INSERT INTO quote_failures VALUES (?, ?, ?)",
+                (utc(received).isoformat(), reason[:200], raw_line[:16384]),
+            )
+
+    def latest(
+        self, symbol: str, cutoff: datetime, *, basis: Basis = "live_poll"
+    ) -> QuoteObservation | None:
+        cutoff = utc(cutoff)
+        row = self.db.execute(
+            """SELECT * FROM quote_observations WHERE symbol=? AND basis=?
+            AND available_at IS NOT NULL AND available_at<=? ORDER BY received_at DESC,
+            source_at DESC, sequence DESC LIMIT 1""",
+            (symbol, basis, cutoff.isoformat()),
+        ).fetchone()
+        if row is None:
+            return None
+        return QuoteObservation(
+            basis=row["basis"],
+            quote=BridgeQuote.model_validate_json(row["quote"]),
+            received_at=row["received_at"],
+            recorded_at=row["recorded_at"],
+            available_at=row["available_at"],
+        )
+
+    def report(self) -> dict[str, Any]:
+        sessions = []
+        quality: dict[str, dict[str, Any]] = {}
+        for session in self.db.execute("SELECT * FROM quote_sessions ORDER BY rowid"):
+            rows = self.db.execute(
+                "SELECT * FROM quote_observations WHERE session_id=? ORDER BY sequence",
+                (session["session_id"],),
+            )
+            count, last_sequence = 0, 0
+            previous_received: datetime | None = None
+            bucket = quality.setdefault(
+                session["basis"],
+                {
+                    "quotes": 0,
+                    "zero_spread": 0,
+                    "max_sample_receipt_gap_seconds": 0.0,
+                    "max_bridge_to_receipt_seconds": 0.0,
+                },
+            )
+            for row in rows:
+                count += 1
+                last_sequence = row["sequence"]
+                item = BridgeQuote.model_validate_json(row["quote"])
+                received = datetime.fromisoformat(row["received_at"])
+                bucket["quotes"] += 1
+                bucket["zero_spread"] += int(item.ask == item.bid)
+                bucket["max_bridge_to_receipt_seconds"] = max(
+                    bucket["max_bridge_to_receipt_seconds"],
+                    (received - item.bridge_at).total_seconds(),
+                )
+                if previous_received is not None:
+                    bucket["max_sample_receipt_gap_seconds"] = max(
+                        bucket["max_sample_receipt_gap_seconds"],
+                        (received - previous_received).total_seconds(),
+                    )
+                previous_received = received
+            stop = BridgeStop.model_validate_json(session["stop"]) if session["stop"] else None
+            sessions.append(
+                {
+                    "session_id": session["session_id"],
+                    "basis": session["basis"],
+                    "closed": stop is not None,
+                    "quotes": count,
+                    "missing_sequences": (stop.quotes if stop else last_sequence) - count,
+                }
+            )
+        return {
+            "scope": "sampled_demo_quotes_only",
+            "execution_authorized": False,
+            "sessions": self.db.execute("SELECT COUNT(*) FROM quote_sessions").fetchone()[0],
+            "quotes": self.db.execute("SELECT COUNT(*) FROM quote_observations").fetchone()[0],
+            "failures": self.db.execute("SELECT COUNT(*) FROM quote_failures").fetchone()[0],
+            "unpublished": self.db.execute(
+                "SELECT COUNT(*) FROM quote_observations WHERE available_at IS NULL"
+            ).fetchone()[0],
+            "session_details": sessions,
+            "quality_by_basis": quality,
+            "by_basis": [
+                dict(r)
+                for r in self.db.execute(
+                    "SELECT basis, COUNT(*) AS quotes FROM quote_observations GROUP BY basis"
+                )
+            ],
+            "range": dict(
+                self.db.execute(
+                    "SELECT MIN(received_at) AS first_received_at, MAX(received_at) AS last_received_at FROM quote_observations"
+                ).fetchone()
+            ),
+        }
+
+
+def align_news(
+    events: ObserverStore,
+    quotes: QuoteStore,
+    source_id: str,
+    cutoff: datetime,
+    *,
+    symbol: str = "EURUSD",
+    max_quote_age: float = 2,
+    max_event_age: float = 60,
+    basis: Basis = "live_poll",
+) -> dict[str, Any]:
+    """Retrospective audit of observable inputs, never a signal or a simulated fill."""
+    import math
+
+    cutoff = utc(cutoff)
+    if any(not math.isfinite(v) or v < 0 for v in (max_quote_age, max_event_age)):
+        raise ValueError("Freshness limits must be finite and nonnegative")
+    revisions = events.history("news", source_id, basis=basis, as_of=cutoff)
+    quote = quotes.latest(symbol, cutoff, basis=basis)
+    event = revisions[-1] if revisions else None
+    event_age = (cutoff - event.available_at).total_seconds() if event else None
+    quote_age = (cutoff - quote.quote.source_at).total_seconds() if quote else None
+    status = (
+        "missing_event"
+        if event is None
+        else "missing_quote"
+        if quote is None
+        else "stale_event"
+        if event_age is not None and event_age > max_event_age
+        else "stale_quote"
+        if quote_age is not None and quote_age > max_quote_age
+        else "zero_spread"
+        if quote.quote.ask == quote.quote.bid
+        else "aligned_observation"
+    )
+    return {
+        "scope": "retrospective_input_alignment",
+        "status": status,
+        "execution_authorized": False,
+        "basis": basis,
+        "as_of": cutoff.isoformat(),
+        "event": event.model_dump(mode="json") if event else None,
+        "quote": quote.model_dump(mode="json") if quote else None,
+        "event_observation_age_seconds": event_age,
+        "quote_source_age_seconds": quote_age,
+        "spread": str(quote.quote.ask - quote.quote.bid) if quote else None,
+        "limits": {"max_quote_age_seconds": max_quote_age, "max_event_age_seconds": max_event_age},
+    }

@@ -1,4 +1,4 @@
-# Architecture and module map — v0.14
+# Architecture and module map — v0.15
 
 The target is a small LLM-driven intraday system: financial events plus expectations,
 quotes, positions and relevant thesis memory lead to a position proposal, independent
@@ -15,6 +15,9 @@ configurable research choices. Existing FOMC experiments retain their original s
 | `reasoning.py` | Validated create/update/ignore memory decisions; no portfolio targets |
 | `observer.py` | Provider-neutral capture contracts, dedicated SQLite payload/revision storage and cutoff-aware history |
 | `sources/wallstreetcn.py` | Bounded news/calendar website polling, normalization, rejection records and retry/pacing |
+| `quotes.py`, `quotes_cli.py` | Dedicated Demo quote store, quality reporting and retrospective news/quote cutoff checks |
+| `sources/ctrader_demo.py` | Fresh local-file handshake, bounded tailing and quote validation; no order methods |
+| `ctrader/EventLensQuoteBridge.cs` | Sampled Demo EURUSD real-time snapshots, sandbox files and automatic stop |
 | `sources/events.py` | General source/filter interfaces only |
 | `sources/fed.py` | Official Fed polling, URL validation, retry/pacing, durable inbox and optional memory reasoning |
 | `research/` | Historical ticks, source/capture provenance, cutoff selection, replay labels, fixed-position costs, opt-in model replay and durable call journal |
@@ -43,6 +46,7 @@ their arguments and behavior. The grouped command tree is:
 
 ```text
 eventlens observe <capture, demo, report or history>
+eventlens observe quotes <watch, report or align>
 eventlens memory <existing memory arguments>
 eventlens source fed <existing collector arguments>
 eventlens research accounting <existing eventlens-research arguments>
@@ -55,7 +59,8 @@ eventlens research series <existing eventlens-series arguments>
 
 The observer has a separate SQLite format and does not migrate memory/replay databases.
 Its `CaptureSource` boundary returns source observations rather than mislabeling future
-calendar schedules as published `Event` objects. Read [observer timing](observer.md).
+calendar schedules as published `Event` objects. Read [observer timing](observer.md). The separate [Demo quote path](live-quotes.md) does not
+change existing historical databases or grant execution approval.
 
 Config paths stay under `configs/` to preserve existing commands and local workflows.
 The organization step changed no existing database format, prompt, schema, cost/latency

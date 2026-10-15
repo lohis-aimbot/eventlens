@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import sqlite3
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,11 @@ def demo(store: ObserverStore, path: Path) -> bool:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["quotes"]:
+        from .quotes_cli import main as quotes_main
+
+        quotes_main(sys.argv[2:])
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database", type=Path, help="Dedicated observer SQLite database")
     parser.add_argument("--verbose", action="store_true")
@@ -102,7 +108,18 @@ def main() -> None:
     history.add_argument(
         "--as-of", type=datetime.fromisoformat, help="Timezone-aware storage cutoff"
     )
+    quotes = commands.add_parser(
+        "quotes", add_help=False, help="Local Demo quote watch/report/alignment"
+    )
+    quotes.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.command == "quotes":
+        if args.database is not None or args.verbose:
+            parser.error("Put quote options after 'quotes'; the news database is separate")
+        from .quotes_cli import main as quotes_main
+
+        quotes_main(args.arguments)
+        return
     if args.command == "capture" and (
         not 1 <= args.polls <= 100
         or not 1 <= args.limit <= 100

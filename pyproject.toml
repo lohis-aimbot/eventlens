@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eventlens"
-version = "0.14.0"
+version = "0.15.0"
 description = "LLM-driven intraday event research and trading-agent foundation"
 readme = "README.md"
 requires-python = ">=3.11"

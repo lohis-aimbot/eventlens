@@ -20,6 +20,7 @@ jobs:
       - run: pytest -q
       - run: eventlens --help
       - run: eventlens observe --help
+      - run: eventlens observe quotes --help
       - run: eventlens observe demo examples/synthetic-observer.json
       - run: eventlens observe --database data/observer-demo.sqlite report
       - run: eventlens source fed --help

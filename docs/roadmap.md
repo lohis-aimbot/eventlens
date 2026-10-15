@@ -9,8 +9,11 @@ build passed. All 16 moved modules retain their non-import logic; pre-move resea
 fingerprints match. No model, news or broker API was called during this reorganization.
 **Stage 1A now implements source capture:** news/calendar polling, raw payloads,
 revision history and post-commit availability markers. See [acceptance](observer-acceptance.md).
-Live quote alignment, extended sampling, integrated LLM observation and the rest of
-Stage 1 acceptance remain pending; Stages 2–5 remain planned.
+**Stage 1B adds bounded Demo EURUSD quote capture and as-of news alignment.** Its
+[short observation](live-quotes-acceptance.md) passed storage/timing checks but exposed
+29/33 zero-spread samples and a stale quote at the news cutoff. Representative quote
+quality, extended/important-release sampling and the rest of Stage 1 acceptance remain
+pending; Stages 2–5 remain planned.
 
 | Stage | Work | Acceptance |
 |---|---|---|
