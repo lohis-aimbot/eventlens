@@ -32,9 +32,9 @@ EventLens explores how existing LLM APIs can interpret financial events, maintai
 
 <table>
   <tr>
-    <td width="33%" valign="top"><strong>01 / Understand the event</strong><br /><br />Capture source evidence and timing. Separate new information from repetition, commentary and market reaction.</td>
-    <td width="33%" valign="top"><strong>02 / Keep the context</strong><br /><br />Preserve supporting and contradicting evidence. New information can strengthen, revise or invalidate a thesis.</td>
-    <td width="33%" valign="top"><strong>03 / Constrain the action</strong><br /><br />LLMs propose. Independent code must enforce risk limits, execution rules and protective exits.</td>
+    <td width="33%" valign="top"><strong>01 / Event</strong><br /><br />New information.<br />Clear evidence.</td>
+    <td width="33%" valign="top"><strong>02 / Context</strong><br /><br />Relevant memory.<br />Revisable beliefs.</td>
+    <td width="33%" valign="top"><strong>03 / Control</strong><br /><br />Bounded actions.<br />Independent risk.</td>
   </tr>
 </table>
 
