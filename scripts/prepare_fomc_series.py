@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from eventlens.contracts import Event
-from eventlens.fed import FedMonetarySource, FeedError, SourceRejected, ValidatedItem
-from eventlens.research_data import ResearchCatalog, read_window
-from eventlens.series_replay import SeriesEpisode, SeriesPlan
+from eventlens.research.research_data import ResearchCatalog, read_window
+from eventlens.research.series_replay import SeriesEpisode, SeriesPlan
+from eventlens.sources.fed import FedMonetarySource, FeedError, SourceRejected, ValidatedItem
 
 
 async def prepare(catalog_path: Path, windows: Path, run_id: str) -> SeriesPlan:

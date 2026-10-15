@@ -1,92 +1,96 @@
-# Event → Thesis Memory → Position
+# Architecture and module map — v0.13
 
-This document describes the overall design. Durable SQLite thesis storage, memory-only DeepSeek reasoning and a first Fed RSS polling adapter are implemented; see [memory stage](memory.md), [reasoning stage](reasoning.md) and [Fed intake stage](fed-intake.md). Portfolio, risk and execution interfaces remain future obligations.
+The target is a small LLM-driven intraday system: financial events plus expectations,
+quotes, positions and relevant thesis memory lead to a position proposal, independent
+hard risk and eventually shadow/Demo execution. News categories and instruments are
+configurable research choices. Existing FOMC experiments retain their original scope.
 
-## Core objects
+## Current boundaries
 
-| Object | Meaning |
+| Location | Implemented behavior |
 |---|---|
-| Event | Immutable source evidence with stable identity, provenance and source/receipt timestamps |
-| FilterResult | Versioned accept/ignore/quarantine result and explanation |
-| Thesis | Versioned narrative, affected instruments, supporting/contradicting event IDs, confidence, invalidation conditions and review deadline |
-| MemorySnapshot | One committed revision per thesis, at a known memory version and cutoff |
-| PortfolioSnapshot | Observed quantities, account equity/currency and outstanding order references |
-| MarketSnapshot | Identified snapshot of received bid/ask observations |
-| AgentContext | Point-in-time evidence, thesis memory, portfolio and market state |
-| AgentDecision | Identified/versioned reasoning result, thesis changes and optional target |
-| TargetPortfolio | Complete desired signed exposure linked to theses and the observed portfolio snapshot |
-| RiskAssessment | Expiring trusted approval/rejection, linked to decision, target and checked account snapshot |
-| ExecutionReceipt | Shadow intention record; not an order fill or an updated position |
-| AuditRecord | Structured lifecycle outcome with event and decision trace IDs |
+| `contracts.py` | Immutable typed events, UTC clocks, theses, market/portfolio snapshots, decisions and risk/execution records |
+| `deepseek.py` | Provider-neutral JSON client contract and DeepSeek HTTP adapter |
+| `memory.py`, `sqlite_memory.py` | Memory contract, raw event evidence, immutable revisions, atomic commits, conflict and recovery checks |
+| `reasoning.py` | Validated create/update/ignore memory decisions; no portfolio targets |
+| `sources/events.py` | General source/filter interfaces only |
+| `sources/fed.py` | Official Fed polling, URL validation, retry/pacing, durable inbox and optional memory reasoning |
+| `research/` | Historical ticks, source/capture provenance, cutoff selection, replay labels, fixed-position costs, opt-in model replay and durable call journal |
+| `trading/` | `TradingAgent`, `PortfolioState`, `TargetValidator`, `HardRiskEngine`, `ShadowExecutor` interfaces only |
+| `runtime.py` | Future runtime/audit interfaces only; no working event-to-order loop |
+| `cli.py`, `*_cli.py` | Grouped dispatcher and existing explicit commands |
 
-Thesis confidence expresses the agent's belief, not a calibrated probability of profit. Link validation must confirm cited evidence exists and was available to the decision. Source authenticity is checked outside the model. Thesis IDs remain stable across revisions; source event IDs, decision IDs, target IDs, risk IDs and execution IDs must be traceable end to end.
+Shared modules, sources and trading interfaces do not import research modules. Research
+may reuse shared schemas/model/memory logic. Importing a package or requesting top-level
+help starts no watcher, database, model or broker. CLI dispatch imports only the selected
+command. Two LLM roles can be ordinary isolated calls; no agent platform is needed.
 
-## Minimal interfaces
+## What was moved
 
-| Module | Interface | Contract |
-|---|---|---|
-| events | EventSource.stream | Future general async stream abstraction |
-| fed | FedMonetarySource.fetch_items / fetch_article | First poll-only adapter; HTTP retry, pacing, source URL checks and stable IDs |
-| fed | FedInbox / FedWatcher.poll_once | Baseline, durable pending/quarantine states, deduplication and optional memory-only reasoning |
-| events | EventFilter.evaluate | Future cross-source semantic deduplication and provenance checks |
-| memory | ThesisMemory.record_event / snapshot / decision_for_event / commit | Durable evidence and atomic, version-checked thesis history |
-| reasoning / deepseek | MemoryReasoner.process / JSONModelClient.complete_json | One event to validated memory-only proposal through an interchangeable model client |
-| decision_protocol | ResearchPositionProposal / ResearchProposalAgent.propose | Typed target-direction proposal linked to supplied thesis revisions; future adapter only |
-| decision_protocol | DecisionReplayProtocol / check_proposal | Pinned experiment controls and pure supplied-context checks; no execution authorization |
-| historical_context | build_historical_context | Separate assumed replay clocks, commit-time memory selection and allowlisted historical model inputs |
-| replay_inference | ReplayInferenceRunner.run | Two-stage run-local memory/proposal reasoning with frozen metadata and actual processing-budget checks; no execution |
-| series_replay | SeriesRunner.run / SeriesStore | Frozen chronological catalog, transactional research memory/results and paid-call journal; safe event-boundary resume |
-| latency | processing_latency | Observed receipt/start/completion trace; source age is not network latency |
-| research_data | ResearchWindow / parse_probe_window | Offline provenance and bounded Demo snapshots; no historical live receipt claim |
-| research_replay | replay_roundtrip / accounting_grid | Fixed-position cost/timing diagnostics, independent of agent and future execution |
-| agent | TradingAgent.decide | Future full portfolio decision behind a provider-neutral boundary |
-| portfolio | PortfolioState.snapshot / TargetValidator.validate | Authoritative account state; validate complete desired exposures |
-| risk | HardRiskEngine.assess | Independent checks against account state, market data and operator policy |
-| execution | ShadowExecutor.record | Idempotent recording of current risk-approved intent only |
-| runtime | EventRuntime.handle / AuditSink.append | Future lifecycle coordination and append-only audit |
+| Former root module | Canonical location |
+|---|---|
+| `events`, `fed` | `eventlens.sources.<name>` |
+| `agent`, `portfolio`, `risk`, `execution` | `eventlens.trading.<name>` |
+| `market_data`, `ctrader_ticks`, `market_quality`, `replay_labels` | `eventlens.research.<name>` |
+| `research_data`, `research_replay`, `decision_protocol`, `historical_context` | `eventlens.research.<name>` |
+| `replay_inference`, `series_replay` | `eventlens.research.<name>` |
 
-SQLite provides durable memory and the Fed collector inbox. The synthetic demonstration uses predetermined decisions; the separate `reason` CLI or Fed watcher can call DeepSeek and commit only valid thesis changes. There is no fake risk approval or fabricated fill.
+Old Python imports of moved modules must be updated; no compatibility module aliases
+are installed. The eight existing console entrypoints and `python -m` CLI modules keep
+their arguments and behavior. The grouped command tree is:
 
-## Beliefs and positions are separate
+```text
+eventlens memory <existing memory arguments>
+eventlens source fed <existing collector arguments>
+eventlens research accounting <existing eventlens-research arguments>
+eventlens research market <existing eventlens-market arguments>
+eventlens research labels <existing eventlens-replay arguments>
+eventlens research decision <existing eventlens-decision arguments>
+eventlens research infer <existing eventlens-infer arguments>
+eventlens research series <existing eventlens-series arguments>
+```
 
-A thesis may exist without a position; one thesis may support several positions, including a hedge. A position may reflect several theses. Invalidation changes memory first. Any resulting exposure adjustment still passes independent portfolio and risk checks.
+Config paths stay under `configs/` to preserve existing commands and local workflows.
+No database migration, changed prompt, changed schema, revised cost/latency rule or
+historical rerun is part of this release. Proposal schemas and experiment identities
+are checked against a pre-move snapshot. Evidence and data stay out of Git.
 
-Targets use signed account-equity notional weights, not buy/sell commands or broker lot counts. Positive is long, negative is short, zero is an explicit exit. Every currently held instrument must be represented in a complete target. A missing held instrument is invalid, not an implicit liquidation. `target=None` means no portfolio change. A hedge is an additional instrument target linked to the relevant thesis. Broker units, contract multipliers, currency conversion, rounding and pending-order handling belong to future execution planning.
+## Runtime design constraints, not implemented features
 
-The foundation schema intentionally does not hard-code an instrument universe or a leverage limit. Instrument eligibility and exposure constraints must come from a deterministic configured risk policy. Merely constructing a `RiskAssessment(outcome="approve")` is not authorization: only the trusted runtime's own risk-engine result may be passed to execution. No executor is implemented in this release.
+An adapter persists source evidence before inference. Macro releases need a pre-release
+forecast snapshot and explicit actual/previous/revised values; zero is a value, not
+missing data. Related headlines are grouped without losing their individual provenance
+or arrival times. Publisher display time is not assumed to be first public release.
 
-## Time, concurrency and persistence
+Analysis receives only information available at its input cutoff. The decision role
+also receives fresh quotes, observed positions/pending orders and bounded relevant
+theses. A response is a proposal, never a fill or risk approval. Validate evidence IDs,
+model/prompt version, decision expiry and snapshot identity. Invalid/late replies create
+no new position; valid beliefs may survive a rejected trade. The existing evidence-quote
+interface still needs repair; moving it does not fix the known failures.
 
-All modeled timestamps reject naive datetimes and normalize aware inputs to UTC. The source clock and receipt clock remain distinct. Agent start/completion times and provider/model/prompt versions are stamped by the adapter, not supplied as authoritative model text. Runtime validation must enforce context cutoff <= reasoning start <= completion < expiry, and verify all event/target/snapshot references before accepting a proposal. Current schema checks cover local ordering; cross-object orchestration checks are deferred with the runtime.
+LLMs may suggest direction, position changes and bounded risk parameters. They cannot
+hold broker credentials, edit operator risk limits or certify their own approval.
+Deterministic code must enforce position/loss/spread/freshness limits, order deduplication,
+reconciliation, kill switch and session-aware daily close. Protective exits and timers
+operate independently of LLM availability. Confirm a close through execution feedback;
+an intention to close is not a closed position.
 
-Initial runtime design: serialize portfolio decisions in one process. Memory still uses compare-and-swap revisions to detect stale state. A commit atomically appends decision and changed thesis revisions. Identical repeated decision IDs are idempotent; conflicting reuse fails. Store both revision effective time and actual commit time so historical snapshots cannot reveal information before it was committed. Never overwrite earlier thesis revisions.
+The future 30–60-second goal concerns the release-to-decision/order workflow under
+eligible conditions, not a guarantee of fills. Track publication/display/receipt,
+analysis, decision, submission, acknowledgement and fill clocks separately. Unknown
+original time remains unknown. Current observed research processing excludes feed/order
+latency; older frozen budgets retain their original pass/fail results.
 
-Persist cycle progress separately: received → filtered → reasoned → memory committed → risk approved/rejected → shadow recorded. Memory commit does not mean execution happened. A crash between stages must resume from durable progress and fresh state, not duplicate an order or reason against an obsolete snapshot. A future durable outbox/ledger can coordinate memory and execution without making external calls part of a database transaction.
+## Preserved research and evidence
 
-## Future failure behavior
+`research/decision_protocol.py` still combines the existing proposal contract and pinned
+EUR/USD–FOMC v1 rules. A future live schema should be separated deliberately rather than
+silently broadening this experiment. No execution approval is granted by schema checks.
 
-- Malformed or unsupported model output: record failure, retain evidence, create no target.
-- Timeout: bounded retry with the same operation identity; never synthesize a trade.
-- Memory conflict: reload and reason again; do not merge portfolio targets blindly.
-- Risk rejection: retain valid beliefs and log the rejection; do not execute.
-- Stale market/account data, database unavailable or kill switch: stop new execution.
-- Restart: reload durable memory and reconcile observed/pending positions before new action.
-- Expired thesis review time: schedule reassessment; expiry is not a fabricated fill.
-
-Before any executor exists, deterministic risk implementation must test per-asset/gross/net exposure, losses, stale data, spread, order rate and emergency stop behavior. Shadow execution must model costs and latency explicitly. Live credentials, broker adapters, model training, RL and a full backtester are outside this rebuild.
-
-## Current stage and next review
-
-The SQLite implementation and synthetic CLI exercise thesis creation, reinforcement, invalidation, exact duplicate handling and restart recovery. The DeepSeek memory-only path can propose create/update/ignore, but its output is checked against the current event and existing thesis IDs before commit. Offline tests cover this path; real provider behavior must be checked separately with a user-owned key. The Fed adapter validates its official allowlist; general cross-source verification, semantic duplicate detection, portfolio decisions, risk and shadow execution remain later stages.
-
-v0.7 adds a separate [offline accounting ledger](research-replay.md), not an implementation of `ShadowExecutor`. It tests fixed EUR/USD exposures with assumed timing/costs and observed market snapshots. It never reads a target portfolio, calls the model or submits orders. All eight predeclared Demo windows pass endpoint/accounting checks; the [quality report](fomc-2025-data-quality.md) preserves sample gaps and unresolved zero-spread cost concerns. Continuous-path quality, executable costs and fresh-event latency measurements remain acceptance gates before strategy claims.
-
-v0.8 adds assumed spread floors, per-fill minimum commissions and typed Demo probe metadata/counters. These are [offline cost/path safeguards](cost-path-check.md), not verified execution costs, a live data adapter or a risk implementation. Raw quotes stay immutable. The one dense replay does not enlarge the independent event sample.
-
-v0.9 defines [research position proposals and frozen rules](decision-protocol.md). This separate contract does not change SQLite's memory-only target prohibition or the existing model prompt. Offline checks may derive fixed signed research units but neither commit a target nor call a model, risk engine or executor. A future historical context adapter must preserve real capture times separately from simulated availability; the current `AgentContext` cannot silently turn a 2026 archive capture into a 2025 decision input.
-
-v0.10 implements that separate [historical input adapter](historical-context.md). It keeps original archive clocks in an audit envelope and explicitly assumed availability in a model view. Quotes and run-local memory are selected at a pinned cutoff without future prices or uncommitted revisions. There is no conversion into a live `AgentContext`, model call, actual inference trace, target dispatch or fill. The v1 decision manifest remains unchanged.
-
-v0.11 connects the JSON client to this historical view for [one-event research inference](replay-inference.md). It preserves actual API clocks, run-local hypothetical memory commits, a later portfolio cutoff and retained failures/abstentions. It neither writes live SQLite targets nor dispatches positions. A [real acceptance case](llm-replay-case.md) passed only the slow predeclared processing budget; it did not satisfy the primary budget or validate alpha. Catalog orchestration, complete hard risk, fill integration and live shadow remain later work.
-
-v0.12 adds the [chronological research coordinator](chronological-replay.md) with a separate SQLite registry, immutable case results and atomic run-local revisions. Every paid request is reserved before sending; unknown in-flight requests block automatic retry. The [real eight-event series](fomc-series-acceptance.md) demonstrates clean pause/resume and seven memory revisions, but only three portfolio proposals pass evidence checks. Output reliability and the primary latency budget fail; no risk/strategy/execution gate is passed.
+Read [memory](memory.md), [reasoning](reasoning.md) and [Fed intake](fed-intake.md) for
+existing operations; [research replay](research/research-replay.md),
+[historical context](research/historical-context.md),
+[series recovery](research/chronological-replay.md) and
+[acceptance](research/fomc-series-acceptance.md) for offline behavior. The former README
+is retained as a [historical snapshot](research/implementation-history.md).

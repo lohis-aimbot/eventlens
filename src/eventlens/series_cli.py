@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from .deepseek import DeepSeekClient, ModelCallError
-from .series_replay import SeriesPlan, SeriesRunner, SeriesStore, freeze_series
+from .research.series_replay import SeriesPlan, SeriesRunner, SeriesStore, freeze_series
 
 
 def read_plan(path: Path) -> SeriesPlan:

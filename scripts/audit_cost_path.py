@@ -15,8 +15,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 
-from eventlens.research_data import ProbeDiagnostics, ResearchCatalog, read_window
-from eventlens.research_replay import (
+from eventlens.research.research_data import ProbeDiagnostics, ResearchCatalog, read_window
+from eventlens.research.research_replay import (
     DEFAULT_LATENCIES,
     ENGINE_VERSION,
     CostSensitivityConfig,

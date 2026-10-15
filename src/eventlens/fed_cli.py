@@ -8,7 +8,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .deepseek import DeepSeekClient
-from .fed import FedInbox, FedMonetarySource, FedWatcher, FeedError, SourceRejected, WatcherBusy
+from .sources.fed import (
+    FedInbox,
+    FedMonetarySource,
+    FedWatcher,
+    FeedError,
+    SourceRejected,
+    WatcherBusy,
+)
 from .sqlite_memory import SQLiteThesisMemory
 
 

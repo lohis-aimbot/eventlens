@@ -5,8 +5,12 @@ import json
 from pathlib import Path
 
 from .contracts import AgentContext, Contract
-from .decision_protocol import DecisionReplayProtocol, ResearchPositionProposal, check_proposal
-from .historical_context import HistoricalContextInput, build_historical_context
+from .research.decision_protocol import (
+    DecisionReplayProtocol,
+    ResearchPositionProposal,
+    check_proposal,
+)
+from .research.historical_context import HistoricalContextInput, build_historical_context
 
 
 class ProposalInput(Contract):

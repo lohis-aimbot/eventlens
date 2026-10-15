@@ -8,8 +8,8 @@ from pathlib import Path
 
 from pydantic import AwareDatetime, TypeAdapter
 
-from .ctrader_ticks import CTraderTickPage, decode_page
-from .market_quality import inspect_ticks
+from .research.ctrader_ticks import CTraderTickPage, decode_page
+from .research.market_quality import inspect_ticks
 
 
 def main() -> None:

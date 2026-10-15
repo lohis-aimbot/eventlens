@@ -4,14 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from .research_data import (
+from .research.research_data import (
     ResearchCatalog,
     parse_probe_window,
     read_legacy_checkpoints,
     read_window,
     save_window,
 )
-from .research_replay import accounting_grid
+from .research.research_replay import accounting_grid
 
 
 def main() -> None:

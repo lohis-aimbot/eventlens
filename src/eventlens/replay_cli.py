@@ -7,7 +7,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .replay_labels import label_replay, parse_probe_log
+from .research.replay_labels import label_replay, parse_probe_log
 
 
 def main() -> None:

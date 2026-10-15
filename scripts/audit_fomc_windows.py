@@ -15,8 +15,8 @@ from pathlib import Path
 from statistics import median
 from typing import Any
 
-from eventlens.research_data import ResearchCatalog, StudyEvent, read_window
-from eventlens.research_replay import ResearchWindow, accounting_grid
+from eventlens.research.research_data import ResearchCatalog, StudyEvent, read_window
+from eventlens.research.research_replay import ResearchWindow, accounting_grid
 
 
 def require(condition: bool, message: str) -> None:

@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from .deepseek import DeepSeekClient, ModelCallError
-from .replay_inference import (
+from .research.replay_inference import (
     MEMORY_PROMPT,
     PORTFOLIO_PROMPT,
     ReplayInferenceCase,

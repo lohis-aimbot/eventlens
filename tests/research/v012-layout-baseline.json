@@ -1,0 +1,97 @@
+{
+  "protocol_id": "b979d082b7f0bb4cda01e6b29cf6aed55a8fbdca32e5cc573c108896fe29bffd",
+  "proposal_schema": {
+    "$defs": {
+      "ThesisReference": {
+        "additionalProperties": false,
+        "properties": {
+          "thesis_id": {
+            "minLength": 1,
+            "title": "Thesis Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thesis_id",
+          "revision"
+        ],
+        "title": "ThesisReference",
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "description": "Only these fields may come from the future LLM response.",
+    "properties": {
+      "target_direction": {
+        "enum": [
+          "long",
+          "short",
+          "flat"
+        ],
+        "title": "Target Direction",
+        "type": "string"
+      },
+      "thesis_references": {
+        "items": {
+          "$ref": "#/$defs/ThesisReference"
+        },
+        "title": "Thesis References",
+        "type": "array"
+      },
+      "evidence_quotes": {
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "maxItems": 5,
+        "minItems": 1,
+        "title": "Evidence Quotes",
+        "type": "array"
+      },
+      "rationale": {
+        "minLength": 1,
+        "title": "Rationale",
+        "type": "string"
+      },
+      "confidence": {
+        "maximum": 1,
+        "minimum": 0,
+        "title": "Confidence",
+        "type": "number"
+      },
+      "invalidation_conditions": {
+        "items": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": "Invalidation Conditions",
+        "type": "array"
+      }
+    },
+    "required": [
+      "target_direction",
+      "thesis_references",
+      "evidence_quotes",
+      "rationale",
+      "confidence",
+      "invalidation_conditions"
+    ],
+    "title": "ResearchPositionProposal",
+    "type": "object"
+  },
+  "memory_prompt_sha256": "0ba9e5da30f8c35b43a0afb59346d93df9c8444008e393eb5d3ca713c6af9d21",
+  "portfolio_prompt_sha256": "dd809079119e8afdff120e9ecd9ee25fee67a60acb2649dd49005b68fecf78b7",
+  "synthetic_case_experiment_id": "02adde690dcab668bde2820e2297be37cd1bc74edbb32518334fe463fe1c0d04",
+  "synthetic_series_experiment_id": "f347a009efb8b9078b156c8a9e019fcd8c038113d95701c5413e684db7d9b7fe",
+  "configs": {
+    "configs/cost-sensitivity.json": "436f3c81bd63695e594a35b3e5557fe9e34391ea685bd72b0d1e6443598a2db0",
+    "configs/decision-protocol-v1.json": "75257e153a463d69c1ad55ad47d0df0ac908381d1e0f6ab8207a257512c30d67",
+    "configs/fomc-2025.json": "60ca4a70f8669e54c2386aa1e85c1c7bfff29f90c13a4fdd9a9b22b90c7342a0",
+    "configs/replay-inference-v1.json": "72c1d64020363bfaaf7f999c8d080d5d230c8a6e0fa0bacaf3c7a2c65a88b81d"
+  }
+}
