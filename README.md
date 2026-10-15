@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme-hero.svg" alt="EventLens — From events to decisions. LLM-driven intraday research, with risk outside the model." width="100%" />
+  <img src="docs/assets/readme-hero.svg" alt="EventLens — From events to decisions. A minimal light banner with a blue lens mark." width="100%" />
 </p>
 
 <p align="center">
