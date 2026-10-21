@@ -1,40 +1,55 @@
 <p align="center">
-  <img src="docs/assets/eventlens-banner.svg" alt="EventLens — From events to decisions. A minimal light banner with a blue lens mark." width="100%" />
+  <img src="docs/assets/eventlens-banner.svg" alt="EventLens — From financial events to auditable intraday decisions. A modern AI architectural banner with soft cobalt-cyan gradients and a four-stage pipeline strip." width="100%" />
 </p>
 
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="Foundation checks" /></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat&amp;logo=python&amp;logoColor=white" alt="Python 3.11 or newer" /></a>
-  <a href="docs/roadmap.md"><img src="https://img.shields.io/badge/Stage-Research%20foundation-0F766E?style=flat" alt="Stage: research foundation" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-2563EB?style=flat&amp;logo=python&amp;logoColor=white" alt="Python 3.11 or newer" /></a>
+  <a href="src/eventlens/deepseek.py"><img src="https://img.shields.io/badge/Reasoning-DeepSeek%20JSON-4D6BFE?style=flat" alt="DeepSeek JSON adapter" /></a>
+  <a href="docs/live-quotes.md"><img src="https://img.shields.io/badge/Market%20Data-cTrader%20Demo%20Bridge-0284C7?style=flat" alt="cTrader Demo bridge" /></a>
+  <a href="docs/roadmap.md"><img src="https://img.shields.io/badge/Stage-v0.15.1%20Observation%20Foundation-0D9488?style=flat" alt="Stage: v0.15.1 observation foundation" /></a>
 </p>
 
 <p align="center">
-  <strong>Financial events. Persistent context. Independent risk.</strong><br />
-  A Python foundation for an LLM-driven intraday trading system.
+  <strong>Point-in-time financial events · Persistent thesis memory · Independent hard risk</strong><br />
+  <sub>An auditable Python foundation for an LLM-driven intraday trading system.</sub>
 </p>
 
 <p align="center">
-  <a href="#overview">Overview</a> ·
-  <a href="#architecture">Architecture</a> ·
-  <a href="#quickstart">Quickstart</a> ·
-  <a href="#evidence">Evidence</a> ·
-  <a href="#roadmap">Roadmap</a>
+  <a href="#overview">Overview</a> &nbsp;·&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
+  <a href="#quickstart">Quickstart</a> &nbsp;·&nbsp;
+  <a href="#evidence">Evidence</a> &nbsp;·&nbsp;
+  <a href="#roadmap">Roadmap</a> &nbsp;·&nbsp;
+  <a href="#documentation">Documentation</a>
 </p>
 
 ---
 
 ## Overview
 
-EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
+EventLens explores how existing LLM APIs can interpret financial events, maintain an evolving trading thesis and propose intraday position changes. Decisions combine newly observed information with market expectations, point-in-time prices, open positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
 > **v0.15.1 · Observation foundation.** News/calendar capture, bounded Demo EURUSD quote sampling, quote/clock diagnostics, time-alignment audits, memory and historical tools are implemented. Representative live quote quality still needs validation; integrated LLM observation, hard risk and execution remain unfinished. No profitability has been established.
 
 <table>
   <tr>
-    <td width="33%" valign="top"><strong>01 / Event</strong><br /><br />New information.<br />Clear evidence.</td>
-    <td width="33%" valign="top"><strong>02 / Context</strong><br /><br />Relevant memory.<br />Revisable beliefs.</td>
-    <td width="33%" valign="top"><strong>03 / Control</strong><br /><br />Bounded actions.<br />Independent risk.</td>
+    <td width="33%" valign="top">
+      <code>01 · OBSERVE</code><br /><br />
+      <strong>Point-in-Time Evidence</strong><br />
+      Capture financial releases, revisions and live Demo quotes with strict UTC receipt and availability clocks.
+    </td>
+    <td width="33%" valign="top">
+      <code>02 · REASON</code><br /><br />
+      <strong>Persistent Thesis Memory</strong><br />
+      Maintain structured, revisable beliefs across events in SQLite rather than stateless one-off prompts.
+    </td>
+    <td width="33%" valign="top">
+      <code>03 · PROTECT</code><br /><br />
+      <strong>Independent Hard Risk</strong><br />
+      Enforce deterministic position limits, quote-freshness gates and protective exits without relying on the model.
+    </td>
   </tr>
 </table>
 
@@ -55,9 +70,9 @@ flowchart TD
     Exit["Independent exit monitor and timer"] --> Execute
     Execute -. "Observed execution feedback" .-> Context
 
-    classDef input fill:#eff6ff,stroke:#3b82f6,color:#172554;
-    classDef reasoning fill:#ecfdf5,stroke:#0d9488,color:#134e4a;
-    classDef control fill:#fffbeb,stroke:#d97706,color:#78350f;
+    classDef input fill:#EFF6FF,stroke:#2563EB,color:#0F172A;
+    classDef reasoning fill:#EEF2FF,stroke:#4D6BFE,color:#1E1B4B;
+    classDef control fill:#F0FDFA,stroke:#0D9488,color:#134E4A;
     class Events,Filter,Context input;
     class Agent,Memory reasoning;
     class Risk,Exit,Execute control;
