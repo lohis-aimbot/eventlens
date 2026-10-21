@@ -16,7 +16,11 @@ diagnostics plus clock-lag decomposition without relaxing freshness or spread ga
 Representative quote quality, extended/important-release sampling and the rest of Stage 1
 acceptance remain pending. **Stage 2 foundation (`v0.15.2`)** adds deterministic WallStreetCN
 EUR/USD observation filtering (`WallStreetCNFilter`) and `SinglePassTradingAgent` with
-canonical verbatim quote recovery; live observation acceptance and Stages 3–5 remain planned.
+canonical verbatim quote recovery. **Stage 3–4 foundation (`v0.15.3`)** implements
+`DeterministicTargetValidator`, `DeterministicHardRiskEngine`, `SQLiteShadowLedger` (separating
+shadow receipts from causal fills and enforcing stop-loss, max-holding-horizon, and daily-close
+protective exits without the LLM), and `IntradayEventRuntime`; forward shadow validation and
+Stage 5 cTrader Demo execution remain planned.
 
 | Stage | Work | Acceptance |
 |---|---|---|

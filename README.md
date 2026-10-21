@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.2 · Observation & single-pass reasoning foundation.** News/calendar capture, EUR/USD observation filtering, bounded Demo quote sampling, quote/clock diagnostics, single-pass DeepSeek reasoning with canonical verbatim quote recovery, memory and historical tools are implemented. Representative live quote quality still needs validation; hard risk, shadow accounting and execution remain unfinished. No profitability has been established.
+> **v0.15.3 · Hard risk, shadow ledger & runtime foundation.** News/calendar capture, EUR/USD observation filtering, bounded Demo quote sampling, single-pass DeepSeek reasoning, deterministic target validation (`DeterministicTargetValidator`), hard risk policy (`DeterministicHardRiskEngine`), causal SQLite shadow accounting (`SQLiteShadowLedger`) with LLM-independent protective exits, and `IntradayEventRuntime` are implemented. Representative live quote quality and forward shadow validation remain pending; cTrader Demo order execution is not yet connected. No profitability has been established.
 
 <table>
   <tr>
@@ -75,7 +75,7 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 | **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure agent with verbatim quote recovery, immutable SQLite history | Live observation evaluation and role comparison |
 | **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture, raw-tick/clock diagnostics and as-of alignment | Representative live quote quality and authoritative positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | Single-pass `TradingAgent` plus typed portfolio, risk and execution interfaces | Hard risk, exits, shadow fills and cTrader Demo execution |
+| **Trading** | Single-pass `TradingAgent`, `DeterministicTargetValidator`, `DeterministicHardRiskEngine`, `SQLiteShadowLedger` (protective exits) and `IntradayEventRuntime` | Forward shadow validation and cTrader Demo execution |
 
 [Read the architecture and module map →](docs/architecture.md)
 
@@ -154,7 +154,7 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
 - [ ] **Realtime observer** — source/quote capture and timing audits are implemented; quote quality, important-release coverage and integrated LLM observation remain pending.
-- [ ] **Evaluation & protection** — realistic replay/shadow accounting, independent hard limits and daily exits.
+- [x] **Evaluation & protection** — deterministic target validation, independent hard risk limits, causal SQLite shadow ledger and LLM-independent protective exits (`v0.15.3`).
 - [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after earlier gates pass.
 
 The next milestone is observation, not automatic orders. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
