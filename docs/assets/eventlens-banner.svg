@@ -1,173 +1,63 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="460" viewBox="0 0 1280 460" role="img" aria-labelledby="title description">
-  <title id="title">EventLens — From financial events to auditable intraday decisions</title>
-  <desc id="description">A modern light architectural banner inspired by Google DeepMind and DeepSeek aesthetics, featuring soft cobalt-cyan ambient gradients, optical refraction geometry, gradient EventLens typography, and a four-stage pipeline strip.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-labelledby="title description" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="title">EventLens — From financial events to auditable decisions</title>
+  <desc id="description">A minimalist modern AI banner with a cobalt-blue optical aperture emblem, large EventLens wordmark, and clean subtitle.</desc>
   <defs>
-    <clipPath id="canvas-clip">
-      <rect width="1280" height="460" rx="28"/>
+    <clipPath id="clip">
+      <rect width="1280" height="380" rx="28"/>
     </clipPath>
 
-    <linearGradient id="bg-canvas" x1="0" y1="0" x2="1280" y2="460" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#F8FAFC"/>
-      <stop offset="0.5" stop-color="#F3F7FC"/>
-      <stop offset="1" stop-color="#EDF2F9"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="380" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FAFBFD"/>
+      <stop offset="0.5" stop-color="#F5F8FF"/>
+      <stop offset="1" stop-color="#EEF4FF"/>
     </linearGradient>
 
-    <radialGradient id="aurora-left" cx="320" cy="70" r="480" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.16"/>
-      <stop offset="0.55" stop-color="#3B82F6" stop-opacity="0.06"/>
-      <stop offset="1" stop-color="#F8FAFC" stop-opacity="0"/>
+    <radialGradient id="glow-left" cx="420" cy="60" r="460" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.13"/>
+      <stop offset="0.6" stop-color="#4D6BFE" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#FAFBFD" stop-opacity="0"/>
     </radialGradient>
 
-    <radialGradient id="aurora-center" cx="640" cy="30" r="440" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0EA5E9" stop-opacity="0.14"/>
-      <stop offset="0.6" stop-color="#6366F1" stop-opacity="0.05"/>
-      <stop offset="1" stop-color="#F8FAFC" stop-opacity="0"/>
+    <radialGradient id="glow-right" cx="860" cy="320" r="460" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5E9" stop-opacity="0.11"/>
+      <stop offset="0.6" stop-color="#6366F1" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#EEF4FF" stop-opacity="0"/>
     </radialGradient>
 
-    <radialGradient id="aurora-right" cx="960" cy="80" r="460" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#6366F1" stop-opacity="0.14"/>
-      <stop offset="0.55" stop-color="#06B6D4" stop-opacity="0.05"/>
-      <stop offset="1" stop-color="#F8FAFC" stop-opacity="0"/>
-    </radialGradient>
-
-    <linearGradient id="title-grad" x1="630" y1="115" x2="890" y2="200" gradientUnits="userSpaceOnUse">
+    <linearGradient id="brand-grad" x1="600" y1="62" x2="680" y2="132" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#1D4ED8"/>
-      <stop offset="0.48" stop-color="#4D6BFE"/>
-      <stop offset="1" stop-color="#0891B2"/>
-    </linearGradient>
-
-    <linearGradient id="brand-mark" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4D6BFE"/>
+      <stop offset="0.5" stop-color="#4D6BFE"/>
       <stop offset="1" stop-color="#06B6D4"/>
     </linearGradient>
 
-    <linearGradient id="wave-left" x1="60" y1="165" x2="520" y2="165" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#64748B" stop-opacity="0"/>
-      <stop offset="0.55" stop-color="#4D6BFE" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#0284C7" stop-opacity="0.06"/>
+    <linearGradient id="word-grad" x1="635" y1="155" x2="900" y2="245" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1D4ED8"/>
+      <stop offset="0.45" stop-color="#4D6BFE"/>
+      <stop offset="1" stop-color="#0891B2"/>
     </linearGradient>
-
-    <linearGradient id="wave-right" x1="760" y1="165" x2="1220" y2="165" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0284C7" stop-opacity="0.06"/>
-      <stop offset="0.45" stop-color="#4D6BFE" stop-opacity="0.24"/>
-      <stop offset="1" stop-color="#64748B" stop-opacity="0"/>
-    </linearGradient>
-
-    <linearGradient id="card-border" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#CBD5E1" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#E2E8F0" stop-opacity="0.65"/>
-    </linearGradient>
-
-    <filter id="card-shadow" x="-8%" y="-10%" width="116%" height="128%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0F172A" flood-opacity="0.045"/>
-      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#0F172A" flood-opacity="0.03"/>
-    </filter>
   </defs>
 
-  <g clip-path="url(#canvas-clip)">
-    <!-- Base canvas and ambient aurora mesh -->
-    <rect width="1280" height="460" fill="url(#bg-canvas)"/>
-    <circle cx="320" cy="70" r="480" fill="url(#aurora-left)"/>
-    <circle cx="640" cy="30" r="440" fill="url(#aurora-center)"/>
-    <circle cx="960" cy="80" r="460" fill="url(#aurora-right)"/>
+  <g clip-path="url(#clip)">
+    <!-- Minimalist ambient surface -->
+    <rect width="1280" height="380" fill="url(#bg)"/>
+    <circle cx="420" cy="60" r="460" fill="url(#glow-left)"/>
+    <circle cx="860" cy="320" r="460" fill="url(#glow-right)"/>
 
-    <!-- Subtle architectural perspective grid -->
-    <g stroke="#CBD5E1" stroke-opacity="0.28" stroke-width="1">
-      <line x1="0" y1="110" x2="1280" y2="110"/>
-      <line x1="0" y1="224" x2="1280" y2="224"/>
-      <line x1="0" y1="306" x2="1280" y2="306"/>
-      <line x1="240" y1="0" x2="240" y2="460"/>
-      <line x1="640" y1="0" x2="640" y2="460" stroke-dasharray="3 6"/>
-      <line x1="1040" y1="0" x2="1040" y2="460"/>
+    <!-- Minimalist Optical Lens + AI Spark Emblem -->
+    <g transform="translate(640, 96)">
+      <circle cx="0" cy="0" r="34" fill="#FFFFFF" stroke="#DCE6F7" stroke-width="1.5"/>
+      <circle cx="0" cy="0" r="24" fill="none" stroke="url(#brand-grad)" stroke-width="3.5"/>
+      <path d="M 0 -14 C 3.2 -4.8, 4.8 -3.2, 14 0 C 4.8 3.2, 3.2 4.8, 0 14 C -3.2 4.8, -4.8 3.2, -14 0 C -4.8 -3.2, -3.2 -4.8, 0 -14 Z" fill="url(#brand-grad)"/>
     </g>
 
-    <!-- Optical lens rings and signal refraction paths -->
-    <circle cx="640" cy="166" r="192" fill="none" stroke="#94A3B8" stroke-opacity="0.16" stroke-width="1" stroke-dasharray="4 6"/>
-    <circle cx="640" cy="166" r="268" fill="none" stroke="#94A3B8" stroke-opacity="0.11" stroke-width="1"/>
-
-    <path d="M 60 116 C 220 116, 360 165, 515 165" fill="none" stroke="url(#wave-left)" stroke-width="1.5"/>
-    <path d="M 60 165 L 515 165" fill="none" stroke="url(#wave-left)" stroke-width="1.5" stroke-dasharray="4 4"/>
-    <path d="M 60 214 C 220 214, 360 165, 515 165" fill="none" stroke="url(#wave-left)" stroke-width="1.5"/>
-
-    <path d="M 765 165 C 920 165, 1060 116, 1220 116" fill="none" stroke="url(#wave-right)" stroke-width="1.5"/>
-    <path d="M 765 165 L 1220 165" fill="none" stroke="url(#wave-right)" stroke-width="1.5"/>
-    <path d="M 765 165 C 920 165, 1060 214, 1220 214" fill="none" stroke="url(#wave-right)" stroke-width="1.5"/>
-
-    <!-- Top capsule badge -->
-    <g transform="translate(426, 38)" filter="url(#card-shadow)">
-      <rect width="428" height="36" rx="18" fill="#FFFFFF" fill-opacity="0.94" stroke="#CBD5E1" stroke-width="1"/>
-      <circle cx="22" cy="18" r="10" fill="url(#brand-mark)"/>
-      <path d="M 22 11.2 L 24.3 15.7 L 28.8 18 L 24.3 20.3 L 22 24.8 L 19.7 20.3 L 15.2 18 L 19.7 15.7 Z" fill="#FFFFFF"/>
-      <text x="226" y="22.5" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" fill="#334155" letter-spacing="1.6">EVENT-DRIVEN AI TRADING FOUNDATION</text>
-    </g>
-
-    <!-- Main wordmark and value proposition -->
-    <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" text-anchor="middle">
-      <text x="640" y="180" font-size="96" font-weight="700" letter-spacing="-4">
-        <tspan fill="#0F172A">Event</tspan><tspan fill="url(#title-grad)">Lens</tspan>
+    <!-- Crisp Large Typography (only two lines, zero small text) -->
+    <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
+      <text x="640" y="232" font-size="108" font-weight="700" letter-spacing="-4.5">
+        <tspan fill="#0F172A">Event</tspan><tspan fill="url(#word-grad)">Lens</tspan>
       </text>
-      <text x="640" y="234" fill="#1E293B" font-size="25.5" font-weight="500" letter-spacing="-0.4">From financial events to auditable intraday decisions.</text>
-      <text x="640" y="270" fill="#64748B" font-size="15.5" font-weight="400" letter-spacing="0.2">Point-in-time evidence   ·   Persistent thesis memory   ·   Independent hard risk</text>
-    </g>
-
-    <!-- Bottom 4-stage architectural pipeline strip -->
-    <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
-      <!-- Stage 01 -->
-      <g transform="translate(92, 322)" filter="url(#card-shadow)">
-        <rect width="248" height="86" rx="16" fill="#FFFFFF" fill-opacity="0.94" stroke="url(#card-border)" stroke-width="1"/>
-        <circle cx="22" cy="25" r="4" fill="#2563EB"/>
-        <text x="34" y="29" fill="#2563EB" font-size="11" font-weight="700" letter-spacing="1.2">01 / OBSERVE</text>
-        <text x="22" y="53" fill="#0F172A" font-size="15.5" font-weight="600" letter-spacing="-0.2">Events &amp; Live Quotes</text>
-        <text x="22" y="72" fill="#64748B" font-size="12.5" font-weight="400">UTC receipt &amp; revision clocks</text>
-      </g>
-
-      <!-- Connector 1 -> 2 -->
-      <g stroke="#94A3B8" stroke-width="1.5" fill="none">
-        <line x1="348" y1="365" x2="366" y2="365"/>
-        <path d="M 362 360.5 L 367 365 L 362 369.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </g>
-
-      <!-- Stage 02 -->
-      <g transform="translate(376, 322)" filter="url(#card-shadow)">
-        <rect width="248" height="86" rx="16" fill="#FFFFFF" fill-opacity="0.94" stroke="url(#card-border)" stroke-width="1"/>
-        <circle cx="22" cy="25" r="4" fill="#4D6BFE"/>
-        <text x="34" y="29" fill="#4D6BFE" font-size="11" font-weight="700" letter-spacing="1.2">02 / REASON</text>
-        <text x="22" y="53" fill="#0F172A" font-size="15.5" font-weight="600" letter-spacing="-0.2">LLM &amp; Thesis Memory</text>
-        <text x="22" y="72" fill="#64748B" font-size="12.5" font-weight="400">DeepSeek JSON &amp; SQLite state</text>
-      </g>
-
-      <!-- Connector 2 -> 3 -->
-      <g stroke="#94A3B8" stroke-width="1.5" fill="none">
-        <line x1="632" y1="365" x2="650" y2="365"/>
-        <path d="M 646 360.5 L 651 365 L 646 369.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </g>
-
-      <!-- Stage 03 -->
-      <g transform="translate(660, 322)" filter="url(#card-shadow)">
-        <rect width="248" height="86" rx="16" fill="#FFFFFF" fill-opacity="0.94" stroke="url(#card-border)" stroke-width="1"/>
-        <circle cx="22" cy="25" r="4" fill="#0D9488"/>
-        <text x="34" y="29" fill="#0D9488" font-size="11" font-weight="700" letter-spacing="1.2">03 / PROTECT</text>
-        <text x="22" y="53" fill="#0F172A" font-size="15.5" font-weight="600" letter-spacing="-0.2">Independent Hard Risk</text>
-        <text x="22" y="72" fill="#64748B" font-size="12.5" font-weight="400">Deterministic limits &amp; exits</text>
-      </g>
-
-      <!-- Connector 3 -> 4 -->
-      <g stroke="#94A3B8" stroke-width="1.5" fill="none">
-        <line x1="916" y1="365" x2="934" y2="365"/>
-        <path d="M 930 360.5 L 935 365 L 930 369.5" stroke-linecap="round" stroke-linejoin="round"/>
-      </g>
-
-      <!-- Stage 04 -->
-      <g transform="translate(944, 322)" filter="url(#card-shadow)">
-        <rect width="248" height="86" rx="16" fill="#FFFFFF" fill-opacity="0.94" stroke="url(#card-border)" stroke-width="1"/>
-        <circle cx="22" cy="25" r="4" fill="#334155"/>
-        <text x="34" y="29" fill="#334155" font-size="11" font-weight="700" letter-spacing="1.2">04 / EXECUTE</text>
-        <text x="22" y="53" fill="#0F172A" font-size="15.5" font-weight="600" letter-spacing="-0.2">Shadow &amp; cTrader Demo</text>
-        <text x="22" y="72" fill="#64748B" font-size="12.5" font-weight="400">Causal accounting &amp; fills</text>
-      </g>
+      <text x="640" y="294" fill="#475569" font-size="30" font-weight="400" letter-spacing="-0.4">From financial events to auditable decisions.</text>
     </g>
   </g>
 
-  <!-- Crisp outer border -->
-  <rect x="0.75" y="0.75" width="1278.5" height="458.5" rx="27.25" fill="none" stroke="#CBD5E1" stroke-opacity="0.75" stroke-width="1.5"/>
+  <rect x="0.75" y="0.75" width="1278.5" height="378.5" rx="27.25" fill="none" stroke="#E2E8F0" stroke-width="1.5"/>
 </svg>
