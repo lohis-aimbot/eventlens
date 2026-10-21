@@ -142,6 +142,7 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 |---|---|---|
 | Evidence-valid position proposals | **3 / 8**, all flat | Five replies were rejected; this is not forecast accuracy |
 | Mean two-stage processing | **7.443 s** | Excludes realtime feed, order delivery and fills |
+| Single-pass live smoke check (`v0.15.2`) | **3.854 s** (1 call, valid) | Verified on filtered WallStreetCN event `3179089`; single-event smoke check, not a statistical sample |
 | Pause and resume | Completed without duplicate requests | Recovery evidence, not execution readiness |
 | Market data and costs | Demo gaps, unresolved zero spreads, assumed fees/slippage | Insufficient for a validated profitability claim |
 
