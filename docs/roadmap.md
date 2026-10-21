@@ -14,7 +14,9 @@ revision history and post-commit availability markers. See [acceptance](observer
 29/33 zero-spread samples and a stale quote at the news cutoff, and added symbol/tick
 diagnostics plus clock-lag decomposition without relaxing freshness or spread gates.
 Representative quote quality, extended/important-release sampling and the rest of Stage 1
-acceptance remain pending; Stages 2–5 remain planned.
+acceptance remain pending. **Stage 2 foundation (`v0.15.2`)** adds deterministic WallStreetCN
+EUR/USD observation filtering (`WallStreetCNFilter`) and `SinglePassTradingAgent` with
+canonical verbatim quote recovery; live observation acceptance and Stages 3–5 remain planned.
 
 | Stage | Work | Acceptance |
 |---|---|---|

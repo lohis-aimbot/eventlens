@@ -16,7 +16,9 @@ from eventlens.sources.wallstreetcn import (
     MAX_BYTES,
     NEWS_URL,
     CaptureError,
+    WallStreetCNFilter,
     WallStreetCNSource,
+    filter_store_revisions,
     parse_capture,
 )
 
@@ -391,3 +393,113 @@ def test_cli_rejects_invalid_capture_bounds_before_creating_database(tmp_path, a
     with pytest.raises(SystemExit) as rejected:
         main(["observe", "--database", str(database), "capture", *arguments])
     assert rejected.value.code == 2 and not database.exists()
+
+
+def test_wallstreetcn_filter_selects_eligible_eurusd_events_and_ignores_noise(tmp_path):
+    store = ObserverStore(tmp_path / "observer.sqlite", clock=lambda: NOW + timedelta(minutes=10))
+    news_body = copy.deepcopy(FIXTURE["news"])
+    base_item = news_body["data"]["items"][0]
+    news_body["data"]["items"] = [
+        {
+            **base_item,
+            "id": 101,
+            "uri": "https://wallstreetcn.com/livenews/101",
+            "score": 1,
+            "content_text": "美联储维持利率不变。",
+        },
+        {
+            **base_item,
+            "id": 102,
+            "uri": "https://wallstreetcn.com/livenews/102",
+            "score": 2,
+            "content_text": "沪指午后跌超2%，A股个股普跌。",
+        },
+        {
+            **base_item,
+            "id": 103,
+            "uri": "https://wallstreetcn.com/livenews/103",
+            "score": 2,
+            "title": "提醒：日内请重点关注（以下均为北京时间）",
+            "content_text": "20:30 美国CPI公布。微信小程序搜索“见闻历”",
+        },
+        {
+            **base_item,
+            "id": 104,
+            "uri": "https://wallstreetcn.com/livenews/104",
+            "score": 2,
+            "title": "美国国债异动",
+            "content_text": "美国5年期国债收益率下行10个基点，受避险需求推动。",
+        },
+    ]
+    store.record(batch("news", news_body, received=NOW + timedelta(minutes=10)))
+
+    cal_body = copy.deepcopy(FIXTURE["calendar"])
+    cal_base = cal_body["data"]["items"][0]
+    cal_body["data"]["items"] = [
+        {**cal_base, "id": 201, "country": "美国", "importance": 3, "actual": None},
+        {**cal_base, "id": 202, "country": "日本", "importance": 3, "actual": "2.5"},
+        {**cal_base, "id": 203, "country": "欧元区", "importance": 1, "actual": "2.1"},
+        {
+            **cal_base,
+            "id": 204,
+            "country": "美国",
+            "importance": 3,
+            "title": "美国9月CPI同比",
+            "actual": "2.4",
+            "forecast": "2.3",
+        },
+    ]
+    store.record(batch("calendar", cal_body, received=NOW + timedelta(minutes=10)))
+
+    summary = filter_store_revisions(store, as_of=NOW + timedelta(minutes=10))
+    assert summary["evaluated"] == 8
+    assert summary["counts"] == {"accept": 2, "ignore": 6, "quarantine": 0}
+    assert summary["reasons"] == {
+        "below_news_importance_threshold": 1,
+        "no_eurusd_macro_relevance": 1,
+        "schedule_reminder_digest": 1,
+        "eligible_news_observation": 1,
+        "unreleased_calendar_schedule": 1,
+        "unrelated_calendar_country": 1,
+        "below_calendar_importance_threshold": 1,
+        "eligible_calendar_observation": 1,
+    }
+    accepted_ids = [item["event_id"] for item in summary["accepted_events"]]
+    assert accepted_ids == [
+        f"wallstreetcn:calendar:204@{int(NOW.timestamp()) + 300}:r1",
+        "wallstreetcn:news:104:r1",
+    ]
+
+    # Duplicate revision check on the same filter instance.
+    wf = WallStreetCNFilter(clock=lambda: NOW + timedelta(minutes=10))
+    rev = store.history("news", "104")[0]
+    first_res, first_ev = wf.evaluate_revision(rev)
+    dup_res, dup_ev = wf.evaluate_revision(rev)
+    assert first_res.outcome == "accept" and first_ev is not None
+    assert dup_res.outcome == "ignore" and dup_res.reason == "duplicate_revision" and dup_ev is None
+    assert asyncio.run(wf.evaluate(first_ev)).outcome == "ignore"
+    store.close()
+
+
+def test_cli_filter_command_is_readonly(tmp_path, capsys):
+    from eventlens.cli import main
+
+    database = tmp_path / "demo.sqlite"
+    main(["observe", "--database", str(database), "demo", "examples/synthetic-observer.json"])
+    capsys.readouterr()
+    before = database.read_bytes()
+    main(
+        [
+            "observe",
+            "--database",
+            str(database),
+            "filter",
+            "--basis",
+            "synthetic_fixture",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["scope"] == "source_filter_only"
+    assert report["execution_authorized"] is False
+    assert report["evaluated"] == 2
+    assert database.read_bytes() == before

@@ -12,7 +12,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from .contracts import Contract, Identifier, Timestamp
+from .contracts import Contract, Identifier, MarketSnapshot, Quote, Timestamp
 from .observer import Basis, ObserverStore
 
 
@@ -485,3 +485,34 @@ def align_news(
         "spread": str(quote.quote.ask - quote.quote.bid) if quote else None,
         "limits": {"max_quote_age_seconds": max_quote_age, "max_event_age_seconds": max_event_age},
     }
+
+
+def build_market_snapshot(
+    quotes: QuoteStore,
+    cutoff: datetime,
+    *,
+    symbol: str = "EURUSD",
+    instrument: str = "EUR/USD",
+    basis: Basis = "live_poll",
+) -> MarketSnapshot:
+    """Build a point-in-time MarketSnapshot from published quote observations."""
+    cutoff = utc(cutoff)
+    obs = quotes.latest(symbol, cutoff, basis=basis)
+    if obs is None:
+        return MarketSnapshot(
+            snapshot_id=f"market-empty:{symbol}:{cutoff.isoformat()}",
+            as_of=cutoff,
+            quotes=(),
+        )
+    return MarketSnapshot(
+        snapshot_id=f"quote:{obs.quote.session_id}:{obs.quote.sequence}",
+        as_of=cutoff,
+        quotes=(
+            Quote(
+                instrument=instrument,
+                received_at=obs.received_at,
+                bid=obs.quote.bid,
+                ask=obs.quote.ask,
+            ),
+        ),
+    )

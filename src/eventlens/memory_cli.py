@@ -5,12 +5,22 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 
-from .contracts import AgentDecision, Event, Thesis, ThesisChange
+from .contracts import (
+    AgentContext,
+    AgentDecision,
+    Event,
+    PortfolioSnapshot,
+    Thesis,
+    ThesisChange,
+)
 from .deepseek import DeepSeekClient
+from .quotes import QuoteStore, build_market_snapshot
 from .reasoning import MemoryReasoner
 from .sqlite_memory import SQLiteThesisMemory
+from .trading.agent import ObservationReasoner, SinglePassTradingAgent
 
 
 async def demo(path: Path) -> None:
@@ -101,6 +111,56 @@ async def run(args: argparse.Namespace) -> None:
         ).process(event)
         print(reasoning_result.model_dump_json(indent=2))
         return
+    if args.command == "decide":
+        event = Event.model_validate_json(args.event_file.read_text(encoding="utf-8"))
+        cutoff = (
+            datetime.fromisoformat(args.as_of).astimezone(UTC) if args.as_of else datetime.now(UTC)
+        )
+        quote_store = QuoteStore(args.quotes, readonly=True)
+        try:
+            market = build_market_snapshot(quote_store, cutoff)
+        finally:
+            quote_store.close()
+        portfolio = PortfolioSnapshot(
+            snapshot_id=f"observation-flat:{cutoff.isoformat()}",
+            as_of=cutoff,
+            base_currency="USD",
+            equity=Decimal("10000"),
+        )
+        memory = SQLiteThesisMemory(args.database, allow_targets=True)
+        if not args.call_model:
+            snapshot = await memory.snapshot(as_of=cutoff)
+            context = AgentContext(
+                event=event,
+                memory=snapshot,
+                portfolio=portfolio,
+                market=market,
+                as_of=cutoff,
+            )
+            print(
+                json.dumps(
+                    {
+                        "scope": "single_pass_context_preview",
+                        "execution_authorized": False,
+                        "model_called": False,
+                        "context": context.model_dump(mode="json"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return
+        if args.database == Path("data/memory-demo.sqlite"):
+            raise ValueError("Choose a separate --database PATH for real model reasoning")
+        agent = SinglePassTradingAgent(
+            DeepSeekClient.from_environment(),
+            max_quote_age=timedelta(seconds=args.max_quote_age),
+        )
+        single_pass_result = await ObservationReasoner(agent, memory).process(
+            event, market=market, portfolio=portfolio, as_of=cutoff
+        )
+        print(single_pass_result.model_dump_json(indent=2))
+        return
     if not args.database.is_file():
         raise ValueError("Database does not exist; run demo or create a memory store first")
     memory = SQLiteThesisMemory(args.database)
@@ -129,6 +189,15 @@ def main() -> None:
     commands.add_parser(
         "reason", help="Run one DeepSeek thesis update from a local event JSON file"
     ).add_argument("event_file", type=Path)
+    decide_parser = commands.add_parser(
+        "decide",
+        help="Preview or run single-pass DeepSeek event reasoning with quote context",
+    )
+    decide_parser.add_argument("event_file", type=Path)
+    decide_parser.add_argument("--quotes", type=Path, default=Path("data/live-quotes.sqlite"))
+    decide_parser.add_argument("--as-of", help="Timezone-aware cutoff timestamp")
+    decide_parser.add_argument("--max-quote-age", type=float, default=2.0)
+    decide_parser.add_argument("--call-model", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     asyncio.run(run(args))

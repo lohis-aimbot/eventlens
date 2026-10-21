@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.1 · Observation foundation.** News/calendar capture, bounded Demo EURUSD quote sampling, quote/clock diagnostics, time-alignment audits, memory and historical tools are implemented. Representative live quote quality still needs validation; integrated LLM observation, hard risk and execution remain unfinished. No profitability has been established.
+> **v0.15.2 · Observation & single-pass reasoning foundation.** News/calendar capture, EUR/USD observation filtering, bounded Demo quote sampling, quote/clock diagnostics, single-pass DeepSeek reasoning with canonical verbatim quote recovery, memory and historical tools are implemented. Representative live quote quality still needs validation; hard risk, shadow accounting and execution remain unfinished. No profitability has been established.
 
 <table>
   <tr>
@@ -71,11 +71,11 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 
 | Layer | Implemented | Next capability |
 |---|---|---|
-| **Information** | Fed RSS plus WallStreetCN news/calendar capture, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
-| **LLM & memory** | DeepSeek JSON adapter, validated thesis updates, immutable SQLite history | Reliable realtime decisions and bounded intraday context |
+| **Information** | Fed RSS plus WallStreetCN news/calendar capture, EUR/USD observation filter, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
+| **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure agent with verbatim quote recovery, immutable SQLite history | Live observation evaluation and role comparison |
 | **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture, raw-tick/clock diagnostics and as-of alignment | Representative live quote quality and authoritative positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | Typed agent, portfolio, risk and execution interfaces | Hard risk, exits, shadow fills and cTrader Demo execution |
+| **Trading** | Single-pass `TradingAgent` plus typed portfolio, risk and execution interfaces | Hard risk, exits, shadow fills and cTrader Demo execution |
 
 [Read the architecture and module map →](docs/architecture.md)
 

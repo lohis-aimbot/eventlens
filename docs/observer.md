@@ -43,6 +43,9 @@ eventlens observe capture --polls 3 --interval 10
 # Inspect an ID returned by report.sample_source_ids, without network access
 eventlens observe history news SOURCE_ID
 eventlens observe history calendar 'INDICATOR_ID@SCHEDULED_EPOCH'
+
+# Filter stored observations for EUR/USD macro/news eligibility without LLM calls
+eventlens observe filter --limit 100
 ```
 
 Put global `--database PATH` before the subcommand. Capture/report/history default to

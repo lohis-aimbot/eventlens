@@ -42,11 +42,18 @@ class RevisionRecord(Contract):
 
 
 class SQLiteThesisMemory:
-    def __init__(self, path: Path, *, clock: Callable[[], datetime] = utc_now) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock: Callable[[], datetime] = utc_now,
+        allow_targets: bool = False,
+    ) -> None:
         if str(path) == ":memory:":
             raise ValueError("Use a filesystem database for durable memory")
         self.path = path
         self.clock = clock
+        self.allow_targets = allow_targets
         path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -177,10 +184,11 @@ class SQLiteThesisMemory:
                     )
                 if not stamp(decision.completed_at) <= now < stamp(decision.valid_until):
                     raise ValueError("Incomplete or expired decision")
-                # This step stores beliefs only. Targets are deferred until portfolio/risk work.
-                if decision.target is not None:
+                # This step stores beliefs only unless target proposals are explicitly enabled.
+                if decision.target is not None and not self.allow_targets:
                     raise ValueError("Memory-only stage does not accept portfolio targets")
                 self._evidence(db, decision.event_id, decision.started_at)
+                changed_theses: dict[str, Thesis] = {}
                 for change in decision.thesis_changes:
                     thesis = change.thesis
                     previous = db.execute(
@@ -208,6 +216,27 @@ class SQLiteThesisMemory:
                         raise ValueError("Every changed thesis must cite the trigger event")
                     for evidence_id in support | against:
                         self._evidence(db, evidence_id, decision.started_at)
+                    changed_theses[thesis.thesis_id] = thesis
+                if decision.target is not None:
+                    for position in decision.target.positions:
+                        for tid in position.thesis_ids:
+                            resolved = changed_theses.get(tid)
+                            if resolved is None:
+                                row = db.execute(
+                                    "SELECT payload FROM thesis_revisions WHERE thesis_id=? ORDER BY revision DESC LIMIT 1",
+                                    (tid,),
+                                ).fetchone()
+                                resolved = Thesis.model_validate_json(row[0]) if row else None
+                            if resolved is None:
+                                raise ValueError(f"Target references unknown thesis: {tid}")
+                            if position.weight != 0 and (
+                                resolved.status != "active"
+                                or resolved.review_at <= decision.completed_at
+                                or position.instrument not in resolved.instruments
+                            ):
+                                raise ValueError(
+                                    "Non-zero target position requires active unexpired thesis for instrument"
+                                )
                 db.execute(
                     "INSERT INTO decisions VALUES (?, ?, ?, ?, ?)",
                     (decision.decision_id, decision.event_id, payload, now, version + 1),

@@ -379,6 +379,53 @@ class ObserverStore:
         )
         return tuple(item for item in records if as_of is None or item.available_at <= as_of)
 
+    def revisions(
+        self,
+        *,
+        kind: Kind | None = None,
+        provider: str = "wallstreetcn",
+        basis: Basis = "live_poll",
+        as_of: datetime | None = None,
+        limit: int = 100,
+    ) -> tuple[StoredRevision, ...]:
+        if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+            raise ValueError("Revision cutoff requires a timezone")
+        if not 1 <= limit <= 1000:
+            raise ValueError("Revision limit must be between 1 and 1000")
+        query = """
+            SELECT r.*, MIN(p.available_at) AS available_at
+            FROM observer_revisions r
+            JOIN observer_sightings s
+                ON s.source_id=r.source_id AND s.revision=r.revision
+            JOIN observer_polls p
+                ON p.poll_id=s.poll_id AND p.provider=r.provider
+                AND p.basis=r.basis AND p.kind=r.kind
+            WHERE r.provider=? AND r.basis=? AND p.available_at IS NOT NULL
+        """
+        params: list[Any] = [provider, basis]
+        if kind is not None:
+            query += " AND r.kind=?"
+            params.append(kind)
+        query += """
+            GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
+            ORDER BY available_at ASC, r.kind ASC, r.source_id ASC, r.revision ASC
+        """
+        rows = self.db.execute(query, params).fetchall()
+        items = tuple(
+            StoredRevision(
+                provider=provider,
+                basis=basis,
+                revision=row["revision"],
+                received_at=row["received_at"],
+                recorded_at=row["recorded_at"],
+                available_at=row["available_at"],
+                record=SourceRecord.model_validate_json(row["record"]),
+            )
+            for row in rows
+        )
+        filtered = tuple(item for item in items if as_of is None or item.available_at <= as_of)
+        return filtered[-limit:]
+
     def report(self) -> dict[str, Any]:
         counts = {
             name: self.db.execute(f"SELECT COUNT(*) FROM observer_{name}").fetchone()[0]

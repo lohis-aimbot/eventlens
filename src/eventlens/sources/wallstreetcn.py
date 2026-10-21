@@ -15,13 +15,78 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import ValidationError
 
-from ..observer import CaptureBatch, Kind, MacroValues, RejectedRecord, SourceRecord
+from ..contracts import Event, FilterResult
+from ..observer import (
+    Basis,
+    CaptureBatch,
+    Kind,
+    MacroValues,
+    ObserverStore,
+    RejectedRecord,
+    SourceRecord,
+    StoredRevision,
+)
 
 logger = logging.getLogger(__name__)
 NEWS_URL = "https://api-one.wallstcn.com/apiv1/content/lives"
 CALENDAR_URL = "https://api-one-wscn.awtmt.com/apiv1/finance/macrodatas"
 MAX_BYTES = 1_000_000
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+FILTER_VERSION = "wallstreetcn-eurusd-v1"
+EURUSD_CALENDAR_COUNTRIES: frozenset[str] = frozenset(
+    {
+        "美国",
+        "欧元区",
+        "德国",
+        "法国",
+        "意大利",
+        "西班牙",
+        "欧盟",
+        "US",
+        "United States",
+        "Euro Area",
+        "Eurozone",
+        "EU",
+        "Germany",
+        "France",
+    }
+)
+EURUSD_NEWS_KEYWORDS: tuple[str, ...] = (
+    "美联储",
+    "联储",
+    "fomc",
+    "鲍威尔",
+    "powell",
+    "联邦基金",
+    "联邦公开市场委员会",
+    "褐皮书",
+    "美债",
+    "美国国债",
+    "国债收益率",
+    "treasury",
+    "非农",
+    "nonfarm",
+    "payroll",
+    "初请失业金",
+    "欧洲央行",
+    "欧央行",
+    "ecb",
+    "拉加德",
+    "lagarde",
+    "欧元",
+    "美元",
+    "eur/usd",
+    "eurusd",
+    "eurozone",
+    "euro area",
+    "federal reserve",
+    "cpi",
+    "pce",
+)
+SCHEDULE_DIGEST_MARKERS: tuple[str, ...] = (
+    "提醒：日内请重点关注",
+    "微信小程序搜索“见闻历”",
+)
 
 
 class CaptureError(RuntimeError):
@@ -341,3 +406,263 @@ class WallStreetCNSource:
                         raise CaptureError("retry_after_exceeds_budget")
                 await asyncio.sleep(delay)
         raise AssertionError("Unreachable source retry loop")
+
+
+def revision_event_id(revision: StoredRevision) -> str:
+    return f"{revision.provider}:{revision.record.kind}:{revision.record.source_id}:r{revision.revision}"
+
+
+def revision_to_event(revision: StoredRevision) -> Event:
+    """Convert a published observer revision into an immutable Event contract."""
+    record = revision.record
+    if record.kind == "calendar":
+        source_time = record.original_published_at or record.scheduled_at or revision.received_at
+        source_type = "macro"
+    else:
+        source_time = (
+            record.original_published_at or record.publisher_display_at or revision.received_at
+        )
+        source_type = "news"
+    title = record.title.strip()
+    body = record.text.strip()
+    raw_text = f"{title}\n{body}" if title and title not in body else body
+    return Event(
+        event_id=revision_event_id(revision),
+        source=f"{revision.provider}_{record.kind}",
+        source_type=source_type,
+        source_reference=record.source_url,
+        source_timestamp=source_time,
+        received_timestamp=revision.available_at,
+        raw_text=raw_text,
+    )
+
+
+class WallStreetCNFilter:
+    """Deterministic filter for WallStreetCN news and calendar observations."""
+
+    def __init__(
+        self,
+        *,
+        min_news_importance: int = 2,
+        min_calendar_importance: int = 2,
+        allowed_countries: frozenset[str] = EURUSD_CALENDAR_COUNTRIES,
+        news_keywords: tuple[str, ...] = EURUSD_NEWS_KEYWORDS,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        if min_news_importance < 0 or min_calendar_importance < 0:
+            raise ValueError("Importance thresholds must be nonnegative")
+        self.min_news_importance = min_news_importance
+        self.min_calendar_importance = min_calendar_importance
+        self.allowed_countries = allowed_countries
+        self.news_keywords = tuple(keyword.lower() for keyword in news_keywords)
+        self.clock = clock
+        self._seen: set[str] = set()
+
+    def evaluate_revision(
+        self, revision: StoredRevision, *, checked_at: datetime | None = None
+    ) -> tuple[FilterResult, Event | None]:
+        now = checked_at or self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Filter check clock requires a timezone")
+        now = now.astimezone(UTC)
+        event_id = revision_event_id(revision)
+        if revision.available_at > now:
+            return (
+                FilterResult(
+                    event_id=event_id,
+                    outcome="quarantine",
+                    reason="future_revision_availability",
+                    checked_at=now,
+                    filter_version=FILTER_VERSION,
+                ),
+                None,
+            )
+        if event_id in self._seen:
+            return (
+                FilterResult(
+                    event_id=event_id,
+                    outcome="ignore",
+                    reason="duplicate_revision",
+                    checked_at=now,
+                    filter_version=FILTER_VERSION,
+                ),
+                None,
+            )
+        record = revision.record
+        if record.kind == "calendar":
+            if (
+                record.macro is None
+                or record.macro.actual is None
+                or not record.macro.actual.strip()
+            ):
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="unreleased_calendar_schedule",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+            country = (record.macro.country or "").strip()
+            if country not in self.allowed_countries:
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="unrelated_calendar_country",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+            if (record.importance or 0) < self.min_calendar_importance:
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="below_calendar_importance_threshold",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+        else:
+            if (record.importance or 0) < self.min_news_importance:
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="below_news_importance_threshold",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+            combined = f"{record.title}\n{record.text}".lower()
+            if any(marker.lower() in combined for marker in SCHEDULE_DIGEST_MARKERS):
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="schedule_reminder_digest",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+            if not any(keyword in combined for keyword in self.news_keywords):
+                return (
+                    FilterResult(
+                        event_id=event_id,
+                        outcome="ignore",
+                        reason="no_eurusd_macro_relevance",
+                        checked_at=now,
+                        filter_version=FILTER_VERSION,
+                    ),
+                    None,
+                )
+        try:
+            event = revision_to_event(revision)
+        except ValidationError:
+            return (
+                FilterResult(
+                    event_id=event_id,
+                    outcome="quarantine",
+                    reason="receipt_precedes_source_time",
+                    checked_at=now,
+                    filter_version=FILTER_VERSION,
+                ),
+                None,
+            )
+        self._seen.add(event_id)
+        return (
+            FilterResult(
+                event_id=event_id,
+                outcome="accept",
+                reason=f"eligible_{record.kind}_observation",
+                checked_at=now,
+                filter_version=FILTER_VERSION,
+            ),
+            event,
+        )
+
+    async def evaluate(self, event: Event) -> FilterResult:
+        now = self.clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Filter check clock requires a timezone")
+        now = now.astimezone(UTC)
+        if event.received_timestamp > now:
+            return FilterResult(
+                event_id=event.event_id,
+                outcome="quarantine",
+                reason="future_event_receipt",
+                checked_at=now,
+                filter_version=FILTER_VERSION,
+            )
+        if event.event_id in self._seen:
+            return FilterResult(
+                event_id=event.event_id,
+                outcome="ignore",
+                reason="duplicate_event",
+                checked_at=now,
+                filter_version=FILTER_VERSION,
+            )
+        combined = event.raw_text.lower()
+        if event.source_type == "news" and not any(
+            keyword in combined for keyword in self.news_keywords
+        ):
+            return FilterResult(
+                event_id=event.event_id,
+                outcome="ignore",
+                reason="no_eurusd_macro_relevance",
+                checked_at=now,
+                filter_version=FILTER_VERSION,
+            )
+        self._seen.add(event.event_id)
+        return FilterResult(
+            event_id=event.event_id,
+            outcome="accept",
+            reason="eligible_event",
+            checked_at=now,
+            filter_version=FILTER_VERSION,
+        )
+
+
+def filter_store_revisions(
+    store: ObserverStore,
+    *,
+    kind: Kind | None = None,
+    basis: Basis = "live_poll",
+    as_of: datetime | None = None,
+    limit: int = 100,
+    event_filter: WallStreetCNFilter | None = None,
+) -> dict[str, Any]:
+    """Read-only evaluation of published observer revisions without model calls."""
+    active_filter = event_filter or WallStreetCNFilter()
+    cutoff = as_of.astimezone(UTC) if as_of is not None else active_filter.clock().astimezone(UTC)
+    revisions = store.revisions(kind=kind, basis=basis, as_of=cutoff, limit=limit)
+    counts = {"accept": 0, "ignore": 0, "quarantine": 0}
+    reasons: dict[str, int] = {}
+    accepted: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+    for item in revisions:
+        result, event = active_filter.evaluate_revision(item, checked_at=cutoff)
+        counts[result.outcome] += 1
+        reasons[result.reason] = reasons.get(result.reason, 0) + 1
+        results.append(result.model_dump(mode="json"))
+        if event is not None:
+            accepted.append(event.model_dump(mode="json"))
+    return {
+        "scope": "source_filter_only",
+        "execution_authorized": False,
+        "filter_version": FILTER_VERSION,
+        "basis": basis,
+        "as_of": cutoff.isoformat(),
+        "evaluated": len(revisions),
+        "counts": counts,
+        "reasons": reasons,
+        "accepted_events": accepted,
+        "results": results,
+    }

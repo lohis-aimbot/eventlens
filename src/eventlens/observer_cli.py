@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from .observer import CaptureBatch, CaptureSource, Kind, ObserverStore
-from .sources.wallstreetcn import CaptureError, WallStreetCNSource, parse_capture
+from .sources.wallstreetcn import (
+    CaptureError,
+    WallStreetCNSource,
+    filter_store_revisions,
+    parse_capture,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,15 @@ def main() -> None:
     history.add_argument(
         "--as-of", type=datetime.fromisoformat, help="Timezone-aware storage cutoff"
     )
+    filtered = commands.add_parser("filter", help="Read-only EUR/USD event filter; no LLM calls")
+    filtered.add_argument("--kind", choices=("news", "calendar", "both"), default="both")
+    filtered.add_argument(
+        "--basis", choices=("live_poll", "synthetic_fixture"), default="live_poll"
+    )
+    filtered.add_argument(
+        "--as-of", type=datetime.fromisoformat, help="Timezone-aware storage cutoff"
+    )
+    filtered.add_argument("--limit", type=int, default=100)
     quotes = commands.add_parser(
         "quotes", add_help=False, help="Local Demo quote watch/report/alignment"
     )
@@ -132,7 +146,7 @@ def main() -> None:
     )
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     try:
-        store = ObserverStore(database, readonly=args.command in {"report", "history"})
+        store = ObserverStore(database, readonly=args.command in {"report", "history", "filter"})
         try:
             if args.command == "capture":
                 failed = asyncio.run(capture(store, args))
@@ -153,6 +167,21 @@ def main() -> None:
                                 as_of=args.as_of,
                             )
                         ],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            elif args.command == "filter":
+                kind_arg: Kind | None = None if args.kind == "both" else args.kind
+                print(
+                    json.dumps(
+                        filter_store_revisions(
+                            store,
+                            kind=kind_arg,
+                            basis=args.basis,
+                            as_of=args.as_of,
+                            limit=args.limit,
+                        ),
                         ensure_ascii=False,
                         indent=2,
                     )
