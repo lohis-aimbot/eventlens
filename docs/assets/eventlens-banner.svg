@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-labelledby="title description" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
   <title id="title">EventLens — From financial events to auditable decisions</title>
-  <desc id="description">A minimalist modern AI banner with a cobalt-blue optical aperture emblem, large EventLens wordmark, and clean subtitle.</desc>
+  <desc id="description">A minimalist modern AI banner featuring an avant-garde eccentric eclipse-lens emblem, large EventLens wordmark, and clean subtitle.</desc>
   <defs>
     <clipPath id="clip">
       <rect width="1280" height="380" rx="28"/>
@@ -24,10 +24,23 @@
       <stop offset="1" stop-color="#EEF4FF" stop-opacity="0"/>
     </radialGradient>
 
-    <linearGradient id="brand-grad" x1="600" y1="62" x2="680" y2="132" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1D4ED8"/>
-      <stop offset="0.5" stop-color="#4D6BFE"/>
-      <stop offset="1" stop-color="#06B6D4"/>
+    <linearGradient id="eclipse-outer" x1="-38" y1="38" x2="38" y2="-38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F172A"/>
+      <stop offset="0.52" stop-color="#1D4ED8"/>
+      <stop offset="1" stop-color="#4D6BFE"/>
+    </linearGradient>
+
+    <linearGradient id="eclipse-inner" x1="-22" y1="22" x2="28" y2="-28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D6BFE"/>
+      <stop offset="0.55" stop-color="#06B6D4"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+
+    <linearGradient id="ray-grad" x1="-28" y1="28" x2="38" y2="-38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.15"/>
+      <stop offset="0.45" stop-color="#2563EB"/>
+      <stop offset="0.78" stop-color="#06B6D4"/>
+      <stop offset="1" stop-color="#0EA5E9" stop-opacity="0.2"/>
     </linearGradient>
 
     <linearGradient id="word-grad" x1="635" y1="155" x2="900" y2="245" gradientUnits="userSpaceOnUse">
@@ -43,14 +56,34 @@
     <circle cx="420" cy="60" r="460" fill="url(#glow-left)"/>
     <circle cx="860" cy="320" r="460" fill="url(#glow-right)"/>
 
-    <!-- Minimalist Optical Lens + AI Spark Emblem -->
+    <!-- Avant-Garde Gravitational Eclipse & Optical Refraction Emblem -->
     <g transform="translate(640, 96)">
-      <circle cx="0" cy="0" r="34" fill="#FFFFFF" stroke="#DCE6F7" stroke-width="1.5"/>
-      <circle cx="0" cy="0" r="24" fill="none" stroke="url(#brand-grad)" stroke-width="3.5"/>
-      <path d="M 0 -14 C 3.2 -4.8, 4.8 -3.2, 14 0 C 4.8 3.2, 3.2 4.8, 0 14 C -3.2 4.8, -4.8 3.2, -14 0 C -4.8 -3.2, -3.2 -4.8, 0 -14 Z" fill="url(#brand-grad)"/>
+      <!-- Subtle precision orbital axis ring -->
+      <ellipse cx="0" cy="0" rx="48" ry="17" transform="rotate(-38)" fill="none" stroke="#94A3B8" stroke-opacity="0.35" stroke-width="1.2"/>
+
+      <!-- Outer eccentric gravitational lens torus (bold bottom-left, razor-thin top-right) -->
+      <path fill="url(#eclipse-outer)" fill-rule="evenodd"
+            d="M -38 0 A 38 38 0 1 0 38 0 A 38 38 0 1 0 -38 0 Z
+               M -24 -5 A 29 29 0 1 0 34 -5 A 29 29 0 1 0 -24 -5 Z"/>
+
+      <!-- Inner counter-refracted cyan torus (razor-thin bottom-left, bold top-right) -->
+      <path fill="url(#eclipse-inner)" fill-rule="evenodd"
+            d="M -20 -4 A 24 24 0 1 0 28 -4 A 24 24 0 1 0 -20 -4 Z
+               M -17.5 1 A 16.5 16.5 0 1 0 15.5 1 A 16.5 16.5 0 1 0 -17.5 1 Z"/>
+
+      <!-- Refractive laser vector piercing the optical core -->
+      <path d="M -30 23.4 L -2.2 -5.2 L 32 -25 L 2.2 5.2 Z" fill="url(#ray-grad)"/>
+
+      <!-- Central asymmetric focal prism spark -->
+      <path d="M 0 -11 C 2.2 -3.2, 3.2 -2.2, 11 0 C 3.2 2.2, 2.2 3.2, 0 11 C -2.2 3.2, -3.2 2.2, -11 0 C -3.2 -2.2, -2.2 -3.2, 0 -11 Z"
+            transform="rotate(-12)" fill="#0F172A"/>
+      <circle cx="0" cy="0" r="2.6" fill="#FFFFFF"/>
+
+      <!-- High-frequency event pulse node on upper-right rim -->
+      <circle cx="29" cy="-22.6" r="3.2" fill="#06B6D4"/>
     </g>
 
-    <!-- Crisp Large Typography (only two lines, zero small text) -->
+    <!-- Crisp Large Typography -->
     <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
       <text x="640" y="232" font-size="108" font-weight="700" letter-spacing="-4.5">
         <tspan fill="#0F172A">Event</tspan><tspan fill="url(#word-grad)">Lens</tspan>
