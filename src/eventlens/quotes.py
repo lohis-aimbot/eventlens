@@ -26,6 +26,10 @@ class BridgeStart(Contract):
     started_at: Timestamp
     sample_interval_ms: int = Field(strict=True, ge=1000, le=10000)
     duration_seconds: int = Field(strict=True, ge=10, le=600)
+    digits: int | None = Field(default=None, strict=True, ge=0, le=10)
+    pip_size: Decimal | None = Field(default=None, gt=0)
+    commission: Decimal | None = Field(default=None, ge=0)
+    commission_type: Identifier | None = None
 
 
 class BridgeQuote(Contract):
@@ -52,6 +56,28 @@ class BridgeStop(Contract):
     session_id: UUID
     stopped_at: Timestamp
     quotes: int = Field(strict=True, ge=0)
+    raw_ticks: int | None = Field(default=None, strict=True, ge=0)
+    raw_zero_spread_ticks: int | None = Field(default=None, strict=True, ge=0)
+    symbol_mismatch_ticks: int | None = Field(default=None, strict=True, ge=0)
+    throttled_ticks: int | None = Field(default=None, strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def valid_diagnostics(self) -> Self:
+        if self.raw_ticks is not None and self.raw_ticks < self.quotes:
+            raise ValueError("Raw tick count cannot be smaller than emitted quotes")
+        if self.raw_zero_spread_ticks is not None and (
+            self.raw_ticks is None or self.raw_zero_spread_ticks > self.raw_ticks
+        ):
+            raise ValueError("Raw zero-spread ticks require a bounding raw_ticks count")
+        if self.symbol_mismatch_ticks is not None and (
+            self.raw_ticks is None or self.symbol_mismatch_ticks > self.raw_ticks
+        ):
+            raise ValueError("Symbol mismatch ticks require a bounding raw_ticks count")
+        if self.throttled_ticks is not None and (
+            self.raw_ticks is None or self.throttled_ticks != self.raw_ticks - self.quotes
+        ):
+            raise ValueError("Throttled ticks must equal raw_ticks minus emitted quotes")
+        return self
 
 
 class QuoteObservation(Contract):
@@ -267,18 +293,26 @@ class QuoteStore:
         sessions = []
         quality: dict[str, dict[str, Any]] = {}
         for session in self.db.execute("SELECT * FROM quote_sessions ORDER BY rowid"):
+            start = BridgeStart.model_validate_json(session["start"])
             rows = self.db.execute(
                 "SELECT * FROM quote_observations WHERE session_id=? ORDER BY sequence",
                 (session["session_id"],),
             )
             count, last_sequence = 0, 0
+            first_source: datetime | None = None
+            previous_source: datetime | None = None
             previous_received: datetime | None = None
             bucket = quality.setdefault(
                 session["basis"],
                 {
                     "quotes": 0,
                     "zero_spread": 0,
+                    "positive_spread": 0,
+                    "min_positive_spread": None,
+                    "max_spread": None,
+                    "max_sample_source_gap_seconds": 0.0,
                     "max_sample_receipt_gap_seconds": 0.0,
+                    "max_source_to_bridge_seconds": 0.0,
                     "max_bridge_to_receipt_seconds": 0.0,
                 },
             )
@@ -287,17 +321,38 @@ class QuoteStore:
                 last_sequence = row["sequence"]
                 item = BridgeQuote.model_validate_json(row["quote"])
                 received = datetime.fromisoformat(row["received_at"])
+                spread = item.ask - item.bid
+                if first_source is None:
+                    first_source = item.source_at
                 bucket["quotes"] += 1
-                bucket["zero_spread"] += int(item.ask == item.bid)
+                bucket["zero_spread"] += int(spread == 0)
+                bucket["positive_spread"] += int(spread > 0)
+                if spread > 0 and (
+                    bucket["min_positive_spread"] is None
+                    or spread < Decimal(bucket["min_positive_spread"])
+                ):
+                    bucket["min_positive_spread"] = str(spread)
+                if bucket["max_spread"] is None or spread > Decimal(bucket["max_spread"]):
+                    bucket["max_spread"] = str(spread)
+                bucket["max_source_to_bridge_seconds"] = max(
+                    bucket["max_source_to_bridge_seconds"],
+                    (item.bridge_at - item.source_at).total_seconds(),
+                )
                 bucket["max_bridge_to_receipt_seconds"] = max(
                     bucket["max_bridge_to_receipt_seconds"],
                     (received - item.bridge_at).total_seconds(),
                 )
+                if previous_source is not None:
+                    bucket["max_sample_source_gap_seconds"] = max(
+                        bucket["max_sample_source_gap_seconds"],
+                        (item.source_at - previous_source).total_seconds(),
+                    )
                 if previous_received is not None:
                     bucket["max_sample_receipt_gap_seconds"] = max(
                         bucket["max_sample_receipt_gap_seconds"],
                         (received - previous_received).total_seconds(),
                     )
+                previous_source = item.source_at
                 previous_received = received
             stop = BridgeStop.model_validate_json(session["stop"]) if session["stop"] else None
             sessions.append(
@@ -307,6 +362,44 @@ class QuoteStore:
                     "closed": stop is not None,
                     "quotes": count,
                     "missing_sequences": (stop.quotes if stop else last_sequence) - count,
+                    "first_source_before_start": first_source < start.started_at
+                    if first_source is not None
+                    else False,
+                    "symbol_metadata": {
+                        "digits": start.digits,
+                        "pip_size": str(start.pip_size) if start.pip_size is not None else None,
+                        "commission": str(start.commission)
+                        if start.commission is not None
+                        else None,
+                        "commission_type": start.commission_type,
+                    }
+                    if any(
+                        v is not None
+                        for v in (
+                            start.digits,
+                            start.pip_size,
+                            start.commission,
+                            start.commission_type,
+                        )
+                    )
+                    else None,
+                    "bridge_diagnostics": {
+                        "raw_ticks": stop.raw_ticks,
+                        "raw_zero_spread_ticks": stop.raw_zero_spread_ticks,
+                        "symbol_mismatch_ticks": stop.symbol_mismatch_ticks,
+                        "throttled_ticks": stop.throttled_ticks,
+                    }
+                    if stop is not None
+                    and any(
+                        v is not None
+                        for v in (
+                            stop.raw_ticks,
+                            stop.raw_zero_spread_ticks,
+                            stop.symbol_mismatch_ticks,
+                            stop.throttled_ticks,
+                        )
+                    )
+                    else None,
                 }
             )
         return {
@@ -356,6 +449,13 @@ def align_news(
     event = revisions[-1] if revisions else None
     event_age = (cutoff - event.available_at).total_seconds() if event else None
     quote_age = (cutoff - quote.quote.source_at).total_seconds() if quote else None
+    quote_receipt_age = (cutoff - quote.received_at).total_seconds() if quote else None
+    quote_source_to_bridge = (
+        (quote.quote.bridge_at - quote.quote.source_at).total_seconds() if quote else None
+    )
+    quote_bridge_to_receipt = (
+        (quote.received_at - quote.quote.bridge_at).total_seconds() if quote else None
+    )
     status = (
         "missing_event"
         if event is None
@@ -379,6 +479,9 @@ def align_news(
         "quote": quote.model_dump(mode="json") if quote else None,
         "event_observation_age_seconds": event_age,
         "quote_source_age_seconds": quote_age,
+        "quote_receipt_age_seconds": quote_receipt_age,
+        "quote_source_to_bridge_seconds": quote_source_to_bridge,
+        "quote_bridge_to_receipt_seconds": quote_bridge_to_receipt,
         "spread": str(quote.quote.ask - quote.quote.bid) if quote else None,
         "limits": {"max_quote_age_seconds": max_quote_age, "max_event_age_seconds": max_event_age},
     }

@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from eventlens.observer import CaptureBatch, ObserverStore, SourceRecord
-from eventlens.quotes import BridgeQuote, BridgeStart, QuoteStore, align_news
+from eventlens.quotes import BridgeQuote, BridgeStart, BridgeStop, QuoteStore, align_news
 from eventlens.sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
 
 NOW = datetime(2026, 10, 15, 6, tzinfo=UTC)
@@ -326,6 +326,8 @@ def test_bridge_source_has_no_order_api_and_keeps_historical_probe_separate():
     assert (
         "Account.IsLive" in code and "RunningMode.RealTime" in code and "AccessRights.None" in code
     )
+    assert "FlushPendingIfDue" in code and "raw_zero_spread_ticks" in code
+    assert "symbol_mismatch_ticks" in code and "commission_type" in code
     for operation in (
         "ExecuteMarketOrder",
         "PlaceLimitOrder",
@@ -431,4 +433,112 @@ def test_alignment_does_not_fall_back_past_newest_zero_spread_quote(tmp_path):
     assert result["status"] == "zero_spread" and result["quote"]["quote"]["sequence"] == 2
     assert store.report()["quality_by_basis"]["live_poll"]["zero_spread"] == 1
     events.close()
+    store.close()
+
+
+def test_bridge_diagnostics_and_clock_decomposition_in_report_and_alignment(tmp_path):
+    events = ObserverStore(tmp_path / "events.sqlite", clock=lambda: NOW + timedelta(seconds=5))
+    add_event(events, received=NOW + timedelta(seconds=5))
+    store, receiver = collector(tmp_path)
+    meta_start = {
+        **start().model_dump(mode="json"),
+        "digits": 5,
+        "pip_size": "0.0001",
+        "commission": "3",
+        "commission_type": "UsdPerMillionUsdVolume",
+    }
+    assert receiver.accept(json.dumps(meta_start), NOW) == "start"
+    first = quote(
+        sequence=1,
+        source_at=NOW - timedelta(milliseconds=500),
+        bridge_at=NOW + timedelta(milliseconds=100),
+        bid="1.10001",
+        ask="1.10001",
+    )
+    second = quote(
+        sequence=2,
+        source_at=NOW + timedelta(seconds=1),
+        bridge_at=NOW + timedelta(seconds=1, milliseconds=250),
+        bid="1.10001",
+        ask="1.10002",
+    )
+    assert receiver.accept(first.model_dump_json(), NOW + timedelta(milliseconds=200)) == "quote"
+    assert (
+        receiver.accept(second.model_dump_json(), NOW + timedelta(seconds=1, milliseconds=400))
+        == "quote"
+    )
+    stop = {
+        "version": 1,
+        "kind": "stop",
+        "session_id": SESSION,
+        "stopped_at": (NOW + timedelta(seconds=2)).isoformat(),
+        "quotes": 2,
+        "raw_ticks": 5,
+        "raw_zero_spread_ticks": 4,
+        "symbol_mismatch_ticks": 0,
+        "throttled_ticks": 3,
+    }
+    assert receiver.accept(json.dumps(stop), NOW + timedelta(seconds=2)) == "stop"
+    report = store.report()
+    detail = report["session_details"][0]
+    assert detail["first_source_before_start"] is True
+    assert detail["symbol_metadata"] == {
+        "digits": 5,
+        "pip_size": "0.0001",
+        "commission": "3",
+        "commission_type": "UsdPerMillionUsdVolume",
+    }
+    assert detail["bridge_diagnostics"] == {
+        "raw_ticks": 5,
+        "raw_zero_spread_ticks": 4,
+        "symbol_mismatch_ticks": 0,
+        "throttled_ticks": 3,
+    }
+    quality = report["quality_by_basis"]["live_poll"]
+    assert quality["zero_spread"] == 1 and quality["positive_spread"] == 1
+    assert quality["min_positive_spread"] == "0.00001" and quality["max_spread"] == "0.00001"
+    assert quality["max_sample_source_gap_seconds"] == pytest.approx(1.5)
+    assert quality["max_source_to_bridge_seconds"] == pytest.approx(0.6)
+    aligned = align_news(events, store, "test-news", NOW + timedelta(seconds=5))
+    assert aligned["status"] == "stale_quote"
+    assert aligned["quote_source_to_bridge_seconds"] == pytest.approx(0.25)
+    assert aligned["quote_bridge_to_receipt_seconds"] == pytest.approx(0.15)
+    assert aligned["quote_receipt_age_seconds"] == pytest.approx(3.6)
+    assert aligned["quote_source_age_seconds"] == pytest.approx(
+        aligned["quote_source_to_bridge_seconds"]
+        + aligned["quote_bridge_to_receipt_seconds"]
+        + aligned["quote_receipt_age_seconds"]
+    )
+    events.close()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "bad_stop",
+    [
+        {"quotes": 3, "raw_ticks": 2},
+        {"quotes": 2, "raw_ticks": 3, "raw_zero_spread_ticks": 4},
+        {"quotes": 2, "raw_ticks": 3, "symbol_mismatch_ticks": 4},
+        {"quotes": 2, "raw_ticks": 5, "throttled_ticks": 2},
+        {"quotes": 2, "raw_zero_spread_ticks": 1},
+    ],
+)
+def test_stop_contract_rejects_inconsistent_tick_diagnostics(bad_stop):
+    with pytest.raises(ValidationError):
+        BridgeStop.model_validate(
+            {
+                "version": 1,
+                "kind": "stop",
+                "session_id": SESSION,
+                "stopped_at": NOW + timedelta(seconds=2),
+                **bad_stop,
+            }
+        )
+
+
+def test_receiver_rejects_numeric_symbol_metadata_decimals(tmp_path):
+    store, receiver = collector(tmp_path)
+    bad = {**start().model_dump(mode="json"), "pip_size": 0.0001}
+    assert receiver.accept(json.dumps(bad), NOW) == "rejected"
+    assert store.report()["sessions"] == 0 and store.report()["failures"] == 1
     store.close()

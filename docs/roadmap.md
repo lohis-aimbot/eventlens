@@ -10,10 +10,11 @@ fingerprints match. No model, news or broker API was called during this reorgani
 **Stage 1A now implements source capture:** news/calendar polling, raw payloads,
 revision history and post-commit availability markers. See [acceptance](observer-acceptance.md).
 **Stage 1B adds bounded Demo EURUSD quote capture and as-of news alignment.** Its
-[short observation](live-quotes-acceptance.md) passed storage/timing checks but exposed
-29/33 zero-spread samples and a stale quote at the news cutoff. Representative quote
-quality, extended/important-release sampling and the rest of Stage 1 acceptance remain
-pending; Stages 2–5 remain planned.
+[short observation](live-quotes-acceptance.md) passed storage/timing checks, exposed
+29/33 zero-spread samples and a stale quote at the news cutoff, and added symbol/tick
+diagnostics plus clock-lag decomposition without relaxing freshness or spread gates.
+Representative quote quality, extended/important-release sampling and the rest of Stage 1
+acceptance remain pending; Stages 2–5 remain planned.
 
 | Stage | Work | Acceptance |
 |---|---|---|

@@ -58,7 +58,17 @@ cryptographically authenticated market evidence.
 Watch bounds are 10–600 seconds; bridge bounds are 10–600 seconds and 1000–10000 ms
 between emitted tick snapshots. Sampling happens **on actual ticks**, not every wall-clock
 second: quiet periods have gaps. There is no forward fill, invented heartbeat quote or
-backfill at watch startup. This is sampled observation, not a complete tick archive.
+backfill at watch startup. Cached historical ticks already present before `OnStart` are
+ignored, and a 200 ms timer flushes any new tick held back by the sample-interval throttle
+once that interval elapses (provided the tick is still fresh). This prevents trailing ticks
+before a quiet period from being dropped while remaining a sampled observation rather than
+a complete tick archive.
+
+The `start` handshake optionally records read-only symbol metadata (`digits`, `pip_size`,
+`commission`, `commission_type`), and `stop` records raw `OnTick` diagnostics (`raw_ticks`,
+`raw_zero_spread_ticks`, `symbol_mismatch_ticks`, `throttled_ticks`) so zero-spread share
+and `Symbol.Bid/Ask` vs `Ticks.LastTick` agreement can be audited without storing every
+unthrottled tick.
 
 ## Clocks, durability and quality
 
@@ -90,8 +100,12 @@ A watcher failure never creates a trade. Raw local evidence stays under ignored 
 
 Zero-spread snapshots remain stored and counted; alignment marks them unusable. This
 conservative initial policy avoids treating an unvalidated free-spread quote as execution
-quality. Report exposes sampled receipt gaps, missing sequence counts, closed sessions,
-zero spreads and bridge-to-Python clock deltas. None of these measures source-to-fill latency.
+quality. Report exposes sampled source and receipt gaps, positive/zero-spread counts,
+spread bounds, pre-start cached-tick flags, symbol/bridge diagnostics, missing sequence
+counts, closed sessions, source-to-bridge lag and bridge-to-Python clock deltas. Alignment
+also decomposes `quote_source_age_seconds` into `quote_source_to_bridge_seconds`,
+`quote_bridge_to_receipt_seconds` and `quote_receipt_age_seconds`. None of these measures
+source-to-fill latency.
 
 ## News/quote alignment
 

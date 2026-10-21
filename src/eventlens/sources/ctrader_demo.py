@@ -68,6 +68,9 @@ class DemoQuoteCollector:
                 raise ValueError("Invalid bridge envelope/version")
             kind = obj.get("kind")
             if kind == "start":
+                for field in ("pip_size", "commission"):
+                    if obj.get(field) is not None and not isinstance(obj.get(field), str):
+                        raise ValueError("Bridge symbol metadata decimals must be strings")
                 start = BridgeStart.model_validate(obj)
                 if self.session is not None:
                     raise ValueError("Only one fresh bridge session per watch is allowed")
