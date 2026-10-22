@@ -25,7 +25,7 @@ class BridgeStart(Contract):
     running_mode: Literal["realtime"]
     symbol: Literal["EURUSD"]
     started_at: Timestamp
-    sample_interval_ms: int = Field(strict=True, ge=1000, le=10000)
+    sample_interval_ms: int = Field(strict=True, ge=100, le=10000)
     duration_seconds: int = Field(strict=True, ge=10, le=600)
     digits: int | None = Field(default=None, strict=True, ge=0, le=10)
     pip_size: Decimal | None = Field(default=None, gt=0)

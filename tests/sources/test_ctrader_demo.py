@@ -542,3 +542,45 @@ def test_receiver_rejects_numeric_symbol_metadata_decimals(tmp_path):
     assert receiver.accept(json.dumps(bad), NOW) == "rejected"
     assert store.report()["sessions"] == 0 and store.report()["failures"] == 1
     store.close()
+
+
+def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
+    code = Path("ctrader/EventLensQuoteBridge.cs").read_text()
+    assert "spreadStateChanged" in code and "_lastEmittedPositiveSpread" in code
+    assert "FlushPendingIfDue(true)" in code
+    with pytest.raises(ValidationError):
+        start(sample_interval_ms=50)
+    s1 = start(sample_interval_ms=200)
+    assert s1.sample_interval_ms == 200
+
+    store = QuoteStore(tmp_path / "multi.sqlite", clock=lambda: NOW + timedelta(seconds=10))
+    receiver = DemoQuoteCollector(store, NOW - timedelta(seconds=1), allow_multiple_sessions=True)
+    assert receiver.accept(s1.model_dump_json(), NOW) == "start"
+    # Second start while first session is still open is rejected
+    s2 = start(
+        session_id="00000000-0000-4000-8000-000000000002",
+        started_at=NOW + timedelta(seconds=1),
+        sample_interval_ms=200,
+    )
+    assert receiver.accept(s2.model_dump_json(), NOW + timedelta(seconds=1)) == "rejected"
+    # Close first session, then second session is accepted
+    stop1 = {
+        "version": 1,
+        "kind": "stop",
+        "session_id": SESSION,
+        "stopped_at": (NOW + timedelta(seconds=2)).isoformat(),
+        "quotes": 0,
+    }
+    assert receiver.accept(json.dumps(stop1), NOW + timedelta(seconds=2)) == "stop"
+    assert receiver.accept(s2.model_dump_json(), NOW + timedelta(seconds=2)) == "start"
+    q2 = quote(
+        session_id="00000000-0000-4000-8000-000000000002",
+        source_at=NOW + timedelta(seconds=3),
+        bridge_at=NOW + timedelta(seconds=3, milliseconds=10),
+    )
+    assert (
+        receiver.accept(q2.model_dump_json(), NOW + timedelta(seconds=3, milliseconds=20))
+        == "quote"
+    )
+    assert store.report()["sessions"] == 2 and store.report()["quotes"] == 1
+    store.close()

@@ -99,7 +99,14 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
 
         args.memory_db.parent.mkdir(parents=True, exist_ok=True)
         memory = SQLiteThesisMemory(args.memory_db, allow_targets=True)
-        qstore = QuoteStore(args.quotes_db, readonly=True) if args.quotes_db.is_file() else None
+        quote_bridge_dir: Path | None = getattr(args, "quote_bridge_dir", None)
+        if quote_bridge_dir is not None:
+            args.quotes_db.parent.mkdir(parents=True, exist_ok=True)
+        qstore = (
+            QuoteStore(args.quotes_db, readonly=quote_bridge_dir is None)
+            if (args.quotes_db.is_file() or quote_bridge_dir is not None)
+            else None
+        )
         if getattr(args, "poll_news", False):
             args.observer_db.parent.mkdir(parents=True, exist_ok=True)
         ostore = (
@@ -111,8 +118,11 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             else None
         )
         try:
+            runner_ref: list[ShadowRunner] = []
 
             def market_provider(ts: datetime) -> MarketSnapshot:
+                if runner_ref:
+                    runner_ref[0]._poll_quote_bridge_sync()
                 if qstore is not None:
                     return build_market_snapshot(qstore, ts, basis=basis)
                 return MarketSnapshot(
@@ -163,6 +173,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 ledger=ledger,
                 observer_store=ostore,
                 quote_store=qstore,
+                quote_bridge_dir=quote_bridge_dir,
                 news_source=WallStreetCNSource() if args.poll_news else None,
                 basis=basis,
                 poll_news=args.poll_news,
@@ -174,6 +185,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 quote_interval_seconds=args.quote_interval,
                 protection_interval_seconds=args.protection_interval,
             )
+            runner_ref.append(runner)
             return await runner.run(duration_seconds=args.duration)
         finally:
             if qstore is not None:
@@ -247,6 +259,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         default=None,
         help="Allow initial baseline snapshot revisions to trigger runtime cycles",
+    )
+    start_p.add_argument(
+        "--quote-bridge-dir",
+        type=Path,
+        default=None,
+        help="Optional EventLensQuoteBridge sandbox directory to tail live Demo EUR/USD quotes",
     )
     start_p.add_argument("--news-interval", type=float, default=20.0)
     start_p.add_argument("--event-interval", type=float, default=1.0)

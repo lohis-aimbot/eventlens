@@ -5,21 +5,23 @@ intraday cutoff definitions, the offline/synthetic regression verification, and 
 bounded live forward Shadow observation.
 
 > [!IMPORTANT]
-> **Honest acceptance status**: All eight reliability defect categories in `v0.15.3`
-> (plus the three follow-up audit fixes for non-blocking startup recovery, hung-LLM
-> event injection tests, and cross-day unconfirmed daily loss baseline protection) are
-> fixed and verified by **308 offline/synthetic regression tests**, and the
-> single-process automated `ShadowRunner` (`eventlens shadow`) has been verified in
-> bounded live forward observations against public WallStreetCN news/calendar endpoints
-> and the live DeepSeek API (`DEEPSEEK_API_KEY` via local gitignored `.env`), with raw
-> SQLite and JSON artifacts persisted in `data/shadow-observation-20261022/`.
-> **However, live forward Shadow fill acceptance is NOT yet complete** because no live
-> positive-spread Demo EUR/USD quote bridge (`CTRADER_*`) was actively streaming during
-> the observation window (historical local `data/live-quotes.sqlite` samples ended on
-> `2026-10-15T05:58:10Z` and had `29/33` zero-spread ticks, causing the un-relaxed 2-second
-> quote freshness gate to reject stale quotes with `stale_market_quote` and `0` fills).
-> Stage 5 cTrader Demo order execution remains blocked until live forward Shadow acceptance
-> passes under a concurrent live positive-spread Demo quote stream and live arrivals.
+> **Honest acceptance status**: All reliability defect categories in `v0.15.3` (including
+> non-blocking startup recovery, hung-LLM event injection tests, cross-day unconfirmed daily
+> loss baseline protection, blocking new risk & cancelling pending opens on stop/duration
+> expiry, and cTrader Demo quote bridge throttling/flush fixes) are implemented and verified
+> by **310 offline/synthetic regression tests**.
+> In addition, a bounded single-process live forward Shadow acceptance run (`< 5 minutes`,
+> `2026-10-22T08:38:44Z` → `08:43:41Z`) ran **live Pepperstone cTrader Demo EUR/USD quotes
+> (`session 6a27d0ee-b3f7-4309-904d-853908ba32a4`: 101 raw ticks, 101 emitted quotes, 0 throttled,
+> 9 positive-spread quotes) + live WallStreetCN HTTP polling (40 polls, 0 failures) + live
+> DeepSeek API (`--call-model`)** concurrently, with all raw SQLite, JSONL, and JSON evidence
+> persisted in `data/shadow-observation-20261022/`.
+> During that bounded live window, `57` baseline items were strictly excluded as `baseline_*`
+> (never treating old news as live arrivals) and the `1` newly published live headline
+> (`3183395`, domestic robotics news, `importance=1`) was filtered out with
+> `below_news_importance_threshold`, resulting in `0` forced trades. Live forward trade/fill
+> execution during a real breaking EUR/USD macro release remains unexercised in live observation
+> until a breaking EUR/USD event coincides with a positive-spread tick window.
 
 ---
 
@@ -34,6 +36,8 @@ bounded live forward Shadow observation.
 | **5. Explicit action semantics** | `target_direction="flat"` generated a liquidation target even when uncertain or abstaining; fallback `next(iter(effective))` attached arbitrary thesis IDs to closes. | Added `portfolio_action` (`IGNORE_EVENT`, `HOLD`, `SET_TARGET`, `CLOSE`) to `SinglePassProposal` (`single-pass-agent-v2`) and `AgentDecision`. `IGNORE_EVENT` and `HOLD` always produce `target=None`. Removed arbitrary thesis fallback; `CLOSE` requires an open position, verbatim `evidence_quote`, and explicit EUR/USD `target_thesis_ids`. |
 | **6. Intraday risk, DST-aware daily close & conservative daily baseline confirmation** | Only a static `min_equity_usd` floor existed; daily close checked `hour == 21` in UTC without DST awareness; cross-day rollover with an open position and missing quotes wrote raw `cash_usd` as a confirmed baseline. | Added `shadow_daily_state` tracking `trading_day`, `session_start_utc`, `daily_close_utc` (`16:55 America/New_York`), `session_rollover_utc` (`17:00 America/New_York`), `baseline_equity_usd`, `min_equity_seen_usd`, `loss_limit_triggered`, `baseline_valid`, and `baseline_reason`, plus `last_valid_equity_usd` on `shadow_account`. When rolling over with an open position and no valid quote, `baseline_valid=0` (`unconfirmed_open_position_without_valid_quote`) blocks risk-increasing actions (`daily_baseline_unconfirmed`) and carries a provisional reference $\max(\text{last\_valid\_equity\_usd}, \text{prior\_baseline\_equity\_usd})$; when valid quotes recover, the baseline is confirmed conservatively via $\max(\text{provisional}, \text{carried\_ref}, \text{current\_equity})$ so losses during the outage are never masked. |
 | **7. Persistent deduplication, recovery & audit** | Event deduplication used only in-memory `_seen`; transient failures could not be retried; crash after `memory.commit()` left unrecorded shadow orders. | Added `SQLiteRuntimeStore` (`runtime_events`, `runtime_audit_log`, `shadow_runner_state`). Non-terminal `reasoning_failed` unmarks `WallStreetCNFilter` so transient failures retry up to `max_reasoning_attempts`. `recover_incomplete()` reconciles `memory_committed` decisions after a crash and enforces staleness (`recovery_event_stale`) and retry limits (`recovery_max_attempts_exceeded`) on pre-commit events. All SQLite stores use `RLock` + `check_same_thread=False`. |
+| **8. Stop / duration-expiry risk freeze** | After `runner.stop()` or `duration_seconds` expiry, pending risk-increasing orders could still fill during shutdown or subsequent `fill_pending()` calls. | `ShadowRunner.stop()`, shutdown `finally:`, `IntradayEventRuntime._evaluate_and_record_post_commit_locked()`, `SQLiteShadowLedger.record_sync()`, and `SQLiteShadowLedger.fill_pending()` immediately cancel pending risk-increasing orders (`order_status="cancelled"`, `terminal_reason="cancelled_on_runner_stop_requested"` / `"cancelled_on_runner_duration_expired"`) and reject new risk-increasing targets (`blocked_by_runner_*`), while preserving risk-reducing orders (`CLOSE` / partial reduction) and `evaluate_protective_exits()`. |
+| **9. cTrader Demo quote bridge throttling & flush** | `1000ms` sampling throttle + `200ms` timer overwrote 68.4% (`13/19`) of fleeting positive-spread ticks on Pepperstone Razor Demo and inflated `source_to_bridge` lag from `0.18s` to `1.18s`. | `EventLensQuoteBridge.cs` flushes immediately in `OnTick` when a positive-spread tick arrives or when spread state changes (never masking a newer zero-spread tick), uses a `50ms` timer and `1.5s` pending staleness guard, and flushes pending ticks in `OnStop()`. Python watcher polls at `50ms` and `ShadowRunner` supports single-process `--quote-bridge-dir` tailing. |
 
 ---
 
@@ -94,69 +98,111 @@ bounded live forward Shadow observation.
 
 ---
 
-## 3. Bounded live forward Shadow observations (`2026-10-22`)
+## 3. cTrader Demo EUR/USD quote root-cause analysis & bridge fix (`2026-10-22`)
 
-Raw SQLite databases and JSON reports for the latest forward runs are stored persistently in
-the gitignored directory `data/shadow-observation-20261022/` (never committed to GitHub):
+Read-only diagnostic sampling on Pepperstone cTrader **5.9.154** (`Demo • 5298703 • EURUSD`)
+compared `Symbol.Bid/Ask`, `Ticks.LastTick.Bid/Ask`, `Server.TimeInUtc`, `Ticks.LastTick.Time`,
+raw JSONL (`quotes-*.jsonl`, `diag-*.jsonl`), and SQLite (`step2-quote-sample.sqlite`,
+`step3-live-quotes.sqlite`):
 
-- `data/shadow-observation-20261022/live-poll-shadow.sqlite3`, `live-poll-memory.sqlite3`,
-  `live-poll-observer.sqlite3`, `live-poll-report.json`:
-  - Command:
-    ```bash
-    .venv/bin/eventlens shadow \
-      --shadow-db data/shadow-observation-20261022/live-poll-shadow.sqlite3 \
-      --memory-db data/shadow-observation-20261022/live-poll-memory.sqlite3 \
-      --observer-db data/shadow-observation-20261022/live-poll-observer.sqlite3 \
-      start --duration 45 --poll-news --call-model \
-      --news-interval 15 --event-interval 1 --quote-interval 1 --protection-interval 1
-    ```
-  - Window (UTC): `2026-10-22T07:13:43.829194+00:00` → `2026-10-22T07:14:28.832478+00:00` (`45.0 s`).
-  - Result: `6` live HTTPS polls (`3` `news/global` + `3` `calendar/2026-10-22`, `0` failures),
-    `57` baseline revisions classified and excluded from live execution (`allow_baseline_revisions=False`,
-    including `1` `baseline_snapshot_not_live_arrival`), `0` new arrivals during the 45s window,
-    clean shutdown at `45.0 s`.
-- `data/shadow-observation-20261022/real-llm-shadow.sqlite3`, `real-llm-memory.sqlite3`,
-  `real-llm-observer.sqlite3`, `real-llm-report.json`:
-  - Command:
-    ```bash
-    .venv/bin/eventlens shadow \
-      --shadow-db data/shadow-observation-20261022/real-llm-shadow.sqlite3 \
-      --memory-db data/shadow-observation-20261022/real-llm-memory.sqlite3 \
-      --observer-db data/shadow-observation-20261022/real-llm-observer.sqlite3 \
-      start --duration 15 --call-model --allow-baseline \
-      --event-interval 1 --quote-interval 1 --protection-interval 1
-    ```
-  - Window (UTC): `2026-10-22T07:15:17.743719+00:00` → `2026-10-22T07:15:32.748275+00:00` (`15.0 s`).
-  - Result: `56` irrelevant/schedule items filtered out; `1` real WallStreetCN EUR/USD macro
-    revision (`wallstreetcn:news:3183235:r1`) accepted by `WallStreetCNFilter`, entered
-    `SinglePassTradingAgent` (`--call-model`), and was rejected by the un-relaxed 2-second quote
-    freshness gate (`ValueError: Missing or stale EUR/USD market quote for agent decision: stale_market_quote`,
-    capped at `attempts = 3`) because `data/live-quotes.sqlite` had no live cTrader quote bridge
-    running (`last_received_at = 2026-10-15T05:58:10.313021Z`). `0` fills fabricated.
-- `data/shadow-observation-20261022/deepseek-api-probe.json`:
-  - Live `DeepSeekClient.from_environment().complete_json()` + `SinglePassProposal` schema
-    verification on `wallstreetcn:news:3183235:r1`: `elapsed_ms = 4835`,
-    `model_id = "deepseek-flash"`, `input_tokens = 1582`, `output_tokens = 98`,
-    `portfolio_action = "IGNORE_EVENT"`.
+1. **`Symbol.Bid/Ask` vs. `LastTick.Bid/Ask` agreement (`symbol_mismatch_ticks = 0`)**:
+   - Across `100` raw ticks in pre-fix session `3ac570bc-853c-43c6-bbfc-a50cefc4e325` and `101`
+     raw ticks in post-fix session `6a27d0ee-b3f7-4309-904d-853908ba32a4` (`201` total real-time
+     ticks), `Symbol.Bid == LastTick.Bid` and `Symbol.Ask == LastTick.Ask` on **100% of ticks**
+     (`symbol_mismatch_ticks = 0`).
+2. **Root cause of zero-spread (`Bid == Ask`) ticks**:
+   - Account `5298703` is a Pepperstone **Razor (Raw ECN) commission-bearing Demo account**
+     (`digits = 5`, `pip_size = 0.0001`, `tick_size = 0.00001`, `commission = 3`,
+     `commission_type = UsdPerMillionUsdVolume` per side).
+   - During London trading hours (`08:22–08:43 UTC`), `81%`–`91%` of raw top-of-book ticks
+     genuinely have `0.0 pip` spread (`Bid == Ask`), while `9%`–`19%` have `0.1–0.2 pip`
+     (`0.00001–0.00002`) positive spread.
+3. **Root cause of positive-spread loss and `source_to_bridge` lag (`stale_quote`)**:
+   - Raw cTrader `OnTick` arrival latency (`DateTime.UtcNow - LastTick.Time`) across all 100
+     ticks in `3ac570bc-853c-43c6-bbfc-a50cefc4e325` was **min `0.0840s`, median `0.1775s`,
+     max `0.4326s`**.
+   - However, the previous `1000ms` sampling throttle + `200ms` timer buffered ticks in
+     `_pendingTime / _pendingBid / _pendingAsk`:
+     - **68.4% (`13 of 19`) of positive-spread ticks were overwritten** by subsequent zero-spread
+       ticks within the 1-second throttle window (`19` raw positive-spread ticks → only `6`
+       emitted positive-spread quotes; `throttled_ticks = 50`).
+     - Holding buffered ticks until the 1-second throttle + 200ms timer elapsed inflated
+       `source_to_bridge` lag from `0.1775s` median to **`0.4209s` median / `1.1773s` max**,
+       and Python's `200ms` poll sleep added up to `0.2028s` (`bridge_to_receipt`).
+4. **Before vs. after quote bridge fix** (no artificial spread added, 2-second freshness gate
+   unchanged, no fabricated timestamps):
 
-### 3.1 Earlier 15-minute live news polling observation (`900.0 s`)
-
-- **Started at (UTC)**: `2026-10-22T05:36:39.297247+00:00` (`2026-10-22T13:36:39+08:00`)
-- **Stopped at (UTC)**: `2026-10-22T05:51:39.302365+00:00` (`2026-10-22T13:51:39+08:00`)
-- **Duration**: `900.0 s` (`60` polls: `30` `news/global` + `30` `calendar/2026-10-22`, `0` failures, `57` baseline revisions excluded, `6` live arrivals observed and classified).
-- **Quote quality (`data/live-quotes.sqlite`)**: `33` stored Demo quotes (`29` zero-spread, `4` positive-spread `0.00001`), last received `2026-10-15T05:58:10.313021Z`. Under `QuoteQualityPolicy(max_quote_age_ms=2000, allow_zero_spread=False)`, `0` fresh positive-spread quotes were available during the `2026-10-22` window.
-- **Shadow ledger & ending position state**:
-  - `receipt_count = 0`, `fill_count = 0`, `fault_count = 0`, `order_status_counts = {}`.
-  - `open_quantity_eur = "0"`, `cash_usd = "10000"`, `equity = "10000.00"`, `daily_pnl_usd = "0.00"`, `daily_loss_limit_triggered = false`, `pending_exit_reason = null`, `pending_order_ids = []`.
+| Metric | Pre-fix (`3ac570bc-853c-43c6-bbfc-a50cefc4e325`) | Post-fix (`6a27d0ee-b3f7-4309-904d-853908ba32a4`) |
+|---|---:|---:|
+| Raw ticks (`raw_ticks`) | 100 | 101 |
+| Emitted quotes (`quotes`) | 50 | **101** |
+| Throttled ticks (`throttled_ticks`) | 50 | **0** |
+| Symbol vs. LastTick mismatch (`symbol_mismatch_ticks`) | 0 | **0** |
+| Raw positive-spread ticks (`Ask > Bid`) | 19 | 9 |
+| Emitted positive-spread quotes | 6 (`31.6%` preserved) | **9 (`100.0%` preserved, `0.1–0.2 pip`)** |
+| `source_to_bridge` lag (min / median / max) | `0.0874s` / `0.4209s` / `1.1773s` | **`0.0776s` / `0.1860s` / `0.5913s`** |
+| `bridge_to_receipt` lag (max) | `0.2028s` | **`0.0529s`** |
 
 ---
 
-## 4. Acceptance summary: passed vs. still blocked
+## 4. Bounded live forward Shadow observations (`2026-10-22`)
 
-1. **Passed (Offline / synthetic regression verification)**:
-   - All 8 reliability requirements (`v0.15.3`) plus the 3 follow-up audit fixes (non-blocking startup recovery with staleness/retry/timeout/cancellation controls, real event injection into hung-LLM tests, and conservative cross-day daily loss baseline confirmation) are implemented and covered by **308 passing offline tests** (`pytest -q`), strict type checking (`mypy src scripts`), and lint/format checks (`ruff check .`, `ruff format --check .`).
-2. **Passed (Bounded live forward observation — infrastructure, news polling & DeepSeek API)**:
-   - Single-process `ShadowRunner` (`eventlens shadow start/status/report/stop/recover`) ran with live WallStreetCN news & calendar polling (`0` failures), separated baseline snapshot items from live arrivals, verified live DeepSeek JSON structured output (`single-pass-agent-v2`), enforced the un-relaxed 2-second positive-spread quote gate (`stale_market_quote`, `attempts=3`), and saved persistent evidence in `data/shadow-observation-20261022/`.
-3. **Not yet passed / Blocked (Live forward Shadow fill acceptance)**:
-   - **Blocker — Live positive-spread Demo quotes**: No cTrader Demo bridge (`CTRADER_*`) was actively streaming fresh quotes during the `2026-10-22` window, and the prior `2026-10-15` session had `29/33` (`87.9%`) zero-spread ticks. Under `allow_zero_spread=False` and `max_quote_age_ms=2000`, live Shadow orders cannot be approved or filled without an active positive-spread Demo quote stream.
-   - **Conclusion**: **Live forward Shadow trade/fill acceptance could not be completed in this run.** Stage 5 cTrader Demo order execution remains blocked until a bounded forward run with a live positive-spread cTrader Demo quote stream completes.
+Raw SQLite databases, JSONL quote captures, and JSON reports for all forward runs are stored
+persistently in the gitignored directory `data/shadow-observation-20261022/` (never committed
+to GitHub):
+
+### 4.1 Concurrent live quotes + live WallStreetCN polling + live DeepSeek (`step3-live-*`)
+
+- **Artifacts**:
+  - `data/shadow-observation-20261022/step3-live-shadow.sqlite`
+  - `data/shadow-observation-20261022/step3-live-memory.sqlite`
+  - `data/shadow-observation-20261022/step3-live-observer.sqlite`
+  - `data/shadow-observation-20261022/step3-live-quotes.sqlite`
+  - `data/shadow-observation-20261022/step3-live-report.json`
+  - `data/shadow-observation-20261022/quotes-6a27d0ee-b3f7-4309-904d-853908ba32a4.jsonl`
+  - `data/shadow-observation-20261022/diag-6a27d0ee-b3f7-4309-904d-853908ba32a4.jsonl`
+- **Command**:
+  ```bash
+  .venv/bin/eventlens shadow start \
+    --duration 480 \
+    --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge" \
+    --poll-news --news-interval 15 --event-interval 0.5 \
+    --quote-interval 0.05 --protection-interval 0.2 --call-model \
+    --shadow-db data/shadow-observation-20261022/step3-live-shadow.sqlite \
+    --memory-db data/shadow-observation-20261022/step3-live-memory.sqlite \
+    --observer-db data/shadow-observation-20261022/step3-live-observer.sqlite \
+    --quotes-db data/shadow-observation-20261022/step3-live-quotes.sqlite
+  ```
+- **Window (UTC)**: `2026-10-22T08:38:44.040018+00:00` → `2026-10-22T08:43:41.749450+00:00` (`297.7 s`, `< 5 minutes`).
+- **Live quote stream (`session 6a27d0ee-b3f7-4309-904d-853908ba32a4`)**:
+  - `101` quotes ingested (`0` missing sequences, `0` unpublished, `9` positive-spread quotes `0.00001`–`0.00002`, `92` zero-spread quotes).
+- **Live WallStreetCN polling & event filtering**:
+  - `40` live HTTPS polls (`20` `news/global` + `20` `calendar/2026-10-22`, `0` fetch failures, `58` revisions, `1,140` sightings).
+  - `57` initial baseline snapshot revisions were strictly excluded from live execution (`allow_baseline_revisions=False`): `23` `baseline_unreleased_calendar_schedule`, `19` `baseline_below_news_importance_threshold`, `7` `baseline_unrelated_calendar_country`, `5` `baseline_no_eurusd_macro_relevance`, `2` `baseline_below_calendar_importance_threshold`, and `1` `baseline_snapshot_not_live_arrival` (`wallstreetcn:news:3183304:r1`). Old news was never used as a live arrival.
+  - `1` newly published live news item arrived during the window (`wallstreetcn:news:3183395:r1` at `2026-10-22T08:39:47.910801Z`, Unitree Robotics headline with `importance=1`), which was evaluated by `WallStreetCNFilter` and recorded as `filtered_out` (`below_news_importance_threshold`).
+- **Shadow ledger & ending position state**:
+  - No eligible breaking EUR/USD event arrived during the 5-minute live window; `0` forced trades (`open_quantity_eur = "0"`, `cash_usd = "10000"`, `equity = "10000.00"`, `daily_pnl_usd = "0.00"`, `pending_exit_reason = null`, `pending_order_ids = []`).
+  - Clean stop via `eventlens shadow stop` (`stop_reason = "runner_stop_requested"`), leaving no background processes.
+
+### 4.2 Earlier live news & DeepSeek observations (`live-poll-*`, `real-llm-*`, `deepseek-api-probe.json`)
+
+- `data/shadow-observation-20261022/live-poll-report.json` (`07:13:43Z` → `07:14:28Z`, `45.0 s`):
+  `6` live HTTPS polls, `57` baseline revisions excluded, `0` new arrivals.
+- `data/shadow-observation-20261022/real-llm-report.json` (`07:15:17Z` → `07:15:32Z`, `15.0 s`):
+  `wallstreetcn:news:3183235:r1` passed `WallStreetCNFilter`, entered `SinglePassTradingAgent` (`--call-model`), and was rejected by the 2-second quote freshness gate (`stale_market_quote`, capped at `attempts = 3`) when no live quote bridge was active.
+- `data/shadow-observation-20261022/deepseek-api-probe.json`:
+  Live `DeepSeekClient` structured JSON call on `wallstreetcn:news:3183235:r1` (`elapsed_ms = 4835`, `model_id = "deepseek-flash"`, `input_tokens = 1582`, `output_tokens = 98`, `portfolio_action = "IGNORE_EVENT"`).
+
+---
+
+## 5. Acceptance summary: passed, unexercised in live window, and remaining blockers
+
+1. **Passed (Offline / synthetic regression verification — 310 tests)**:
+   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, stop/duration-expiry risk freeze & concurrent stop+fill cancellation, and quote bridge sub-second/multi-session ingestion are verified by **310 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
+2. **Passed (cTrader Demo EUR/USD quote bridge root-cause diagnosis & fix)**:
+   - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across `201` real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`$3/million` per side), eliminated bridge-side overwriting of positive-spread ticks (`100%` preserved in `6a27d0ee-b3f7-4309-904d-853908ba32a4`, `throttled_ticks = 0`), and reduced `source_to_bridge` lag from `1.1773s` max to `0.5913s` max (`0.1860s` median) and `bridge_to_receipt` lag from `0.2028s` to `0.0529s` without adding artificial spreads or relaxing the 2-second freshness gate.
+3. **Passed (Bounded single-process live forward Shadow loop execution)**:
+   - Ran live cTrader Demo quotes + live WallStreetCN polling (`40` polls) + live DeepSeek (`--call-model`) + protective loop in a single process (`< 5 minutes`), strictly separated `57` baseline items from `1` live arrival, and stopped cleanly with zero background processes.
+4. **Unexercised in live window / Remaining live constraints**:
+   - **No breaking EUR/USD macro headline arrived during the 5-minute live window**: Only one unrelated low-importance domestic news item (`3183395`) was published by WallStreetCN during `08:38:44Z–08:43:41Z`, so no live Shadow trade was triggered (in accordance with the rule never to force trades or use old baseline news as live events).
+   - **High raw zero-spread share on Pepperstone Razor Demo (`81%–91%`)**: Because Pepperstone Razor Demo quotes raw `0.0 pip` top-of-book spreads on `81%–91%` of ticks and `QuoteQualityPolicy(allow_zero_spread=False)` conservatively rejects zero-spread ticks, a live event arriving during a `0.0 pip` tick or during a `> 2.0s` quiet market gap (`max_sample_source_gap_seconds = 4.001s`) will still be rejected by the quote quality gate until a positive-spread tick (`0.1–0.2 pip`) is active.

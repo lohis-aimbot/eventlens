@@ -1475,6 +1475,7 @@ class ShadowRunner:
         ledger: SQLiteShadowLedger,
         observer_store: ObserverStore | None = None,
         quote_store: QuoteStore | None = None,
+        quote_bridge_dir: Path | None = None,
         news_source: WallStreetCNSource | None = None,
         basis: Basis = "live_poll",
         poll_news: bool = False,
@@ -1492,6 +1493,7 @@ class ShadowRunner:
         self.ledger = ledger
         self.observer_store = observer_store
         self.quote_store = quote_store
+        self.quote_bridge_dir = quote_bridge_dir
         self.news_source = news_source
         self.basis: Basis = basis
         self.poll_news = poll_news
@@ -1508,6 +1510,24 @@ class ShadowRunner:
         self._stop_reason: str | None = None
         self._run_started_at: datetime | None = None
         self._run_duration_seconds: float | None = None
+        self._quote_tail: Any = None
+        self._quote_collector: Any = None
+        self._quote_bridge_lock = threading.Lock()
+        self._quote_bridge_counts: dict[str, int] = {
+            "start": 0,
+            "quote": 0,
+            "stop": 0,
+            "rejected": 0,
+        }
+        if self.quote_bridge_dir is not None and self.quote_store is not None:
+            from .sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
+
+            self._quote_tail = DirectoryTail(self.quote_bridge_dir)
+            self._quote_collector = DemoQuoteCollector(
+                self.quote_store,
+                _utc(self.clock()),
+                allow_multiple_sessions=True,
+            )
         self.ledger.stop_reason_provider = self._active_stop_reason
 
     def _active_stop_reason(self, now: datetime | None = None) -> str | None:
@@ -1553,7 +1573,16 @@ class ShadowRunner:
                 )
                 self.runtime.state_store.append_audit(rec)
 
+    def _poll_quote_bridge_sync(self) -> None:
+        if self._quote_tail is None or self._quote_collector is None:
+            return
+        with self._quote_bridge_lock:
+            for raw in self._quote_tail.poll():
+                outcome = self._quote_collector.accept(raw, _utc(self.clock()))
+                self._quote_bridge_counts[outcome] = self._quote_bridge_counts.get(outcome, 0) + 1
+
     def _current_market(self) -> MarketSnapshot:
+        self._poll_quote_bridge_sync()
         now = _utc(self.clock())
         if self.quote_store is not None:
             return build_market_snapshot(self.quote_store, now, basis=self.basis)
@@ -1938,6 +1967,9 @@ class ShadowRunner:
                 await asyncio.to_thread(self.quote_store.report)
                 if self.quote_store is not None
                 else None
+            ),
+            "quote_bridge_counts": (
+                dict(self._quote_bridge_counts) if self.quote_bridge_dir is not None else None
             ),
             "ledger": ledger_rep,
             "runtime": runtime_rep,
