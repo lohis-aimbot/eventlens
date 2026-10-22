@@ -210,6 +210,7 @@ class SQLiteShadowLedger:
         self.exit_policy = exit_policy
         self.risk_policy = risk_policy
         self.clock = clock
+        self.stop_reason_provider: Callable[[datetime], str | None] | None = None
         self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
@@ -280,9 +281,27 @@ class SQLiteShadowLedger:
                         reason TEXT NOT NULL,
                         detail TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS shadow_runner_state (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        status TEXT NOT NULL,
+                        started_at TEXT,
+                        stopped_at TEXT,
+                        heartbeat_at TEXT,
+                        duration_seconds REAL,
+                        stop_requested INTEGER NOT NULL DEFAULT 0,
+                        stop_reason TEXT,
+                        summary_json TEXT
+                    );
                     """
                 )
                 self._migrate_columns_if_needed()
+                runner_row = self.db.execute(
+                    "SELECT 1 FROM shadow_runner_state WHERE id=1"
+                ).fetchone()
+                if runner_row is None:
+                    self.db.execute(
+                        "INSERT INTO shadow_runner_state VALUES (1, 'idle', NULL, NULL, NULL, NULL, 0, NULL, NULL)"
+                    )
                 self.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 self.db.execute("PRAGMA user_version=2")
                 row = self.db.execute("SELECT 1 FROM shadow_account WHERE id=1").fetchone()
@@ -349,6 +368,11 @@ class SQLiteShadowLedger:
                         ELSE 'pending'
                     END"""
                 )
+        runner_cols = {
+            r["name"] for r in self.db.execute("PRAGMA table_info(shadow_runner_state)").fetchall()
+        }
+        if runner_cols and "stop_reason" not in runner_cols:
+            self.db.execute("ALTER TABLE shadow_runner_state ADD COLUMN stop_reason TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -359,6 +383,132 @@ class SQLiteShadowLedger:
             "INSERT INTO shadow_faults VALUES (?, ?, ?, ?, ?)",
             (str(uuid4()), now.isoformat(), stage, reason, detail[:1000]),
         )
+
+    def _active_stop_reason_locked(
+        self, now: datetime, *, explicit_stop_reason: str | None = None
+    ) -> str | None:
+        if explicit_stop_reason is not None:
+            return explicit_stop_reason
+        if self.stop_reason_provider is not None:
+            provided = self.stop_reason_provider(now)
+            if provided is not None:
+                return provided
+        row = self.db.execute(
+            "SELECT status, started_at, duration_seconds, stop_requested, stop_reason FROM shadow_runner_state WHERE id=1"
+        ).fetchone()
+        if row is None:
+            return None
+        if bool(row["stop_requested"]):
+            return str(row["stop_reason"] or "runner_stop_requested")
+        if row["status"] in ("stopping", "stopped"):
+            return str(row["stop_reason"] or "runner_stopped")
+        if (
+            row["status"] == "running"
+            and row["started_at"] is not None
+            and row["duration_seconds"] is not None
+        ):
+            started = _utc(datetime.fromisoformat(row["started_at"]))
+            if now >= started + timedelta(seconds=float(row["duration_seconds"])):
+                return "runner_duration_expired"
+        return None
+
+    def _is_order_risk_increasing_locked(
+        self,
+        account: sqlite3.Row,
+        decision: AgentDecision,
+        *,
+        quote: Quote | None = None,
+    ) -> bool:
+        target = decision.target
+        if target is None:
+            return False
+        pos_target = next((p for p in target.positions if p.instrument == "EUR/USD"), None)
+        weight = pos_target.weight if pos_target is not None else Decimal("0")
+        current_qty = Decimal(account["quantity_eur"])
+        if decision.portfolio_action == "CLOSE" or weight == Decimal("0"):
+            return False
+        if current_qty == Decimal("0"):
+            return True
+        if (current_qty > Decimal("0") and weight < Decimal("0")) or (
+            current_qty < Decimal("0") and weight > Decimal("0")
+        ):
+            return True
+        entry = Decimal(account["avg_entry_price"]) if account["avg_entry_price"] else Decimal("0")
+        if quote is not None:
+            mid = (quote.bid + quote.ask) / Decimal("2")
+            mark = quote.bid if current_qty > 0 else quote.ask
+            unrealized = (current_qty * (mark - entry)).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            equity = Decimal(account["cash_usd"]) + unrealized
+        else:
+            mid = entry if entry > Decimal("0") else Decimal("1.0")
+            equity = Decimal(account["last_valid_equity_usd"] or account["cash_usd"])
+        change_kind = classify_exposure_change(current_qty, equity, mid, weight)
+        return change_kind in ("risk_increasing", "reversal_risk_increasing")
+
+    def _cancel_risk_increasing_pending_locked(
+        self,
+        now: datetime,
+        *,
+        reason: str,
+        quote: Quote | None = None,
+    ) -> list[dict[str, Any]]:
+        account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+        rows = self.db.execute(
+            "SELECT * FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
+        ).fetchall()
+        has_runtime_events = (
+            self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_events'"
+            ).fetchone()
+            is not None
+        )
+        cancelled: list[dict[str, Any]] = []
+        for row in rows:
+            decision = AgentDecision.model_validate_json(row["decision_json"])
+            if self._is_order_risk_increasing_locked(account, decision, quote=quote):
+                self.db.execute(
+                    """UPDATE shadow_receipts
+                    SET order_status='cancelled', terminal_at=?, terminal_reason=?
+                    WHERE execution_id=?""",
+                    (now.isoformat(), reason, row["execution_id"]),
+                )
+                if has_runtime_events:
+                    self.db.execute(
+                        """UPDATE runtime_events
+                        SET state='shadow_rejected', reason=?, updated_at=?
+                        WHERE execution_id=? AND state='shadow_recorded'""",
+                        (reason, now.isoformat(), row["execution_id"]),
+                    )
+                self._record_fault_locked(
+                    now,
+                    "stop_cancelled_pending_order",
+                    reason,
+                    f"execution_id={row['execution_id']} decision_id={decision.decision_id}",
+                )
+                cancelled.append(
+                    {
+                        "execution_id": row["execution_id"],
+                        "decision_id": decision.decision_id,
+                        "target_id": decision.target.target_id if decision.target else None,
+                        "reason": reason,
+                        "cancelled_at": now,
+                    }
+                )
+        return cancelled
+
+    def cancel_risk_increasing_pending_orders(
+        self,
+        *,
+        now: datetime | None = None,
+        reason: str = "cancelled_on_runner_stop_requested",
+    ) -> tuple[dict[str, Any], ...]:
+        """Cancel all pending risk-increasing shadow orders when stop or duration limit triggers."""
+        check_now = _utc(now or self.clock())
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            return tuple(self._cancel_risk_increasing_pending_locked(check_now, reason=reason))
 
     def _ensure_daily_state_locked(
         self, now: datetime, current_equity: Decimal, *, valid_valuation: bool = True
@@ -504,6 +654,12 @@ class SQLiteShadowLedger:
     def snapshot_sync(self, *, market: MarketSnapshot | None = None) -> PortfolioSnapshot:
         with self._lock:
             now = _utc(self.clock())
+            active_stop = self._active_stop_reason_locked(now)
+            if active_stop is not None:
+                with self.db:
+                    self._cancel_risk_increasing_pending_locked(
+                        now, reason=f"cancelled_on_{active_stop}"
+                    )
             account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
             pending_rows = self.db.execute(
                 "SELECT execution_id FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
@@ -596,6 +752,11 @@ class SQLiteShadowLedger:
                 return ExecutionReceipt.model_validate_json(existing["receipt_json"])
 
             self._expire_pending_orders_locked(now)
+            active_stop = self._active_stop_reason_locked(now)
+            if active_stop is not None:
+                self._cancel_risk_increasing_pending_locked(
+                    now, reason=f"cancelled_on_{active_stop}"
+                )
             account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
             pending = self.db.execute(
                 "SELECT COUNT(*) FROM shadow_receipts WHERE order_status='pending'"
@@ -614,8 +775,20 @@ class SQLiteShadowLedger:
                 rejection_reason = "approval_or_decision_expired"
             elif assessment.checked_snapshot_id != account["snapshot_id"]:
                 rejection_reason = "stale_portfolio_snapshot"
+            elif active_stop is not None and self._is_order_risk_increasing_locked(
+                account, decision
+            ):
+                rejection_reason = f"blocked_by_{active_stop}"
             elif pending > 0:
                 rejection_reason = "pending_shadow_order_exists"
+
+            if rejection_reason is not None and rejection_reason.startswith("blocked_by_"):
+                self._record_fault_locked(
+                    now,
+                    "record_rejected_on_stop",
+                    rejection_reason,
+                    f"decision_id={decision.decision_id} target_id={target.target_id}",
+                )
 
             status: Literal["recorded", "rejected"] = (
                 "rejected" if rejection_reason is not None else "recorded"
@@ -697,8 +870,9 @@ class SQLiteShadowLedger:
         market: MarketSnapshot | None,
         *,
         risk_policy: RiskPolicy | None = None,
+        stop_reason: str | None = None,
     ) -> tuple[ShadowFill, ...]:
-        """Re-verify expiry, risk policy, daily limits, and quote quality before filling pending orders."""
+        """Re-verify expiry, stop state, risk policy, daily limits, and quote quality before filling pending orders."""
         if market is not None:
             market = MarketSnapshot.model_validate_json(market.model_dump_json())
         now = _utc(self.clock())
@@ -708,6 +882,11 @@ class SQLiteShadowLedger:
         with self._lock, self.db:
             self.db.execute("BEGIN IMMEDIATE")
             self._expire_pending_orders_locked(now)
+            active_stop = self._active_stop_reason_locked(now, explicit_stop_reason=stop_reason)
+            if active_stop is not None:
+                self._cancel_risk_increasing_pending_locked(
+                    now, reason=f"cancelled_on_{active_stop}"
+                )
             rows = self.db.execute(
                 "SELECT * FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
             ).fetchall()
@@ -791,6 +970,25 @@ class SQLiteShadowLedger:
 
                 change_kind = classify_exposure_change(current_qty, equity, mid, weight)
                 increases_risk = change_kind in ("risk_increasing", "reversal_risk_increasing")
+
+                loop_stop = self._active_stop_reason_locked(
+                    _utc(self.clock()), explicit_stop_reason=stop_reason
+                )
+                if increases_risk and loop_stop is not None:
+                    cancel_reason = f"cancelled_on_{loop_stop}"
+                    self.db.execute(
+                        """UPDATE shadow_receipts
+                        SET order_status='cancelled', terminal_at=?, terminal_reason=?
+                        WHERE execution_id=?""",
+                        (now.isoformat(), cancel_reason, row["execution_id"]),
+                    )
+                    self._record_fault_locked(
+                        now,
+                        "stop_cancelled_pending_order",
+                        cancel_reason,
+                        f"execution_id={row['execution_id']} decision_id={decision.decision_id}",
+                    )
+                    continue
 
                 reject_at_fill: str | None = None
                 if increases_risk:

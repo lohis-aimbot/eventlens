@@ -8,6 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
@@ -33,7 +34,11 @@ from .sources.events import EventFilter
 from .sources.wallstreetcn import CaptureError, WallStreetCNFilter, WallStreetCNSource
 from .trading.agent import SinglePassTradingAgent, TradingAgent
 from .trading.execution import APPLICATION_ID, ShadowExecutor, ShadowFill, SQLiteShadowLedger
-from .trading.portfolio import DeterministicTargetValidator, PortfolioState
+from .trading.portfolio import (
+    DeterministicTargetValidator,
+    PortfolioState,
+    classify_exposure_change,
+)
 from .trading.risk import DeterministicHardRiskEngine
 
 logger = logging.getLogger(__name__)
@@ -130,14 +135,21 @@ class SQLiteRuntimeStore:
                     heartbeat_at TEXT,
                     duration_seconds REAL,
                     stop_requested INTEGER NOT NULL DEFAULT 0,
+                    stop_reason TEXT,
                     summary_json TEXT
                 );
                 """
             )
+            runner_cols = {
+                r["name"]
+                for r in self.db.execute("PRAGMA table_info(shadow_runner_state)").fetchall()
+            }
+            if runner_cols and "stop_reason" not in runner_cols:
+                self.db.execute("ALTER TABLE shadow_runner_state ADD COLUMN stop_reason TEXT")
             row = self.db.execute("SELECT 1 FROM shadow_runner_state WHERE id=1").fetchone()
             if row is None:
                 self.db.execute(
-                    "INSERT INTO shadow_runner_state VALUES (1, 'idle', NULL, NULL, NULL, NULL, 0, NULL)"
+                    "INSERT INTO shadow_runner_state VALUES (1, 'idle', NULL, NULL, NULL, NULL, 0, NULL, NULL)"
                 )
             self.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
 
@@ -285,6 +297,23 @@ class SQLiteRuntimeStore:
                 (fill.filled_at.isoformat(), lag_ms, row["event_id"]),
             )
 
+    def mark_order_cancelled(self, execution_id: str, reason: str, now: datetime) -> str | None:
+        with self._lock, self.db:
+            row = self.db.execute(
+                "SELECT event_id FROM runtime_events WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            ev_id = str(row["event_id"])
+            self.db.execute(
+                """UPDATE runtime_events
+                SET state='shadow_rejected', reason=?, updated_at=?
+                WHERE event_id=? AND state='shadow_recorded'""",
+                (reason, _utc(now).isoformat(), ev_id),
+            )
+            return ev_id
+
     def incomplete_events(self) -> list[sqlite3.Row]:
         with self._lock:
             return list(
@@ -303,11 +332,11 @@ class SQLiteRuntimeStore:
             ).fetchall()
             return tuple(AuditRecord.model_validate_json(r["record_json"]) for r in rows)
 
-    def request_stop(self, now: datetime) -> None:
+    def request_stop(self, now: datetime, *, reason: str = "runner_stop_requested") -> None:
         with self._lock, self.db:
             self.db.execute(
-                "UPDATE shadow_runner_state SET stop_requested=1, heartbeat_at=? WHERE id=1",
-                (_utc(now).isoformat(),),
+                "UPDATE shadow_runner_state SET stop_requested=1, stop_reason=COALESCE(stop_reason, ?), heartbeat_at=? WHERE id=1",
+                (reason, _utc(now).isoformat()),
             )
 
     def is_stop_requested(self) -> bool:
@@ -316,6 +345,28 @@ class SQLiteRuntimeStore:
                 "SELECT stop_requested FROM shadow_runner_state WHERE id=1"
             ).fetchone()
             return bool(row and row["stop_requested"])
+
+    def active_stop_reason(self, now: datetime) -> str | None:
+        check_now = _utc(now)
+        with self._lock:
+            row = self.db.execute(
+                "SELECT status, started_at, duration_seconds, stop_requested, stop_reason FROM shadow_runner_state WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return None
+            if bool(row["stop_requested"]):
+                return str(row["stop_reason"] or "runner_stop_requested")
+            if row["status"] in ("stopping", "stopped"):
+                return str(row["stop_reason"] or "runner_stopped")
+            if (
+                row["status"] == "running"
+                and row["started_at"] is not None
+                and row["duration_seconds"] is not None
+            ):
+                started = _utc(datetime.fromisoformat(row["started_at"]))
+                if check_now >= started + timedelta(seconds=float(row["duration_seconds"])):
+                    return "runner_duration_expired"
+            return None
 
     def update_runner_state(
         self,
@@ -326,26 +377,37 @@ class SQLiteRuntimeStore:
         stopped_at: datetime | None = None,
         duration_seconds: float | None = None,
         reset_stop: bool = False,
+        stop_reason: str | None = None,
         summary: dict[str, Any] | None = None,
     ) -> None:
         with self._lock, self.db:
             self.db.execute(
                 """UPDATE shadow_runner_state
-                SET status=?,
+                SET status=CASE
+                        WHEN ? = 0 AND (stop_requested = 1 OR status IN ('stopping', 'stopped')) AND ? = 'running'
+                        THEN status
+                        ELSE ?
+                    END,
                     started_at=COALESCE(?, started_at),
-                    stopped_at=COALESCE(?, stopped_at),
+                    stopped_at=CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, stopped_at) END,
                     heartbeat_at=?,
                     duration_seconds=COALESCE(?, duration_seconds),
-                    stop_requested=CASE WHEN ? THEN 0 ELSE stop_requested END,
+                    stop_requested=CASE WHEN ? = 1 THEN 0 ELSE stop_requested END,
+                    stop_reason=CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, stop_reason) END,
                     summary_json=COALESCE(?, summary_json)
                 WHERE id=1""",
                 (
+                    1 if reset_stop else 0,
+                    status,
                     status,
                     _utc(started_at).isoformat() if started_at else None,
+                    1 if reset_stop else 0,
                     _utc(stopped_at).isoformat() if stopped_at else None,
                     _utc(now).isoformat(),
                     duration_seconds,
                     1 if reset_stop else 0,
+                    1 if reset_stop else 0,
+                    stop_reason,
                     json.dumps(summary, ensure_ascii=False) if summary is not None else None,
                 ),
             )
@@ -958,6 +1020,69 @@ class IntradayEventRuntime:
             decision=decision,
         )
 
+        # Check if stop request or runtime duration limit is active before approving/recording new risk
+        active_stop = (
+            self.state_store.active_stop_reason(post_now) if self.state_store is not None else None
+        )
+        if active_stop is None and isinstance(self.shadow_executor, SQLiteShadowLedger):
+            with self.shadow_executor._lock:
+                active_stop = self.shadow_executor._active_stop_reason_locked(post_now)
+        if active_stop is not None:
+            pos_target = next(
+                (p for p in decision.target.positions if p.instrument == "EUR/USD"), None
+            )
+            weight = pos_target.weight if pos_target is not None else Decimal("0")
+            curr_pos = next(
+                (p for p in post_portfolio.positions if p.instrument == "EUR/USD"), None
+            )
+            curr_qty = curr_pos.quantity if curr_pos is not None else Decimal("0")
+            if decision.portfolio_action == "CLOSE" or weight == Decimal("0"):
+                increases_risk = False
+            elif (
+                curr_qty == Decimal("0")
+                or (curr_qty > Decimal("0") and weight < Decimal("0"))
+                or (curr_qty < Decimal("0") and weight > Decimal("0"))
+            ):
+                increases_risk = True
+            else:
+                q_eur = next((q for q in post_market.quotes if q.instrument == "EUR/USD"), None)
+                mid = (
+                    (q_eur.bid + q_eur.ask) / Decimal("2") if q_eur is not None else Decimal("1.0")
+                )
+                increases_risk = classify_exposure_change(
+                    curr_qty, post_portfolio.equity, mid, weight
+                ) in ("risk_increasing", "reversal_risk_increasing")
+
+            if increases_risk:
+                stop_block_reason = f"blocked_by_{active_stop}"
+                if self.state_store is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=event.event_id,
+                        source_reference=event.source_reference,
+                        received_at=event.received_timestamp,
+                        now=post_now,
+                        state="risk_rejected",
+                        reason=stop_block_reason,
+                        decision_id=decision.decision_id,
+                        decision_json=decision.model_dump_json(),
+                        memory_version=committed_version,
+                    )
+                await log(
+                    "risk",
+                    "reject",
+                    stop_block_reason,
+                    decision=decision,
+                )
+                return RuntimeCycleResult(
+                    event_id=event.event_id,
+                    status="risk_rejected",
+                    reason=stop_block_reason,
+                    recovered=recovered,
+                    decision=decision,
+                    committed_memory_version=committed_version,
+                    audit_records=tuple(cycle_audit),
+                )
+
         # Check if decision expired before post-commit evaluation
         if post_now >= decision.valid_until:
             reason = (
@@ -1380,12 +1505,53 @@ class ShadowRunner:
         self.max_recovery_event_age_seconds = max_recovery_event_age_seconds
         self.clock = clock
         self._stop_event = asyncio.Event()
+        self._stop_reason: str | None = None
         self._run_started_at: datetime | None = None
+        self._run_duration_seconds: float | None = None
+        self.ledger.stop_reason_provider = self._active_stop_reason
 
-    def stop(self) -> None:
+    def _active_stop_reason(self, now: datetime | None = None) -> str | None:
+        check_now = _utc(now or self.clock())
+        if self._stop_reason is not None:
+            return self._stop_reason
+        if self._stop_event.is_set():
+            return "runner_stop_requested"
+        if (
+            self._run_started_at is not None
+            and self._run_duration_seconds is not None
+            and check_now >= self._run_started_at + timedelta(seconds=self._run_duration_seconds)
+        ):
+            return "runner_duration_expired"
+        return None
+
+    def stop(self, *, reason: str = "runner_stop_requested") -> None:
+        now = _utc(self.clock())
+        self._stop_reason = reason
         self._stop_event.set()
         if self.runtime.state_store is not None:
-            self.runtime.state_store.request_stop(self.clock())
+            self.runtime.state_store.request_stop(now, reason=reason)
+        cancelled = self.ledger.cancel_risk_increasing_pending_orders(
+            now=now, reason=f"cancelled_on_{reason}"
+        )
+        if self.runtime.state_store is not None:
+            for item in cancelled:
+                ev_id = self.runtime.state_store.mark_order_cancelled(
+                    item["execution_id"], item["reason"], now
+                )
+                rec = AuditRecord(
+                    audit_id=str(uuid4()),
+                    occurred_at=now,
+                    component="execution",
+                    event_id=ev_id,
+                    decision_id=item["decision_id"],
+                    target_id=item["target_id"],
+                    execution_id=item["execution_id"],
+                    policy_version=self.runtime.risk_engine.policy.policy_version,
+                    cost_model_version=self.ledger.cost_model.name,
+                    outcome="order_cancelled",
+                    detail=item["reason"],
+                )
+                self.runtime.state_store.append_audit(rec)
 
     def _current_market(self) -> MarketSnapshot:
         now = _utc(self.clock())
@@ -1393,7 +1559,9 @@ class ShadowRunner:
             return build_market_snapshot(self.quote_store, now, basis=self.basis)
         return self.runtime.market_provider(now)
 
-    async def step_quotes_and_fills(self) -> tuple[tuple[ShadowFill, ...], tuple[ShadowFill, ...]]:
+    async def step_quotes_and_fills(
+        self, *, stop_reason: str | None = None
+    ) -> tuple[tuple[ShadowFill, ...], tuple[ShadowFill, ...]]:
         """Execute one quote-driven protective exit + pending fill + mark-to-market cycle."""
         market = await asyncio.to_thread(self._current_market)
         exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
@@ -1401,6 +1569,7 @@ class ShadowRunner:
             self.ledger.fill_pending,
             market,
             risk_policy=self.runtime.risk_engine.policy,
+            stop_reason=stop_reason,
         )
         if self.runtime.state_store is not None:
             for fill in (*exit_fills, *target_fills):
@@ -1557,8 +1726,10 @@ class ShadowRunner:
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
         self._stop_event = asyncio.Event()
+        self._stop_reason = None
         started_at = _utc(self.clock())
         self._run_started_at = started_at
+        self._run_duration_seconds = duration_seconds
         if self.runtime.state_store is not None:
             self.runtime.state_store.update_runner_state(
                 status="running",
@@ -1669,18 +1840,69 @@ class ShadowRunner:
             asyncio.create_task(_quote_worker(), name="shadow-quotes"),
             asyncio.create_task(_news_and_event_worker(), name="shadow-events"),
         ]
+        timed_out = False
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=duration_seconds)
         except TimeoutError:
+            timed_out = True
+            if self._stop_reason is None:
+                self._stop_reason = "runner_duration_expired"
             self._stop_event.set()
         finally:
+            shutdown_now = _utc(self.clock())
+            if self._stop_reason is not None:
+                shutdown_reason = self._stop_reason
+            elif (
+                self.runtime.state_store is not None
+                and self.runtime.state_store.is_stop_requested()
+            ):
+                shutdown_reason = "runner_stop_requested"
+            elif timed_out or (shutdown_now >= started_at + timedelta(seconds=duration_seconds)):
+                shutdown_reason = "runner_duration_expired"
+            else:
+                shutdown_reason = "runner_stop_requested"
+
+            self._stop_reason = shutdown_reason
             self._stop_event.set()
+            if self.runtime.state_store is not None:
+                self.runtime.state_store.update_runner_state(
+                    status="stopping",
+                    now=shutdown_now,
+                    stop_reason=shutdown_reason,
+                )
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Final protection & quote pass before stopping (never fabricating fills if quote is invalid)
-        await self.step_quotes_and_fills()
+            cancelled_orders = await asyncio.to_thread(
+                self.ledger.cancel_risk_increasing_pending_orders,
+                now=_utc(self.clock()),
+                reason=f"cancelled_on_{shutdown_reason}",
+            )
+            if self.runtime.state_store is not None:
+                for item in cancelled_orders:
+                    ev_id = self.runtime.state_store.mark_order_cancelled(
+                        item["execution_id"], item["reason"], item["cancelled_at"]
+                    )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=item["cancelled_at"],
+                        component="execution",
+                        event_id=ev_id,
+                        decision_id=item["decision_id"],
+                        target_id=item["target_id"],
+                        execution_id=item["execution_id"],
+                        policy_version=self.runtime.risk_engine.policy.policy_version,
+                        cost_model_version=self.ledger.cost_model.name,
+                        outcome="order_cancelled",
+                        detail=item["reason"],
+                    )
+                    self.runtime.state_store.append_audit(rec)
+                    await self.runtime.audit_sink.append(rec)
+
+        # Final protection & quote pass before stopping:
+        # risk-increasing orders are blocked/cancelled, while protective exits and risk reductions still execute.
+        await self.step_quotes_and_fills(stop_reason=shutdown_reason)
         await self.step_protection()
 
         stopped_at = _utc(self.clock())
@@ -1689,6 +1911,7 @@ class ShadowRunner:
                 status="stopped",
                 now=stopped_at,
                 stopped_at=stopped_at,
+                stop_reason=shutdown_reason,
             )
         market = await asyncio.to_thread(self._current_market)
         ledger_rep = await asyncio.to_thread(self.ledger.report, market=market)

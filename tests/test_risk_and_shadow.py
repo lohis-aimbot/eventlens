@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
@@ -42,6 +43,7 @@ from eventlens.trading.agent import (
 from eventlens.trading.execution import (
     ProtectiveExitPolicy,
     ShadowCostModel,
+    ShadowFill,
     SQLiteShadowLedger,
 )
 from eventlens.trading.portfolio import (
@@ -1713,3 +1715,300 @@ def test_cross_day_unconfirmed_baseline_blocks_risk_persists_on_restart_and_conf
         assert "daily_loss_limit_exceeded" in assess_blocked.reasons
     finally:
         reopened.close()
+
+
+def test_stop_request_duration_expiry_and_concurrent_stop_fill_block_new_risk_while_allowing_exits(
+    tmp_path,
+):
+    """Explicit stop, duration expiry, and concurrent stop+fill cancel pending risk-increasing orders and block new risk while allowing reductions and protective exits."""
+    now = T0
+    shd_db = tmp_path / "stop_guard_shd.sqlite"
+    mem_db = tmp_path / "stop_guard_mem.sqlite"
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: now, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    policy = RiskPolicy(
+        max_position_weight=Decimal("0.50"),
+        max_gross_weight=Decimal("0.50"),
+    )
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        exit_policy=ProtectiveExitPolicy(max_holding_seconds=10),
+        risk_policy=policy,
+        clock=lambda: now,
+    )
+    engine = DeterministicHardRiskEngine(policy=policy, clock=lambda: now)
+
+    class StaticDecisionAgent:
+        def __init__(self, decision: AgentDecision) -> None:
+            self.decision = decision
+
+        async def decide(self, context):
+            return self.decision
+
+    try:
+        # --- Part 1: Explicit stop cancels pending open order and blocks new risk-increasing proposals ---
+        mkt0 = make_market(as_of=now)
+        snap0 = ledger.snapshot_sync(market=mkt0)
+        dec_open_pending = make_decision(
+            decision_id="dec-stop-open-1",
+            event_id="ev-stop-open-1",
+            snapshot_id=snap0.snapshot_id,
+            weight="0.20",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        runtime = IntradayEventRuntime(
+            memory=memory,
+            portfolio_state=ledger,
+            market_provider=lambda ts: make_market(as_of=ts),
+            agent=StaticDecisionAgent(dec_open_pending),
+            risk_engine=engine,
+            shadow_executor=ledger,
+            state_store=state_store,
+            clock=lambda: now,
+        )
+        runner = ShadowRunner(runtime=runtime, ledger=ledger, clock=lambda: now)
+
+        ev1 = Event(
+            event_id="ev-stop-open-1",
+            source="wallstreetcn_news",
+            source_type="news",
+            source_reference="https://wallstreetcn.com/livenews/stop1",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="ECB signals hawkish EUR/USD adjustment.",
+        )
+        res1 = asyncio.run(runtime.run_cycle(ev1))
+        assert res1.status == "shadow_recorded"
+        assert len(ledger.snapshot_sync(market=mkt0).pending_order_ids) == 1
+
+        # Trigger explicit stop BEFORE fill_pending runs
+        now = now + timedelta(seconds=1)
+        runner.stop()
+        # Pending risk-increasing order is immediately cancelled and recorded in receipts/faults/runtime
+        rep_after_stop = ledger.report(market=make_market(as_of=now))
+        assert rep_after_stop["order_status_counts"]["cancelled"] == 1
+        assert (
+            rep_after_stop["receipts"][0]["terminal_reason"] == "cancelled_on_runner_stop_requested"
+        )
+        ev1_row = state_store.get_event_state("ev-stop-open-1")
+        assert ev1_row is not None
+        assert ev1_row["state"] == "shadow_rejected"
+        assert ev1_row["reason"] == "cancelled_on_runner_stop_requested"
+
+        # Subsequent fill_pending with a valid fresh quote MUST NOT fill the cancelled order!
+        assert ledger.fill_pending(make_market(as_of=now), risk_policy=policy) == ()
+        assert Decimal(ledger.report()["quantity_eur"]) == Decimal("0")
+
+        # Attempting a new risk-increasing cycle while stopped MUST be rejected with blocked_by_runner_stop_requested
+        snap_stopped = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec_after_stop = make_decision(
+            decision_id="dec-after-stop",
+            event_id="ev-after-stop",
+            snapshot_id=snap_stopped.snapshot_id,
+            thesis_id="t-after-stop",
+            weight="0.25",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        ).model_copy(update={"based_on_memory_version": 1})
+        runtime.agent = StaticDecisionAgent(dec_after_stop)
+        ev2 = Event(
+            event_id="ev-after-stop",
+            source="wallstreetcn_news",
+            source_type="news",
+            source_reference="https://wallstreetcn.com/livenews/stop2",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="Second ECB EUR/USD headline after stop.",
+        )
+        res2 = asyncio.run(runtime.run_cycle(ev2))
+        assert res2.status == "risk_rejected"
+        assert res2.reason == "blocked_by_runner_stop_requested"
+        assert Decimal(ledger.report()["quantity_eur"]) == Decimal("0")
+
+        # --- Part 2: Duration expiry cancels pending open order and never fills during shutdown pass ---
+        # Start a new run where quotes are missing during the active window, a pending open order is recorded,
+        # and a valid quote arrives right as duration_seconds expires.
+        now = now + timedelta(seconds=5)
+        state_store.update_runner_state(
+            status="running",
+            now=now,
+            started_at=now,
+            duration_seconds=1.0,
+            reset_stop=True,
+        )
+        runner._stop_reason = None
+        runner._stop_event = asyncio.Event()
+        runner._run_started_at = now
+        runner._run_duration_seconds = 1.0
+
+        snap_run = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec_dur = make_decision(
+            decision_id="dec-dur-open",
+            event_id="ev-dur-open",
+            snapshot_id=snap_run.snapshot_id,
+            weight="0.20",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_dur = asyncio.run(engine.assess(dec_dur, snap_run, make_market(as_of=now)))
+        rcpt_dur = ledger.record_sync(dec_dur, assess_dur)
+        assert rcpt_dur.status == "recorded"
+
+        # Advance clock past duration_seconds (1.0s -> 1.5s) and call fill_pending with a valid quote:
+        # Must cancel the pending open order with cancelled_on_runner_duration_expired and NOT fill!
+        now = now + timedelta(milliseconds=1500)
+        assert ledger.fill_pending(make_market(as_of=now), risk_policy=policy) == ()
+        rep_dur = ledger.report(market=make_market(as_of=now))
+        dur_rcpt = next(r for r in rep_dur["receipts"] if r["decision_id"] == "dec-dur-open")
+        assert dur_rcpt["order_status"] == "cancelled"
+        assert dur_rcpt["terminal_reason"] == "cancelled_on_runner_duration_expired"
+        assert Decimal(rep_dur["quantity_eur"]) == Decimal("0")
+
+        # --- Part 3: While stopped, risk-reducing orders (partial reduction & CLOSE) and protective exits STILL work ---
+        # Start a fresh run, open a 30% long position, then trigger stop
+        now = now + timedelta(seconds=2)
+        state_store.update_runner_state(
+            status="running",
+            now=now,
+            started_at=now,
+            duration_seconds=60.0,
+            reset_stop=True,
+        )
+        runner._stop_reason = None
+        runner._stop_event = asyncio.Event()
+        runner._run_started_at = now
+        runner._run_duration_seconds = 60.0
+
+        snap_active = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec_open_active = make_decision(
+            decision_id="dec-active-30",
+            event_id="ev-active-30",
+            snapshot_id=snap_active.snapshot_id,
+            weight="0.30",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_active = asyncio.run(
+            engine.assess(dec_open_active, snap_active, make_market(as_of=now))
+        )
+        ledger.record_sync(dec_open_active, assess_active)
+        now = now + timedelta(seconds=1)
+        fills_open = ledger.fill_pending(make_market(as_of=now), risk_policy=policy)
+        assert len(fills_open) == 1
+        initial_qty = Decimal(ledger.report()["quantity_eur"])
+        assert initial_qty > Decimal("0")
+
+        # Now request stop while position is open!
+        runner.stop()
+
+        # 3a. Reversal (-10%) is risk-increasing and MUST be blocked on stop
+        snap_pos = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec_rev_stop = make_decision(
+            decision_id="dec-rev-stop",
+            event_id="ev-rev-stop",
+            snapshot_id=snap_pos.snapshot_id,
+            weight="-0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_rev_stop = asyncio.run(engine.assess(dec_rev_stop, snap_pos, make_market(as_of=now)))
+        rcpt_rev_stop = ledger.record_sync(dec_rev_stop, assess_rev_stop)
+        assert rcpt_rev_stop.status == "rejected"
+        assert rcpt_rev_stop.reason == "blocked_by_runner_stop_requested"
+
+        # 3b. Partial reduction (+10% < +30%) is risk-reducing and MUST still be recorded and filled while stopped!
+        dec_reduce_stop = make_decision(
+            decision_id="dec-reduce-stop",
+            event_id="ev-reduce-stop",
+            snapshot_id=snap_pos.snapshot_id,
+            weight="0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_reduce_stop = asyncio.run(
+            engine.assess(dec_reduce_stop, snap_pos, make_market(as_of=now))
+        )
+        rcpt_reduce_stop = ledger.record_sync(dec_reduce_stop, assess_reduce_stop)
+        assert rcpt_reduce_stop.status == "recorded"
+        now = now + timedelta(seconds=1)
+        fills_reduce = ledger.fill_pending(make_market(as_of=now), risk_policy=policy)
+        assert len(fills_reduce) == 1
+        reduced_qty = Decimal(ledger.report()["quantity_eur"])
+        assert Decimal("0") < reduced_qty < initial_qty
+
+        # 3c. Protective exit (max_holding_seconds=10s elapsed) still executes while stopped!
+        now = now + timedelta(seconds=15)
+        exit_fills = ledger.evaluate_protective_exits(make_market(as_of=now))
+        assert len(exit_fills) == 1
+        assert exit_fills[0].kind == "protective_exit"
+        assert Decimal(ledger.report()["quantity_eur"]) == Decimal("0")
+
+        # --- Part 4: Concurrent stop and fill race ---
+        # Verify that when stop fires concurrently with fill_pending, pending open order is cancelled and never fills.
+        now = now + timedelta(seconds=2)
+        state_store.update_runner_state(
+            status="running",
+            now=now,
+            started_at=now,
+            duration_seconds=60.0,
+            reset_stop=True,
+        )
+        runner._stop_reason = None
+        runner._stop_event = asyncio.Event()
+        runner._run_started_at = now
+        runner._run_duration_seconds = 60.0
+
+        snap_race = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec_race = make_decision(
+            decision_id="dec-race-open",
+            event_id="ev-race-open",
+            snapshot_id=snap_race.snapshot_id,
+            weight="0.20",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_race = asyncio.run(engine.assess(dec_race, snap_race, make_market(as_of=now)))
+        rcpt_race = ledger.record_sync(dec_race, assess_race)
+        assert rcpt_race.status == "recorded"
+        now = now + timedelta(seconds=1)
+        race_mkt = make_market(as_of=now)
+
+        # Simulate stop firing during fill_pending's internal stop check (concurrent stop & fill)
+        fill_reached_stop_check = threading.Event()
+
+        def _concurrent_stop_during_fill(ts: datetime) -> str | None:
+            fill_reached_stop_check.set()
+            runner._stop_reason = "runner_stop_requested"
+            runner._stop_event.set()
+            return "runner_stop_requested"
+
+        ledger.stop_reason_provider = _concurrent_stop_during_fill
+
+        async def _run_concurrent_stop_and_fill() -> tuple[ShadowFill, ...]:
+            def _delayed_stop() -> None:
+                fill_reached_stop_check.wait(timeout=2.0)
+                runner.stop()
+
+            t_stop = asyncio.to_thread(_delayed_stop)
+            t_fill = asyncio.to_thread(ledger.fill_pending, race_mkt, risk_policy=policy)
+            _, fills_out = await asyncio.gather(t_stop, t_fill)
+            return fills_out
+
+        race_fills = asyncio.run(_run_concurrent_stop_and_fill())
+        assert race_fills == ()
+        rep_race = ledger.report(market=race_mkt)
+        race_rcpt = next(r for r in rep_race["receipts"] if r["decision_id"] == "dec-race-open")
+        assert race_rcpt["order_status"] == "cancelled"
+        assert race_rcpt["terminal_reason"] == "cancelled_on_runner_stop_requested"
+        assert Decimal(rep_race["quantity_eur"]) == Decimal("0")
+    finally:
+        ledger.close()
+        state_store.close()
