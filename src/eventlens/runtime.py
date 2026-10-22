@@ -7,7 +7,7 @@ import logging
 import sqlite3
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
@@ -46,6 +46,8 @@ CycleStatus = Literal[
     "risk_rejected",
     "shadow_recorded",
     "shadow_rejected",
+    "recovery_expired",
+    "recovery_abandoned",
 ]
 
 
@@ -288,7 +290,7 @@ class SQLiteRuntimeStore:
             return list(
                 self.db.execute(
                     """SELECT * FROM runtime_events
-                    WHERE state IN ('memory_committed', 'risk_assessed', 'reasoning_failed', 'filtered_accepted')
+                    WHERE state IN ('received', 'filtered_accepted', 'reasoning_failed', 'memory_committed', 'risk_assessed')
                     ORDER BY first_seen_at"""
                 ).fetchall()
             )
@@ -453,6 +455,8 @@ TERMINAL_EVENT_STATES = frozenset(
         "shadow_recorded",
         "shadow_rejected",
         "completed",
+        "recovery_expired",
+        "recovery_abandoned",
     }
 )
 
@@ -473,6 +477,7 @@ class IntradayEventRuntime:
         audit_sink: AuditSink | None = None,
         state_store: SQLiteRuntimeStore | None = None,
         event_filter: EventFilter | None = None,
+        max_recovery_event_age: timedelta = timedelta(seconds=60),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.memory = memory
@@ -490,6 +495,7 @@ class IntradayEventRuntime:
         else:
             self.state_store = None
         self.event_filter = event_filter
+        self.max_recovery_event_age = max_recovery_event_age
         self.clock = clock
         self._lock = asyncio.Lock()
 
@@ -1156,18 +1162,181 @@ class IntradayEventRuntime:
             audit_records=tuple(cycle_audit),
         )
 
-    async def recover_incomplete(self) -> tuple[RuntimeCycleResult, ...]:
-        """Reconcile any pre-crash incomplete events without blind replay."""
+    async def recover_incomplete(
+        self,
+        *,
+        max_event_age: timedelta | None = None,
+        max_attempts: int = 3,
+        llm_timeout_seconds: float | None = 20.0,
+        stop_event: asyncio.Event | None = None,
+    ) -> tuple[RuntimeCycleResult, ...]:
+        """Reconcile any pre-crash incomplete events without blind replay, enforcing timeliness, retry cap, timeout, and cancellation."""
         if self.state_store is None:
             return ()
+        eff_max_age = max_event_age if max_event_age is not None else self.max_recovery_event_age
         rows = self.state_store.incomplete_events()
         results: list[RuntimeCycleResult] = []
+
+        async def _wait_for_stop() -> None:
+            while True:
+                if (stop_event is not None and stop_event.is_set()) or (
+                    self.state_store is not None and self.state_store.is_stop_requested()
+                ):
+                    return
+                if stop_event is not None:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=0.05)
+                        return
+                    except TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(0.05)
+
         for row in rows:
+            if (stop_event is not None and stop_event.is_set()) or (
+                self.state_store is not None and self.state_store.is_stop_requested()
+            ):
+                break
             ev = await self.memory.get_event(row["event_id"])
             if ev is None:
                 continue
-            res = await self.run_cycle(ev)
-            results.append(res)
+
+            committed_decision = await self.memory.decision_for_event(ev.event_id)
+            if committed_decision is None:
+                now = _utc(self.clock())
+                attempts = int(row["attempts"] or 0)
+                if attempts >= max_attempts:
+                    self.state_store.upsert_event_state(
+                        event_id=ev.event_id,
+                        source_reference=ev.source_reference,
+                        received_at=ev.received_timestamp,
+                        now=now,
+                        state="recovery_abandoned",
+                        reason="recovery_max_attempts_exceeded",
+                    )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=now,
+                        component="runtime",
+                        event_id=ev.event_id,
+                        policy_version=self.risk_engine.policy.policy_version,
+                        outcome="recovery_abandoned",
+                        detail=f"recovery_max_attempts_exceeded: attempts={attempts} max={max_attempts}",
+                    )
+                    self.state_store.append_audit(rec)
+                    await self.audit_sink.append(rec)
+                    results.append(
+                        RuntimeCycleResult(
+                            event_id=ev.event_id,
+                            status="recovery_abandoned",
+                            reason="recovery_max_attempts_exceeded",
+                            recovered=True,
+                            audit_records=(rec,),
+                        )
+                    )
+                    continue
+
+                ev_received = _utc(ev.received_timestamp)
+                ev_source = (
+                    _utc(ev.source_timestamp) if ev.source_timestamp is not None else ev_received
+                )
+                stale_reason: str | None = None
+                if ev_received > now or ev_source > now:
+                    stale_reason = "recovery_event_future_timestamp"
+                elif (now - ev_received) > eff_max_age or (
+                    ev.source_timestamp is not None and (now - ev_source) > eff_max_age
+                ):
+                    stale_reason = "recovery_event_stale"
+
+                if stale_reason is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=ev.event_id,
+                        source_reference=ev.source_reference,
+                        received_at=ev.received_timestamp,
+                        now=now,
+                        state="recovery_expired",
+                        reason=stale_reason,
+                    )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=now,
+                        component="runtime",
+                        event_id=ev.event_id,
+                        policy_version=self.risk_engine.policy.policy_version,
+                        outcome="recovery_expired",
+                        detail=f"{stale_reason}: received_at={ev_received.isoformat()} now={now.isoformat()}",
+                    )
+                    self.state_store.append_audit(rec)
+                    await self.audit_sink.append(rec)
+                    results.append(
+                        RuntimeCycleResult(
+                            event_id=ev.event_id,
+                            status="recovery_expired",
+                            reason=stale_reason,
+                            recovered=True,
+                            audit_records=(rec,),
+                        )
+                    )
+                    continue
+
+            cycle_task = asyncio.create_task(self.run_cycle(ev))
+            stop_task = asyncio.create_task(_wait_for_stop())
+            try:
+                done, _ = await asyncio.wait(
+                    {cycle_task, stop_task},
+                    timeout=llm_timeout_seconds,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_task in done and not cycle_task.done():
+                    cycle_task.cancel()
+                    await asyncio.gather(cycle_task, return_exceptions=True)
+                    break
+                if not done:
+                    cycle_task.cancel()
+                    await asyncio.gather(cycle_task, return_exceptions=True)
+                    raise TimeoutError
+                res = cycle_task.result()
+                results.append(res.model_copy(update={"recovered": True}))
+            except TimeoutError:
+                if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
+                    self.event_filter.unmark_seen(ev.event_id)
+                now_to = _utc(self.clock())
+                self.state_store.upsert_event_state(
+                    event_id=ev.event_id,
+                    source_reference=ev.source_reference,
+                    received_at=ev.received_timestamp,
+                    now=now_to,
+                    state="reasoning_failed",
+                    reason="llm_decision_timeout",
+                    increment_attempts=True,
+                )
+                rec = AuditRecord(
+                    audit_id=str(uuid4()),
+                    occurred_at=now_to,
+                    component="agent",
+                    event_id=ev.event_id,
+                    policy_version=self.risk_engine.policy.policy_version,
+                    outcome="reasoning_failed",
+                    detail="llm_decision_timeout_during_recovery",
+                )
+                self.state_store.append_audit(rec)
+                await self.audit_sink.append(rec)
+                results.append(
+                    RuntimeCycleResult(
+                        event_id=ev.event_id,
+                        status="reasoning_failed",
+                        reason="llm_decision_timeout",
+                        recovered=True,
+                        audit_records=(rec,),
+                    )
+                )
+            finally:
+                if not stop_task.done():
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
+                if not cycle_task.done():
+                    cycle_task.cancel()
+                    await asyncio.gather(cycle_task, return_exceptions=True)
         return tuple(results)
 
 
@@ -1191,6 +1360,7 @@ class ShadowRunner:
         protection_interval_seconds: float = 0.5,
         llm_timeout_seconds: float = 20.0,
         max_reasoning_attempts: int = 3,
+        max_recovery_event_age_seconds: float = 60.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.runtime = runtime
@@ -1207,6 +1377,7 @@ class ShadowRunner:
         self.protection_interval_seconds = protection_interval_seconds
         self.llm_timeout_seconds = llm_timeout_seconds
         self.max_reasoning_attempts = max_reasoning_attempts
+        self.max_recovery_event_age_seconds = max_recovery_event_age_seconds
         self.clock = clock
         self._stop_event = asyncio.Event()
         self._run_started_at: datetime | None = None
@@ -1385,7 +1556,7 @@ class ShadowRunner:
         """Run all three loops concurrently with a hard duration limit and clean shutdown."""
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
-        self._stop_event.clear()
+        self._stop_event = asyncio.Event()
         started_at = _utc(self.clock())
         self._run_started_at = started_at
         if self.runtime.state_store is not None:
@@ -1396,8 +1567,6 @@ class ShadowRunner:
                 duration_seconds=duration_seconds,
                 reset_stop=True,
             )
-
-        await self.runtime.recover_incomplete()
 
         async def _quote_worker() -> None:
             while not self._stop_event.is_set():
@@ -1442,6 +1611,16 @@ class ShadowRunner:
                     pass
 
         async def _news_and_event_worker() -> None:
+            try:
+                await self.runtime.recover_incomplete(
+                    max_event_age=timedelta(seconds=self.max_recovery_event_age_seconds),
+                    max_attempts=self.max_reasoning_attempts,
+                    llm_timeout_seconds=self.llm_timeout_seconds,
+                    stop_event=self._stop_event,
+                )
+            except Exception as exc:
+                logger.warning("recovery_worker_error: %s", exc)
+
             last_poll = 0.0
             loop = asyncio.get_running_loop()
             while not self._stop_event.is_set():

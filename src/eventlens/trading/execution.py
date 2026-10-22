@@ -237,7 +237,8 @@ class SQLiteShadowLedger:
                         avg_entry_price TEXT,
                         opened_at TEXT,
                         pending_exit_reason TEXT,
-                        pending_exit_since TEXT
+                        pending_exit_since TEXT,
+                        last_valid_equity_usd TEXT
                     );
                     CREATE TABLE IF NOT EXISTS shadow_daily_state (
                         trading_day TEXT PRIMARY KEY,
@@ -248,7 +249,9 @@ class SQLiteShadowLedger:
                         min_equity_seen_usd TEXT NOT NULL,
                         loss_limit_triggered INTEGER NOT NULL DEFAULT 0,
                         triggered_at TEXT,
-                        trigger_reason TEXT
+                        trigger_reason TEXT,
+                        baseline_valid INTEGER NOT NULL DEFAULT 1,
+                        baseline_reason TEXT NOT NULL DEFAULT 'confirmed'
                     );
                     CREATE TABLE IF NOT EXISTS shadow_receipts (
                         execution_id TEXT PRIMARY KEY,
@@ -288,11 +291,17 @@ class SQLiteShadowLedger:
                     self.db.execute(
                         """INSERT INTO shadow_account
                         (id, snapshot_id, as_of, cash_usd, realized_pnl_usd, total_fees_usd,
-                         quantity_eur, avg_entry_price, opened_at, pending_exit_reason, pending_exit_since)
-                        VALUES (1, ?, ?, ?, '0.00', '0.00', '0', NULL, NULL, NULL, NULL)""",
-                        ("shadow-snapshot-0", now.isoformat(), str(initial_cash_usd)),
+                         quantity_eur, avg_entry_price, opened_at, pending_exit_reason, pending_exit_since,
+                         last_valid_equity_usd)
+                        VALUES (1, ?, ?, ?, '0.00', '0.00', '0', NULL, NULL, NULL, NULL, ?)""",
+                        (
+                            "shadow-snapshot-0",
+                            now.isoformat(),
+                            str(initial_cash_usd),
+                            str(initial_cash_usd),
+                        ),
                     )
-                    self._ensure_daily_state_locked(now, initial_cash_usd)
+                    self._ensure_daily_state_locked(now, initial_cash_usd, valid_valuation=True)
                 self.db.commit()
         except BaseException:
             self.db.close()
@@ -306,6 +315,22 @@ class SQLiteShadowLedger:
             self.db.execute("ALTER TABLE shadow_account ADD COLUMN pending_exit_reason TEXT")
         if "pending_exit_since" not in acct_cols:
             self.db.execute("ALTER TABLE shadow_account ADD COLUMN pending_exit_since TEXT")
+        if "last_valid_equity_usd" not in acct_cols:
+            self.db.execute("ALTER TABLE shadow_account ADD COLUMN last_valid_equity_usd TEXT")
+            self.db.execute(
+                "UPDATE shadow_account SET last_valid_equity_usd = cash_usd WHERE last_valid_equity_usd IS NULL"
+            )
+        daily_cols = {
+            r["name"] for r in self.db.execute("PRAGMA table_info(shadow_daily_state)").fetchall()
+        }
+        if "baseline_valid" not in daily_cols:
+            self.db.execute(
+                "ALTER TABLE shadow_daily_state ADD COLUMN baseline_valid INTEGER NOT NULL DEFAULT 1"
+            )
+        if "baseline_reason" not in daily_cols:
+            self.db.execute(
+                "ALTER TABLE shadow_daily_state ADD COLUMN baseline_reason TEXT NOT NULL DEFAULT 'confirmed'"
+            )
         rcpt_cols = {
             r["name"] for r in self.db.execute("PRAGMA table_info(shadow_receipts)").fetchall()
         }
@@ -339,24 +364,86 @@ class SQLiteShadowLedger:
         self, now: datetime, current_equity: Decimal, *, valid_valuation: bool = True
     ) -> sqlite3.Row:
         day_id, start_utc, close_utc, rollover_utc = self.exit_policy.effective_window(now)
+        account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+        qty = Decimal(account["quantity_eur"]) if account is not None else Decimal("0")
+        last_valid_eq = (
+            Decimal(account["last_valid_equity_usd"])
+            if account is not None and account["last_valid_equity_usd"] is not None
+            else current_equity
+        )
+        prior_row = self.db.execute(
+            "SELECT * FROM shadow_daily_state WHERE trading_day < ? ORDER BY trading_day DESC LIMIT 1",
+            (day_id,),
+        ).fetchone()
+        prior_baseline = (
+            Decimal(prior_row["baseline_equity_usd"]) if prior_row is not None else last_valid_eq
+        )
+        carried_ref = max(last_valid_eq, prior_baseline)
+        limit = min(self.exit_policy.max_daily_loss_usd, self.risk_policy.max_daily_loss_usd)
+
         row = self.db.execute(
             "SELECT * FROM shadow_daily_state WHERE trading_day=?", (day_id,)
         ).fetchone()
         if row is None:
-            self.db.execute(
-                """INSERT INTO shadow_daily_state
-                (trading_day, session_start_utc, daily_close_utc, session_rollover_utc,
-                 baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered, triggered_at, trigger_reason)
-                VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL)""",
-                (
-                    day_id,
-                    start_utc.isoformat(),
-                    close_utc.isoformat(),
-                    rollover_utc.isoformat(),
-                    str(current_equity),
-                    str(current_equity),
-                ),
-            )
+            if not valid_valuation:
+                # Position is open across trading-day boundary without a valid quote:
+                # never write raw cash balance as a confirmed equity baseline.
+                provisional = carried_ref if qty != Decimal("0") else current_equity
+                self.db.execute(
+                    """INSERT INTO shadow_daily_state
+                    (trading_day, session_start_utc, daily_close_utc, session_rollover_utc,
+                     baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered,
+                     triggered_at, trigger_reason, baseline_valid, baseline_reason)
+                    VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0, ?)""",
+                    (
+                        day_id,
+                        start_utc.isoformat(),
+                        close_utc.isoformat(),
+                        rollover_utc.isoformat(),
+                        str(provisional),
+                        str(provisional),
+                        "unconfirmed_open_position_without_valid_quote",
+                    ),
+                )
+            else:
+                if qty != Decimal("0"):
+                    confirmed_base = max(carried_ref, current_equity)
+                    base_reason = (
+                        "confirmed_carried_position_conservative"
+                        if carried_ref > current_equity
+                        else "confirmed_marked_to_market"
+                    )
+                else:
+                    confirmed_base = current_equity
+                    base_reason = "confirmed_flat"
+                min_seen = min(confirmed_base, current_equity)
+                daily_pnl = current_equity - confirmed_base
+                triggered = daily_pnl <= -limit
+                triggered_at = now.isoformat() if triggered else None
+                trigger_reason = "daily_loss_limit_breached" if triggered else None
+                self.db.execute(
+                    """INSERT INTO shadow_daily_state
+                    (trading_day, session_start_utc, daily_close_utc, session_rollover_utc,
+                     baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered,
+                     triggered_at, trigger_reason, baseline_valid, baseline_reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                    (
+                        day_id,
+                        start_utc.isoformat(),
+                        close_utc.isoformat(),
+                        rollover_utc.isoformat(),
+                        str(confirmed_base),
+                        str(min_seen),
+                        int(triggered),
+                        triggered_at,
+                        trigger_reason,
+                        base_reason,
+                    ),
+                )
+                self.db.execute(
+                    "UPDATE shadow_account SET last_valid_equity_usd=? WHERE id=1",
+                    (str(current_equity),),
+                )
             row = self.db.execute(
                 "SELECT * FROM shadow_daily_state WHERE trading_day=?", (day_id,)
             ).fetchone()
@@ -364,22 +451,46 @@ class SQLiteShadowLedger:
             return row
 
         if valid_valuation:
-            baseline = Decimal(row["baseline_equity_usd"])
-            min_seen = min(Decimal(row["min_equity_seen_usd"]), current_equity)
+            was_valid = bool(row["baseline_valid"])
+            if not was_valid:
+                # Quote recovered after an unconfirmed cross-day rollover:
+                # confirm baseline conservatively so post-recovery equity cannot mask prior losses.
+                baseline = max(
+                    Decimal(row["baseline_equity_usd"]),
+                    carried_ref,
+                    current_equity,
+                )
+                base_reason = "confirmed_after_quote_recovery_conservative"
+            else:
+                baseline = Decimal(row["baseline_equity_usd"])
+                base_reason = str(row["baseline_reason"])
+            min_seen = min(Decimal(row["min_equity_seen_usd"]), baseline, current_equity)
             daily_pnl = current_equity - baseline
             triggered = bool(row["loss_limit_triggered"])
             triggered_at = row["triggered_at"]
             trigger_reason = row["trigger_reason"]
-            limit = min(self.exit_policy.max_daily_loss_usd, self.risk_policy.max_daily_loss_usd)
             if not triggered and daily_pnl <= -limit:
                 triggered = True
                 triggered_at = now.isoformat()
                 trigger_reason = "daily_loss_limit_breached"
             self.db.execute(
                 """UPDATE shadow_daily_state
-                SET min_equity_seen_usd=?, loss_limit_triggered=?, triggered_at=?, trigger_reason=?
+                SET baseline_equity_usd=?, min_equity_seen_usd=?, loss_limit_triggered=?,
+                    triggered_at=?, trigger_reason=?, baseline_valid=1, baseline_reason=?
                 WHERE trading_day=?""",
-                (str(min_seen), int(triggered), triggered_at, trigger_reason, day_id),
+                (
+                    str(baseline),
+                    str(min_seen),
+                    int(triggered),
+                    triggered_at,
+                    trigger_reason,
+                    base_reason,
+                    day_id,
+                ),
+            )
+            self.db.execute(
+                "UPDATE shadow_account SET last_valid_equity_usd=? WHERE id=1",
+                (str(current_equity),),
             )
             row = self.db.execute(
                 "SELECT * FROM shadow_daily_state WHERE trading_day=?", (day_id,)
@@ -451,7 +562,10 @@ class SQLiteShadowLedger:
                 realized_pnl_usd=realized,
                 total_fees_usd=fees,
                 daily_pnl_usd=daily_pnl,
+                daily_baseline_equity_usd=baseline,
                 daily_loss_limit_triggered=bool(daily_row["loss_limit_triggered"]),
+                daily_baseline_valid=bool(daily_row["baseline_valid"]),
+                daily_baseline_reason=str(daily_row["baseline_reason"]),
                 pending_exit_reason=account["pending_exit_reason"],
                 valuation_valid=valuation_valid,
                 valuation_reason=valuation_reason,
@@ -688,6 +802,8 @@ class SQLiteShadowLedger:
                         )
                     elif account["pending_exit_reason"] is not None:
                         reject_at_fill = "protective_exit_pending_at_fill"
+                    elif not bool(daily_row["baseline_valid"]):
+                        reject_at_fill = "daily_baseline_unconfirmed_at_fill"
                     elif (
                         bool(daily_row["loss_limit_triggered"])
                         or daily_pnl <= -active_risk.max_daily_loss_usd
@@ -956,7 +1072,6 @@ class SQLiteShadowLedger:
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
         equity_after = new_cash + unrealized_after
-        self._ensure_daily_state_locked(filled_at, equity_after, valid_valuation=True)
         fill_count = self.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0] + 1
         new_snapshot_id = f"shadow-snapshot-{fill_count}"
 
@@ -966,7 +1081,8 @@ class SQLiteShadowLedger:
             SET snapshot_id=?, as_of=?, cash_usd=?, realized_pnl_usd=?, total_fees_usd=?,
                 quantity_eur=?, avg_entry_price=?, opened_at=?,
                 pending_exit_reason=CASE WHEN ? = '0' THEN NULL ELSE pending_exit_reason END,
-                pending_exit_since=CASE WHEN ? = '0' THEN NULL ELSE pending_exit_since END
+                pending_exit_since=CASE WHEN ? = '0' THEN NULL ELSE pending_exit_since END,
+                last_valid_equity_usd=?
             WHERE id=1
             """,
             (
@@ -980,8 +1096,10 @@ class SQLiteShadowLedger:
                 new_opened,
                 str(new_qty),
                 str(new_qty),
+                str(equity_after),
             ),
         )
+        self._ensure_daily_state_locked(filled_at, equity_after, valid_valuation=True)
         fill = ShadowFill(
             fill_id=str(uuid4()),
             execution_id=execution_id,

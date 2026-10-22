@@ -113,7 +113,10 @@ class PortfolioSnapshot(Contract):
     realized_pnl_usd: Decimal = Decimal("0")
     total_fees_usd: Decimal = Decimal("0")
     daily_pnl_usd: Decimal = Decimal("0")
+    daily_baseline_equity_usd: Decimal | None = None
     daily_loss_limit_triggered: bool = False
+    daily_baseline_valid: bool = True
+    daily_baseline_reason: str = "confirmed"
     pending_exit_reason: str | None = None
     valuation_valid: bool = True
     valuation_reason: str = "flat_no_quote_needed"

@@ -254,6 +254,8 @@ class DeterministicHardRiskEngine:
                 )
             if held_by_instrument and not current.valuation_valid:
                 reasons.append("unreliable_position_valuation")
+            if not current.daily_baseline_valid:
+                reasons.append("daily_baseline_unconfirmed")
             if current.pending_exit_reason is not None:
                 reasons.append("protective_exit_pending")
             if (

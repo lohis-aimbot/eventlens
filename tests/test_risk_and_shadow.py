@@ -949,10 +949,14 @@ def test_full_pnl_and_fee_accounting_across_open_add_reduce_reverse_close(tmp_pa
 
 
 def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_path, capsys):
-    """Section 一 & 八: ShadowRunner runs timed exits even while LLM hangs; CLI start/status/stop/report work."""
+    """Section 一 & 八: ShadowRunner injects real event, enters HungAgent, and still executes protective exits, stop, and duration timeout."""
+    from eventlens.observer import CaptureBatch, ObserverStore, SourceRecord
+
     now = datetime.now(UTC)
+    obs_db = tmp_path / "runner_obs.sqlite"
     shd_db = tmp_path / "runner_shadow.sqlite"
     mem_db = tmp_path / "runner_mem.sqlite"
+    obs = ObserverStore(obs_db)
     memory = SQLiteThesisMemory(mem_db, allow_targets=True)
     state_store = SQLiteRuntimeStore(shd_db)
     ledger = SQLiteShadowLedger(
@@ -960,7 +964,33 @@ def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_
         exit_policy=ProtectiveExitPolicy(max_holding_seconds=1),
     )
 
-    # Open a position in ledger first
+    # Record an eligible live EUR/USD macro event in ObserverStore so runner actually invokes HungAgent.decide()
+    rec_live = SourceRecord(
+        source_id="9001",
+        kind="news",
+        source_url="https://wallstreetcn.com/livenews/9001",
+        title="ECB signals urgent EUR/USD policy rate recalibration",
+        text="ECB Governing Council commentary triggers immediate EUR/USD rate reassessment.",
+        publisher_display_at=now - timedelta(seconds=1),
+        importance=3,
+    )
+    obs.record(
+        CaptureBatch(
+            provider="wallstreetcn",
+            stream="news/global",
+            kind="news",
+            basis="live_poll",
+            request_url="https://api-one-wscn.awtmt.com/apiv1/content/lives",
+            request_started_at=now - timedelta(milliseconds=50),
+            received_at=now,
+            elapsed_ms=10.0,
+            attempts=1,
+            payload=b'{"live":9001}',
+            records=(rec_live,),
+        )
+    )
+
+    # Open a position in ledger first (already aged 2s > max_holding_seconds=1s)
     snap0 = ledger.snapshot_sync()
     dec = make_decision(
         snapshot_id=snap0.snapshot_id,
@@ -977,15 +1007,31 @@ def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_
     assert ledger.snapshot_sync().positions != ()
 
     class HungAgent:
-        async def decide(self, context):
-            await asyncio.sleep(10.0)
-            raise RuntimeError("unreachable")
+        def __init__(self) -> None:
+            self.calls = 0
+            self.active_hangs = 0
+            self.cancelled = 0
+            self.entered = asyncio.Event()
 
+        async def decide(self, context):
+            self.calls += 1
+            self.active_hangs += 1
+            self.entered.set()
+            try:
+                await asyncio.sleep(30.0)
+                raise RuntimeError("unreachable")
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+            finally:
+                self.active_hangs -= 1
+
+    hung_agent = HungAgent()
     runtime = IntradayEventRuntime(
         memory=memory,
         portfolio_state=ledger,
         market_provider=lambda ts: make_market(as_of=ts),
-        agent=HungAgent(),
+        agent=hung_agent,
         risk_engine=engine,
         shadow_executor=ledger,
         state_store=state_store,
@@ -993,18 +1039,76 @@ def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_
     runner = ShadowRunner(
         runtime=runtime,
         ledger=ledger,
-        quote_interval_seconds=0.1,
-        protection_interval_seconds=0.1,
-        event_scan_interval_seconds=0.1,
-        llm_timeout_seconds=0.2,
+        observer_store=obs,
+        quote_interval_seconds=0.05,
+        protection_interval_seconds=0.05,
+        event_scan_interval_seconds=0.05,
+        llm_timeout_seconds=10.0,
     )
     try:
-        summary = asyncio.run(runner.run(duration_seconds=1.3))
-        # Position was automatically flattened by the independent protection loop!
+
+        async def _verify_hung_loop_and_duration() -> dict:
+            run_task = asyncio.create_task(runner.run(duration_seconds=1.25))
+            # 1. Assert model actually entered hung state on the injected event
+            await asyncio.wait_for(hung_agent.entered.wait(), timeout=1.0)
+            assert hung_agent.calls == 1
+            assert hung_agent.active_hangs == 1
+
+            # 2. Wait until protective exit flattens the open position while HungAgent is STILL hung
+            deadline = asyncio.get_running_loop().time() + 1.15
+            while ledger.snapshot_sync().positions != ():
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.05)
+            assert hung_agent.active_hangs == 1
+
+            # 3. Runner stops via duration_seconds=1.25 even though llm_timeout_seconds=10.0
+            return await asyncio.wait_for(run_task, timeout=1.5)
+
+        summary = asyncio.run(_verify_hung_loop_and_duration())
+        assert hung_agent.calls >= 1
+        assert hung_agent.cancelled >= 1
         assert summary["open_quantity_eur"] == "0"
         assert summary["ledger"]["fill_count"] == 2
         assert summary["ledger"]["fills"][-1]["kind"] == "protective_exit"
+
+        # 4. Also verify external stop request (state_store.request_stop) stops runner immediately while model is hung
+        ts2 = datetime.now(UTC)
+        rec_live_2 = SourceRecord(
+            source_id="9002",
+            kind="news",
+            source_url="https://wallstreetcn.com/livenews/9002",
+            title="Federal Reserve emergency statement on EUR/USD liquidity",
+            text="Federal Reserve statement moves USD and EUR/USD intraday.",
+            publisher_display_at=ts2 - timedelta(milliseconds=100),
+            importance=3,
+        )
+        obs.record(
+            CaptureBatch(
+                provider="wallstreetcn",
+                stream="news/global",
+                kind="news",
+                basis="live_poll",
+                request_url="https://api-one-wscn.awtmt.com/apiv1/content/lives",
+                request_started_at=ts2 - timedelta(milliseconds=50),
+                received_at=ts2,
+                elapsed_ms=10.0,
+                attempts=1,
+                payload=b'{"live":9002}',
+                records=(rec_live_2,),
+            )
+        )
+
+        async def _verify_stop_while_hung() -> None:
+            hung_agent.entered = asyncio.Event()
+            run_task = asyncio.create_task(runner.run(duration_seconds=10.0))
+            await asyncio.wait_for(hung_agent.entered.wait(), timeout=1.0)
+            assert hung_agent.active_hangs == 1
+            state_store.request_stop(datetime.now(UTC))
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+        asyncio.run(_verify_stop_while_hung())
     finally:
+        obs.close()
         ledger.close()
         state_store.close()
 
@@ -1013,6 +1117,195 @@ def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_
         main(["shadow", "--shadow-db", str(shd_db), "--memory-db", str(mem_db), subcmd])
         out = json.loads(capsys.readouterr().out)
         assert out["execution_authorized"] is False
+
+
+def test_startup_recovery_non_blocking_hung_model_stop_timeout_retries_and_staleness(tmp_path):
+    """Startup recovery enforces staleness, retry limits, LLM timeout, and never blocks protection/stop/duration."""
+    now = datetime.now(UTC)
+    shd_db = tmp_path / "rec_nonblock_shd.sqlite"
+    mem_db = tmp_path / "rec_nonblock_mem.sqlite"
+    memory = SQLiteThesisMemory(mem_db, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        exit_policy=ProtectiveExitPolicy(max_holding_seconds=1),
+    )
+
+    class HungRecoveryAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.active_hangs = 0
+            self.entered = asyncio.Event()
+
+        async def decide(self, context):
+            self.calls += 1
+            self.active_hangs += 1
+            self.entered.set()
+            try:
+                await asyncio.sleep(30.0)
+                raise RuntimeError("unreachable")
+            finally:
+                self.active_hangs -= 1
+
+    hung_agent = HungRecoveryAgent()
+    engine = DeterministicHardRiskEngine()
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: make_market(as_of=ts),
+        agent=hung_agent,
+        risk_engine=engine,
+        shadow_executor=ledger,
+        state_store=state_store,
+        max_recovery_event_age=timedelta(seconds=60),
+    )
+
+    try:
+        # 1. Stale pre-crash event (> 60s old) and retry-exhausted event (attempts >= 3) must NOT invoke LLM
+        ev_stale = Event(
+            event_id="ev-rec-stale",
+            source="wallstreetcn_news",
+            source_type="news",
+            source_reference="https://wallstreetcn.com/livenews/stale",
+            source_timestamp=now - timedelta(seconds=120),
+            received_timestamp=now - timedelta(seconds=120),
+            raw_text="Stale ECB EUR/USD headline from 2 minutes ago.",
+        )
+        ev_exhausted = Event(
+            event_id="ev-rec-exhausted",
+            source="wallstreetcn_news",
+            source_type="news",
+            source_reference="https://wallstreetcn.com/livenews/exhausted",
+            source_timestamp=now - timedelta(seconds=5),
+            received_timestamp=now - timedelta(seconds=5),
+            raw_text="Fresh ECB EUR/USD headline that already exhausted retries.",
+        )
+        asyncio.run(memory.record_event(ev_stale))
+        asyncio.run(memory.record_event(ev_exhausted))
+        state_store.upsert_event_state(
+            event_id=ev_stale.event_id,
+            source_reference=ev_stale.source_reference,
+            received_at=ev_stale.received_timestamp,
+            now=now,
+            state="received",
+            reason="event_persisted",
+        )
+        for _ in range(3):
+            state_store.upsert_event_state(
+                event_id=ev_exhausted.event_id,
+                source_reference=ev_exhausted.source_reference,
+                received_at=ev_exhausted.received_timestamp,
+                now=now,
+                state="reasoning_failed",
+                reason="transient_error",
+                increment_attempts=True,
+            )
+
+        rec_results = asyncio.run(
+            runtime.recover_incomplete(
+                max_event_age=timedelta(seconds=60),
+                max_attempts=3,
+                llm_timeout_seconds=0.2,
+            )
+        )
+        assert hung_agent.calls == 0
+        by_id = {r.event_id: r for r in rec_results}
+        assert by_id["ev-rec-stale"].status == "recovery_expired"
+        assert by_id["ev-rec-stale"].reason == "recovery_event_stale"
+        assert by_id["ev-rec-exhausted"].status == "recovery_abandoned"
+        assert by_id["ev-rec-exhausted"].reason == "recovery_max_attempts_exceeded"
+
+        # 2. Fresh incomplete event with LLM timeout during recovery increments attempts and records timeout
+        ev_timeout = Event(
+            event_id="ev-rec-timeout",
+            source="wallstreetcn_news",
+            source_type="news",
+            source_reference="https://wallstreetcn.com/livenews/timeout",
+            source_timestamp=now - timedelta(seconds=2),
+            received_timestamp=now - timedelta(seconds=2),
+            raw_text="ECB EUR/USD headline that times out during recovery.",
+        )
+        asyncio.run(memory.record_event(ev_timeout))
+        state_store.upsert_event_state(
+            event_id=ev_timeout.event_id,
+            source_reference=ev_timeout.source_reference,
+            received_at=ev_timeout.received_timestamp,
+            now=now,
+            state="received",
+            reason="event_persisted",
+        )
+        to_results = asyncio.run(
+            runtime.recover_incomplete(
+                max_event_age=timedelta(seconds=60),
+                max_attempts=3,
+                llm_timeout_seconds=0.1,
+            )
+        )
+        assert hung_agent.calls == 1
+        assert len(to_results) == 1
+        assert to_results[0].status == "reasoning_failed"
+        assert to_results[0].reason == "llm_decision_timeout"
+        row_to = state_store.get_event_state("ev-rec-timeout")
+        assert row_to is not None and int(row_to["attempts"]) == 1
+
+        # 3. Startup recovery inside ShadowRunner.run() with a hung model MUST NOT block protective exits,
+        # stop requests, or duration_seconds!
+        snap0 = ledger.snapshot_sync()
+        dec = make_decision(
+            snapshot_id=snap0.snapshot_id,
+            started_at=now - timedelta(seconds=2),
+            completed_at=now - timedelta(seconds=2),
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess = asyncio.run(engine.assess(dec, snap0, make_market(as_of=now)))
+        ledger.record_sync(dec, assess)
+        assert len(ledger.fill_pending(make_market(as_of=datetime.now(UTC)))) == 1
+        assert ledger.snapshot_sync().positions != ()
+
+        runner = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            quote_interval_seconds=0.05,
+            protection_interval_seconds=0.05,
+            event_scan_interval_seconds=0.05,
+            llm_timeout_seconds=10.0,
+            max_reasoning_attempts=3,
+        )
+
+        async def _verify_startup_recovery_non_blocking() -> None:
+            hung_agent.entered = asyncio.Event()
+            run_task = asyncio.create_task(runner.run(duration_seconds=5.0))
+            # Wait for startup recover_incomplete() to enter HungRecoveryAgent.decide()
+            await asyncio.wait_for(hung_agent.entered.wait(), timeout=1.0)
+            assert hung_agent.active_hangs == 1
+
+            # Protective exit must flatten the open position while startup recovery is STILL hung in LLM!
+            deadline = asyncio.get_running_loop().time() + 1.2
+            while ledger.snapshot_sync().positions != ():
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.05)
+            assert hung_agent.active_hangs == 1
+
+            # Request stop while startup recovery is STILL hung in LLM; runner must exit promptly (< 1.0s)
+            state_store.request_stop(datetime.now(UTC))
+            summary = await asyncio.wait_for(run_task, timeout=1.0)
+            assert summary["open_quantity_eur"] == "0"
+            assert summary["ledger"]["fills"][-1]["kind"] == "protective_exit"
+
+        asyncio.run(_verify_startup_recovery_non_blocking())
+
+        # Also verify duration_seconds alone stops hung startup recovery on schedule
+        async def _verify_startup_recovery_duration_cap() -> None:
+            hung_agent.entered = asyncio.Event()
+            run_task = asyncio.create_task(runner.run(duration_seconds=0.25))
+            await asyncio.wait_for(hung_agent.entered.wait(), timeout=1.0)
+            assert hung_agent.active_hangs == 1
+            await asyncio.wait_for(run_task, timeout=1.0)
+
+        asyncio.run(_verify_startup_recovery_duration_cap())
+    finally:
+        ledger.close()
+        state_store.close()
 
 
 def test_kill_switch_allows_risk_reduction_blocks_reversal_and_shutdown_preserves_unclosed_position(
@@ -1240,3 +1533,183 @@ def test_shadow_runner_skips_baseline_snapshot_and_processes_new_live_arrival(tm
         obs.close()
         ledger.close()
         state_store.close()
+
+
+def test_cross_day_unconfirmed_baseline_blocks_risk_persists_on_restart_and_confirms_conservatively(
+    tmp_path,
+):
+    """Cross-day rollover with open position + missing quotes marks baseline unconfirmed, blocks new risk, persists across restart, and never masks losses upon quote recovery."""
+    # Day 1 (2026-07-15 19:00 UTC == 15:00 EDT, trading day 2026-07-15)
+    now = datetime(2026, 7, 15, 19, 0, 0, tzinfo=UTC)
+    db_file = tmp_path / "cross_day_baseline.sqlite"
+    policy = RiskPolicy(
+        max_position_weight=Decimal("0.50"),
+        max_gross_weight=Decimal("0.50"),
+        max_daily_loss_usd=Decimal("50"),
+    )
+    ledger = SQLiteShadowLedger(
+        db_file,
+        exit_policy=ProtectiveExitPolicy(
+            max_holding_seconds=86400 * 3,
+            max_position_loss_usd=Decimal("500"),
+            max_daily_loss_usd=Decimal("50"),
+        ),
+        risk_policy=policy,
+        clock=lambda: now,
+    )
+    engine = DeterministicHardRiskEngine(policy=policy, clock=lambda: now)
+
+    try:
+        # 1. Open long position on Day 1 at 1.08500 / 1.08510
+        mkt_open = make_market(
+            quote=make_quote(bid="1.08500", ask="1.08510", received_at=now), as_of=now
+        )
+        snap0 = ledger.snapshot_sync(market=mkt_open)
+        assert snap0.daily_baseline_valid is True
+        dec_open = make_decision(
+            decision_id="dec-day1-open",
+            event_id="ev-day1-open",
+            snapshot_id=snap0.snapshot_id,
+            weight="0.20",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_open = asyncio.run(engine.assess(dec_open, snap0, mkt_open))
+        assert assess_open.outcome == "approve"
+        ledger.record_sync(dec_open, assess_open)
+        now = now + timedelta(seconds=1)
+        assert (
+            len(
+                ledger.fill_pending(
+                    make_market(
+                        quote=make_quote(bid="1.08500", ask="1.08510", received_at=now),
+                        as_of=now,
+                    ),
+                    risk_policy=policy,
+                )
+            )
+            == 1
+        )
+
+        # 2. Still on Day 1 (20:00 UTC == 16:00 EDT), valid quote rallies to 1.12000 / 1.12010
+        # so last_valid_equity_usd is ~$10,064.47 while raw cash_usd is $9,999.96.
+        now = datetime(2026, 7, 15, 20, 0, 0, tzinfo=UTC)
+        mkt_high = make_market(
+            quote=make_quote(bid="1.12000", ask="1.12010", received_at=now), as_of=now
+        )
+        snap_high = ledger.snapshot_sync(market=mkt_high)
+        assert snap_high.valuation_valid is True
+        assert snap_high.daily_baseline_valid is True
+        high_equity = snap_high.equity
+        raw_cash = Decimal(ledger.report(market=mkt_high)["cash_usd"])
+        assert high_equity > Decimal("10060")
+        assert raw_cash < Decimal("10000")
+
+        # 3. Rollover across 17:00 EDT into trading day 2026-07-16 (21:30 UTC == 17:30 EDT) DURING a quote outage!
+        now = datetime(2026, 7, 15, 21, 30, 0, tzinfo=UTC)
+        empty_market = MarketSnapshot(snapshot_id="empty-rollover", as_of=now, quotes=())
+        snap_rollover = ledger.snapshot_sync(market=empty_market)
+        rep_rollover = ledger.report(market=empty_market)
+        assert rep_rollover["daily_states"][-1]["trading_day"] == "2026-07-16"
+        assert snap_rollover.valuation_valid is False
+        assert snap_rollover.daily_baseline_valid is False
+        assert (
+            snap_rollover.daily_baseline_reason == "unconfirmed_open_position_without_valid_quote"
+        )
+        # Raw cash_usd ($9,999.96) must NEVER be written as the confirmed baseline!
+        assert snap_rollover.daily_baseline_equity_usd == high_equity
+        assert snap_rollover.daily_baseline_equity_usd != raw_cash
+
+        # Risk-increasing action while daily_baseline_valid is False must be rejected with daily_baseline_unconfirmed
+        dec_add = make_decision(
+            decision_id="dec-day2-add",
+            event_id="ev-day2-add",
+            snapshot_id=snap_rollover.snapshot_id,
+            weight="0.35",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        valid_probe_mkt = make_market(
+            quote=make_quote(bid="1.12000", ask="1.12010", received_at=now), as_of=now
+        )
+        assess_add = asyncio.run(engine.assess(dec_add, snap_rollover, valid_probe_mkt))
+        assert assess_add.outcome == "reject"
+        assert "daily_baseline_unconfirmed" in assess_add.reasons
+
+        # Risk-reducing CLOSE remains permitted by risk engine even while baseline is unconfirmed
+        dec_close = make_decision(
+            decision_id="dec-day2-close",
+            event_id="ev-day2-close",
+            snapshot_id=snap_rollover.snapshot_id,
+            weight="0",
+            portfolio_action="CLOSE",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_close = asyncio.run(engine.assess(dec_close, snap_rollover, valid_probe_mkt))
+        assert assess_close.outcome == "approve"
+    finally:
+        ledger.close()
+
+    # 4. Simulate process restart on Day 2 while quotes are STILL missing:
+    # unconfirmed baseline state must persist across restart and not reset to cash_usd!
+    now = datetime(2026, 7, 15, 21, 35, 0, tzinfo=UTC)
+    reopened = SQLiteShadowLedger(
+        db_file,
+        exit_policy=ProtectiveExitPolicy(
+            max_holding_seconds=86400 * 3,
+            max_position_loss_usd=Decimal("500"),
+            max_daily_loss_usd=Decimal("50"),
+        ),
+        risk_policy=policy,
+        clock=lambda: now,
+    )
+    try:
+        empty_restart = MarketSnapshot(snapshot_id="empty-restart", as_of=now, quotes=())
+        snap_restart = reopened.snapshot_sync(market=empty_restart)
+        assert snap_restart.daily_baseline_valid is False
+        assert snap_restart.daily_baseline_reason == "unconfirmed_open_position_without_valid_quote"
+        assert snap_restart.daily_baseline_equity_usd == high_equity
+
+        # 5. Quotes recover at 21:40 UTC after a sharp drop (1.08000 / 1.08010, equity ~$9,990.57, down ~$73.73 from high_equity).
+        # Conservative baseline confirmation uses max(provisional, last_valid_equity_usd, prior_baseline, current_equity) == high_equity,
+        # so the ~$73.73 loss during the outage is NOT masked by the lower post-recovery equity and immediately triggers daily_loss_limit!
+        now = datetime(2026, 7, 15, 21, 40, 0, tzinfo=UTC)
+        mkt_recovered_low = make_market(
+            quote=make_quote(bid="1.08000", ask="1.08010", received_at=now), as_of=now
+        )
+        snap_recovered = reopened.snapshot_sync(market=mkt_recovered_low)
+        assert snap_recovered.valuation_valid is True
+        assert snap_recovered.daily_baseline_valid is True
+        assert snap_recovered.daily_baseline_reason == "confirmed_after_quote_recovery_conservative"
+        assert snap_recovered.daily_baseline_equity_usd == high_equity
+        assert snap_recovered.daily_pnl_usd <= Decimal("-50")
+        assert snap_recovered.daily_loss_limit_triggered is True
+
+        # Protective exit flattens the position and subsequent risk-increasing orders are blocked on Day 2
+        exits = reopened.evaluate_protective_exits(mkt_recovered_low)
+        assert len(exits) == 1
+        assert exits[0].new_quantity == Decimal("0")
+
+        snap_flat = reopened.snapshot_sync(market=mkt_recovered_low)
+        assert snap_flat.daily_loss_limit_triggered is True
+        dec_new_risk = make_decision(
+            decision_id="dec-day2-blocked",
+            event_id="ev-day2-blocked",
+            snapshot_id=snap_flat.snapshot_id,
+            weight="0.20",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        engine_reopened = DeterministicHardRiskEngine(policy=policy, clock=lambda: now)
+        assess_blocked = asyncio.run(
+            engine_reopened.assess(dec_new_risk, snap_flat, mkt_recovered_low)
+        )
+        assert assess_blocked.outcome == "reject"
+        assert "daily_loss_limit_exceeded" in assess_blocked.reasons
+    finally:
+        reopened.close()
