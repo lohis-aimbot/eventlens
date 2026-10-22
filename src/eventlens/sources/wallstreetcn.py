@@ -629,6 +629,10 @@ class WallStreetCNFilter:
             filter_version=FILTER_VERSION,
         )
 
+    def unmark_seen(self, event_id: str) -> None:
+        """Allow a filtered event to be re-evaluated after a transient downstream failure."""
+        self._seen.discard(event_id)
+
 
 def filter_store_revisions(
     store: ObserverStore,

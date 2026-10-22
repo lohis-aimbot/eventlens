@@ -2,6 +2,7 @@
 
 from .agent import (
     ObservationReasoner,
+    PortfolioAction,
     SinglePassProposal,
     SinglePassTradingAgent,
     TradingAgent,
@@ -18,11 +19,14 @@ from .portfolio import (
     DeterministicTargetValidator,
     PortfolioState,
     TargetValidator,
+    classify_exposure_change,
 )
 from .risk import (
     DeterministicHardRiskEngine,
     HardRiskEngine,
     RiskPolicy,
+    is_in_daily_close_window,
+    trading_day_window,
 )
 
 __all__ = [
@@ -30,6 +34,7 @@ __all__ = [
     "DeterministicTargetValidator",
     "HardRiskEngine",
     "ObservationReasoner",
+    "PortfolioAction",
     "PortfolioState",
     "ProtectiveExitPolicy",
     "RiskPolicy",
@@ -41,5 +46,8 @@ __all__ = [
     "SinglePassTradingAgent",
     "TargetValidator",
     "TradingAgent",
+    "classify_exposure_change",
+    "is_in_daily_close_window",
     "resolve_verbatim_quote",
+    "trading_day_window",
 ]

@@ -15,14 +15,14 @@ configurable research choices. Existing FOMC experiments retain their original s
 | `reasoning.py` | Validated create/update/ignore memory decisions; no portfolio targets |
 | `observer.py` | Provider-neutral capture contracts, dedicated SQLite payload/revision storage and cutoff-aware history |
 | `sources/wallstreetcn.py` | Bounded news/calendar website polling, normalization, rejection records and retry/pacing |
-| `quotes.py`, `quotes_cli.py` | Dedicated Demo quote store, quality reporting and retrospective news/quote cutoff checks |
+| `quotes.py`, `quotes_cli.py` | Dedicated Demo quote store, provenance/clock preservation (`source_at`, `bridge_at`, `received_at`, `available_at`), unified `QuoteQualityPolicy` (`validate_market_quote`), quality reporting and retrospective news/quote cutoff checks |
 | `sources/ctrader_demo.py` | Fresh local-file handshake, bounded tailing and quote validation; no order methods |
 | `ctrader/EventLensQuoteBridge.cs` | Sampled Demo EURUSD real-time snapshots, sandbox files and automatic stop |
 | `sources/events.py` | General source/filter interfaces only |
 | `sources/fed.py` | Official Fed polling, URL validation, retry/pacing, durable inbox and optional memory reasoning |
 | `research/` | Historical ticks, source/capture provenance, cutoff selection, replay labels, fixed-position costs, opt-in model replay and durable call journal |
-| `trading/` | `TradingAgent`, `PortfolioState`, `TargetValidator`, `HardRiskEngine`, `ShadowExecutor` interfaces only |
-| `runtime.py` | Future runtime/audit interfaces only; no working event-to-order loop |
+| `trading/` | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`), and `SQLiteShadowLedger` (causal fills, order lifecycle, DST-aware daily close, and deferred protective exits) |
+| `runtime.py`, `shadow_cli.py` | `IntradayEventRuntime` (post-LLM market/portfolio refresh, persistent state machine, crash recovery), single-process `ShadowRunner`, and `eventlens shadow` CLI |
 | `cli.py`, `*_cli.py` | Grouped dispatcher and existing explicit commands |
 
 Shared modules, sources and trading interfaces do not import research modules. Research
@@ -47,6 +47,7 @@ their arguments and behavior. The grouped command tree is:
 ```text
 eventlens observe <capture, demo, report or history>
 eventlens observe quotes <watch, report or align>
+eventlens shadow <start, stop, status, report or recover>
 eventlens memory <existing memory arguments>
 eventlens source fed <existing collector arguments>
 eventlens research accounting <existing eventlens-research arguments>
@@ -67,32 +68,54 @@ The organization step changed no existing database format, prompt, schema, cost/
 rule or historical experiment. The new observer likewise leaves those contracts unchanged. Proposal schemas and experiment identities
 are checked against a pre-move snapshot. Evidence and data stay out of Git.
 
-## Runtime design constraints, not implemented features
+## Runtime, risk, and shadow accounting rules (`v0.15.3`)
 
 An adapter persists source evidence before inference. Macro releases need a pre-release
 forecast snapshot and explicit actual/previous/revised values; zero is a value, not
 missing data. Related headlines are grouped without losing their individual provenance
 or arrival times. Publisher display time is not assumed to be first public release.
 
-Analysis receives only information available at its input cutoff. The decision role
-also receives fresh quotes, observed positions/pending orders and bounded relevant
-theses. A response is a proposal, never a fill or risk approval. Validate evidence IDs,
-model/prompt version, decision expiry and snapshot identity. Invalid/late replies create
-no new position; valid beliefs may survive a rejected trade. The existing evidence-quote
-interface still needs repair; moving it does not fix the known failures.
+- **Explicit action semantics (`single-pass-agent-v2`)**: Proposals must specify
+  `portfolio_action` in `{"IGNORE_EVENT", "HOLD", "SET_TARGET", "CLOSE"}`. Uncertain,
+  low-confidence, or irrelevant events map to `IGNORE_EVENT` or `HOLD` (`target=None`) and
+  never liquidate an open position. `CLOSE` requires an open position, a verbatim
+  `evidence_quote`, and explicit `target_thesis_ids` covering `EUR/USD`.
+- **Unified quote quality (`QuoteQualityPolicy`)**: Quotes retain `source_at`, `bridge_at`,
+  `received_at`, `available_at`, `source_provider`, and `basis`. Freshness is evaluated
+  against `source_at` (`max_quote_age_ms=2000`) while recording `receipt_lag_ms`. Quotes
+  with missing/unverified provenance, future timestamps, stale source timestamps, zero
+  spread (`allow_zero_spread=False` by default), or spread above `2.0 pips` are rejected
+  across model input, hard risk, shadow fills, protective exits, and mark-to-market
+  valuation. Live/shadow paths never apply a synthetic spread floor (`spread_floor_pips=0`)
+  and never fall back to older valid quotes when the latest quote is invalid.
+- **Post-LLM state refresh**: `IntradayEventRuntime` records the pre-LLM `AgentContext`
+  for audit, then fetches a fresh `MarketSnapshot` and `PortfolioSnapshot` after the LLM
+  call completes. If open positions or pending orders changed during inference, the target
+  is rejected (`portfolio_state_changed_during_inference`) without silently rewriting
+  `based_on_snapshot_id`.
+- **Intraday session & daily loss definition (`hard-risk-v2`)**: Trading days are bounded
+  at `17:00 America/New_York` (`session_rollover_utc`, DST-aware via `ZoneInfo`), with a
+  daily close cutoff window from `16:55` to `17:00 America/New_York`. Daily net PnL is
+  defined as `current_equity_usd - baseline_equity_usd`, which includes realized PnL,
+  unrealized mark-to-market PnL (valued at bid for long, ask for short), and cumulative
+  transaction fees. Both `baseline_equity_usd` and `loss_limit_triggered` are persisted in
+  `shadow_daily_state` across restarts. Risk-increasing actions (opening, adding, or
+  reversing a position) are blocked when `kill_switch_active`, `daily_loss_limit_exceeded`,
+  `equity_below_minimum_floor`, `unreliable_position_valuation`, `protective_exit_pending`,
+  or `daily_close_cutoff_active`, whereas purely risk-reducing actions (`CLOSE` or partial
+  reduction) remain permitted.
+- **Order lifecycle & deferred protective exits**: Shadow orders track explicit
+  `order_status` (`pending`, `filled`, `expired`, `cancelled`, `rejected`) and re-verify
+  decision/risk expiry, causal quote ordering (`received_at >= max(decision.completed_at, recorded_at)`),
+  kill switch, daily loss limit, and daily close cutoff before filling. If a protective exit
+  (stop-loss, daily loss limit, max holding horizon, or daily close) triggers while no valid
+  quote is available, `SQLiteShadowLedger` cancels pending risk-increasing orders, persists
+  `pending_exit_reason` and `pending_exit_since` on `shadow_account`, emits a
+  `protective_exit_deferred_bad_quote` fault record, and executes the exit only when a valid
+  quote arrives—never fabricating a fill on an invalid or missing quote.
 
-LLMs may suggest direction, position changes and bounded risk parameters. They cannot
-hold broker credentials, edit operator risk limits or certify their own approval.
-Deterministic code must enforce position/loss/spread/freshness limits, order deduplication,
-reconciliation, kill switch and session-aware daily close. Protective exits and timers
-operate independently of LLM availability. Confirm a close through execution feedback;
-an intention to close is not a closed position.
-
-The future 30–60-second goal concerns the release-to-decision/order workflow under
-eligible conditions, not a guarantee of fills. Track publication/display/receipt,
-analysis, decision, submission, acknowledgement and fill clocks separately. Unknown
-original time remains unknown. Current observed research processing excludes feed/order
-latency; older frozen budgets retain their original pass/fail results.
+Read [shadow acceptance and forward observation](shadow-acceptance.md) for current offline
+verification and live forward observation status.
 
 ## Preserved research and evidence
 

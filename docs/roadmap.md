@@ -13,14 +13,22 @@ revision history and post-commit availability markers. See [acceptance](observer
 [short observation](live-quotes-acceptance.md) passed storage/timing checks, exposed
 29/33 zero-spread samples and a stale quote at the news cutoff, and added symbol/tick
 diagnostics plus clock-lag decomposition without relaxing freshness or spread gates.
-Representative quote quality, extended/important-release sampling and the rest of Stage 1
+representative quote quality, extended/important-release sampling and the rest of Stage 1
 acceptance remain pending. **Stage 2 foundation (`v0.15.2`)** adds deterministic WallStreetCN
 EUR/USD observation filtering (`WallStreetCNFilter`) and `SinglePassTradingAgent` with
-canonical verbatim quote recovery. **Stage 3–4 foundation (`v0.15.3`)** implements
-`DeterministicTargetValidator`, `DeterministicHardRiskEngine`, `SQLiteShadowLedger` (separating
-shadow receipts from causal fills and enforcing stop-loss, max-holding-horizon, and daily-close
-protective exits without the LLM), and `IntradayEventRuntime`; forward shadow validation and
-Stage 5 cTrader Demo execution remain planned.
+canonical verbatim quote recovery. **Stage 3–4 Shadow reliability fixes (`v0.15.3`)** implement
+explicit action semantics (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), unified quote quality
+and provenance validation (`allow_zero_spread=False`, no synthetic spread floor), post-LLM
+market/portfolio refresh, order expiry and pre-fill re-verification, DST-aware session daily
+loss limits and daily close (`16:55 America/New_York`), deferred protective exits under bad/missing
+quotes, persistent event state machine + crash recovery, and the single-process `ShadowRunner`
+(`eventlens shadow`). **Offline/synthetic regression checks pass (306 tests), and bounded live
+WallStreetCN polling + Shadow loop execution have been verified, but live forward Shadow fill
+acceptance is NOT yet complete** because live Demo quote streaming (`CTRADER_*`) and
+`DEEPSEEK_API_KEY` were not active during the bounded forward observation window and historical
+local Demo samples exhibited 29/33 zero-spread ticks. Stage 5 cTrader Demo execution remains
+blocked until live forward Shadow acceptance passes with positive-spread real-time quotes. See
+[shadow acceptance](shadow-acceptance.md).
 
 | Stage | Work | Acceptance |
 |---|---|---|

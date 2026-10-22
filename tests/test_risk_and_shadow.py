@@ -1,16 +1,18 @@
-"""Tests for deterministic target validation, hard risk engine, shadow ledger, and runtime."""
+"""Regression and acceptance tests for v0.15.3 reliability fixes and automated Shadow loop."""
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 import pytest
 
+from eventlens.cli import main
 from eventlens.contracts import (
     AgentDecision,
     Event,
     MarketSnapshot,
-    PortfolioSnapshot,
     Quote,
     TargetPortfolio,
     TargetPosition,
@@ -18,7 +20,19 @@ from eventlens.contracts import (
     ThesisChange,
 )
 from eventlens.deepseek import ModelResponse
-from eventlens.runtime import InMemoryAuditSink, IntradayEventRuntime
+from eventlens.quotes import (
+    BridgeQuote,
+    BridgeStart,
+    QuoteQualityPolicy,
+    QuoteStore,
+    build_market_snapshot,
+    validate_market_quote,
+)
+from eventlens.runtime import (
+    IntradayEventRuntime,
+    ShadowRunner,
+    SQLiteRuntimeStore,
+)
 from eventlens.sources.wallstreetcn import WallStreetCNFilter
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
@@ -30,26 +44,46 @@ from eventlens.trading.execution import (
     ShadowCostModel,
     SQLiteShadowLedger,
 )
-from eventlens.trading.portfolio import DeterministicTargetValidator
-from eventlens.trading.risk import DeterministicHardRiskEngine, RiskPolicy
+from eventlens.trading.portfolio import (
+    DeterministicTargetValidator,
+    classify_exposure_change,
+)
+from eventlens.trading.risk import (
+    DeterministicHardRiskEngine,
+    RiskPolicy,
+    is_in_daily_close_window,
+)
 
 T0 = datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC)
+SESSION = UUID("22222222-3333-4444-5555-666666666666")
 
 
-class FakeJSONClient:
+class SequencedJSONClient:
     provider = "deepseek"
     model = "deepseek-flash"
 
-    def __init__(self, proposal: SinglePassProposal) -> None:
-        self.proposal = proposal
+    def __init__(
+        self,
+        *proposals: SinglePassProposal | Exception,
+        on_call=None,
+    ) -> None:
+        self.items = list(proposals)
+        self.on_call = on_call
+        self.calls = 0
 
     async def complete_json(self, *, system: str, user: str) -> ModelResponse:
+        self.calls += 1
+        if self.on_call is not None:
+            await self.on_call(self.calls, user)
+        item = self.items.pop(0)
+        if isinstance(item, Exception):
+            raise item
         return ModelResponse(
-            content=self.proposal.model_dump_json(),
+            content=item.model_dump_json(),
             input_tokens=150,
             output_tokens=60,
             model_id="deepseek-flash",
-            system_fingerprint="test",
+            system_fingerprint="fp-test",
         )
 
 
@@ -58,19 +92,31 @@ def make_quote(
     bid: str = "1.08500",
     ask: str = "1.08510",
     received_at: datetime = T0,
+    source_at: datetime | None = None,
+    bridge_at: datetime | None = None,
+    available_at: datetime | None = None,
+    basis: str = "live_poll",
 ) -> Quote:
+    src = source_at or (received_at - timedelta(milliseconds=30))
+    brg = bridge_at or (received_at - timedelta(milliseconds=15))
+    avl = available_at or received_at
     return Quote(
         instrument="EUR/USD",
+        source_at=src,
+        bridge_at=brg,
+        received_at=received_at,
+        available_at=avl,
+        source_provider="ctrader_algo",
+        basis=basis,  # type: ignore[arg-type]
         bid=Decimal(bid),
         ask=Decimal(ask),
-        received_at=received_at,
     )
 
 
 def make_market(*, quote: Quote | None = None, as_of: datetime = T0) -> MarketSnapshot:
     q = quote or make_quote(received_at=as_of)
     return MarketSnapshot(
-        snapshot_id="market-1",
+        snapshot_id=f"market:{as_of.isoformat()}",
         as_of=as_of,
         quotes=(q,),
     )
@@ -81,6 +127,7 @@ def make_thesis(
     thesis_id: str = "t-eurusd-1",
     status: str = "active",
     instruments: tuple[str, ...] = ("EUR/USD",),
+    updated_at: datetime = T0,
 ) -> Thesis:
     return Thesis(
         thesis_id=thesis_id,
@@ -91,24 +138,29 @@ def make_thesis(
         supporting_event_ids=("ev-1",),
         invalidation_conditions=("ECB walks back guidance",),
         confidence=0.75,
-        created_at=T0,
-        updated_at=T0,
-        review_at=T0 + timedelta(hours=4),
+        created_at=updated_at,
+        updated_at=updated_at,
+        review_at=updated_at + timedelta(hours=4),
     )
 
 
 def make_decision(
     *,
+    decision_id: str = "decision-1",
+    event_id: str = "ev-1",
     snapshot_id: str = "shadow-snapshot-0",
     weight: str = "0.20",
     thesis_id: str = "t-eurusd-1",
+    portfolio_action: str = "SET_TARGET",
     started_at: datetime = T0,
     completed_at: datetime = T0 + timedelta(seconds=1),
     valid_until: datetime = T0 + timedelta(seconds=60),
 ) -> AgentDecision:
-    thesis = make_thesis(thesis_id=thesis_id)
+    thesis = make_thesis(thesis_id=thesis_id, updated_at=completed_at).model_copy(
+        update={"supporting_event_ids": (event_id,)}
+    )
     target = TargetPortfolio(
-        target_id="target-1",
+        target_id=f"target-{decision_id}",
         based_on_snapshot_id=snapshot_id,
         positions=(
             TargetPosition(
@@ -117,16 +169,16 @@ def make_decision(
                 thesis_ids=(thesis_id,),
             ),
         ),
-        rationale="Long EUR/USD on ECB hawkish guidance.",
+        rationale="EUR/USD target exposure.",
     )
     return AgentDecision(
-        decision_id="decision-1",
-        event_id="ev-1",
+        decision_id=decision_id,
+        event_id=event_id,
         based_on_memory_version=0,
         based_on_snapshot_id=snapshot_id,
         provider="deepseek",
         model_version="deepseek-flash",
-        prompt_version="single-pass-agent-v1",
+        prompt_version="single-pass-agent-v2",
         started_at=started_at,
         completed_at=completed_at,
         valid_until=valid_until,
@@ -138,264 +190,1053 @@ def make_decision(
             ),
         ),
         target=target,
-        rationale="Create thesis and open 20% long EUR/USD target.",
+        portfolio_action=portfolio_action,  # type: ignore[arg-type]
+        rationale="Create thesis and set EUR/USD target.",
     )
 
 
-def test_target_validator_enforces_active_thesis_and_instrument_bounds():
-    validator = DeterministicTargetValidator(max_abs_weight=Decimal("0.5"))
-    portfolio = PortfolioSnapshot(
-        snapshot_id="shadow-snapshot-0",
-        as_of=T0,
-        base_currency="USD",
-        equity=Decimal("10000"),
-    )
-    active_theses = {"t-eurusd-1": make_thesis()}
-    decision = make_decision()
-    assert decision.target is not None
-    validator.validate(decision.target, portfolio, theses=active_theses, as_of=T0)
-
-    # Stale snapshot id rejected
-    stale_target = decision.target.model_copy(update={"based_on_snapshot_id": "other-snap"})
-    with pytest.raises(ValueError, match="stale or mismatched portfolio snapshot"):
-        validator.validate(stale_target, portfolio, theses=active_theses, as_of=T0)
-
-    # Excessive weight rejected
-    heavy_target = TargetPortfolio(
-        target_id="target-heavy",
-        based_on_snapshot_id="shadow-snapshot-0",
-        positions=(
-            TargetPosition(
-                instrument="EUR/USD",
-                weight=Decimal("0.75"),
-                thesis_ids=("t-eurusd-1",),
-            ),
+def test_unified_quote_quality_and_zero_spread_rejection(tmp_path):
+    """Section 二: Preserve full quote clocks, base freshness on source_at, and reject zero spread by default."""
+    qstore = QuoteStore(tmp_path / "quotes.sqlite", clock=lambda: T0)
+    qstore.start(
+        BridgeStart(
+            version=1,
+            kind="start",
+            session_id=SESSION,
+            account_mode="demo",
+            running_mode="realtime",
+            symbol="EURUSD",
+            started_at=T0 - timedelta(seconds=5),
+            sample_interval_ms=1000,
+            duration_seconds=60,
         ),
-        rationale="Too large.",
+        T0 - timedelta(seconds=5),
+        basis="live_poll",
     )
-    with pytest.raises(ValueError, match="exceeds bound"):
-        validator.validate(heavy_target, portfolio, theses=active_theses, as_of=T0)
-
-    # Inactive thesis rejected
-    inactive_theses = {"t-eurusd-1": make_thesis(status="invalidated")}
-    with pytest.raises(ValueError, match="inactive, expired or unrelated thesis"):
-        validator.validate(decision.target, portfolio, theses=inactive_theses, as_of=T0)
-
-
-def test_hard_risk_engine_approves_valid_and_rejects_violations():
-    policy = RiskPolicy(
-        max_position_weight=Decimal("0.25"),
-        max_gross_weight=Decimal("0.25"),
-        max_spread_pips=Decimal("1.5"),
-        max_quote_age_ms=2000,
+    qstore.record(
+        BridgeQuote(
+            version=1,
+            kind="quote",
+            session_id=SESSION,
+            sequence=1,
+            symbol="EURUSD",
+            source_at=T0 - timedelta(milliseconds=350),
+            bridge_at=T0 - timedelta(milliseconds=200),
+            bid=Decimal("1.08500"),
+            ask=Decimal("1.08510"),
+        ),
+        T0 - timedelta(milliseconds=100),
+        '{"kind":"quote"}',
     )
-    engine = DeterministicHardRiskEngine(policy=policy, clock=lambda: T0 + timedelta(seconds=1))
-    portfolio = PortfolioSnapshot(
-        snapshot_id="shadow-snapshot-0",
-        as_of=T0,
-        base_currency="USD",
-        equity=Decimal("10000"),
+    snap = build_market_snapshot(qstore, T0)
+    q = snap.quotes[0]
+    assert q.source_at == T0 - timedelta(milliseconds=350)
+    assert q.bridge_at == T0 - timedelta(milliseconds=200)
+    assert q.received_at == T0 - timedelta(milliseconds=100)
+    assert q.available_at == T0
+    assert q.source_provider == "ctrader_algo"
+    assert q.basis == "live_poll"
+    assert q.has_verified_provenance is True
+    assert q.receipt_lag_ms == pytest.approx(250.0)
+    qstore.close()
+
+    policy = QuoteQualityPolicy()
+    assert policy.allow_zero_spread is False
+    valid_res = validate_market_quote(snap, as_of=T0, policy=policy)
+    assert valid_res.valid is True
+    assert valid_res.source_age_ms == pytest.approx(350.0)
+
+    # Fresh received_at (100ms) but stale source_at (2500ms > 2000ms) is rejected!
+    stale_source_quote = make_quote(
+        received_at=T0 - timedelta(milliseconds=100),
+        source_at=T0 - timedelta(milliseconds=2500),
+        bridge_at=T0 - timedelta(milliseconds=200),
     )
-    market = make_market(as_of=T0 + timedelta(seconds=1))
-    decision = make_decision()
-
-    approved = asyncio.run(engine.assess(decision, portfolio, market))
-    assert approved.outcome == "approve"
-    assert approved.reasons == ("all_hard_risk_checks_passed",)
-
-    # Wide spread rejected
-    wide_quote = make_quote(bid="1.08500", ask="1.08530", received_at=T0 + timedelta(seconds=1))
-    wide_market = make_market(quote=wide_quote, as_of=T0 + timedelta(seconds=1))
-    rejected_spread = asyncio.run(engine.assess(decision, portfolio, wide_market))
-    assert rejected_spread.outcome == "reject"
-    assert "spread_limit_exceeded" in rejected_spread.reasons
-
-    # Kill switch rejected
-    kill_engine = DeterministicHardRiskEngine(
-        policy=policy.model_copy(update={"kill_switch_active": True}),
-        clock=lambda: T0 + timedelta(seconds=1),
+    stale_res = validate_market_quote(
+        make_market(quote=stale_source_quote, as_of=T0), as_of=T0, policy=policy
     )
-    rejected_kill = asyncio.run(kill_engine.assess(decision, portfolio, market))
-    assert rejected_kill.outcome == "reject"
-    assert "kill_switch_active" in rejected_kill.reasons
+    assert stale_res.valid is False
+    assert stale_res.reason == "stale_market_quote"
 
-    # Pending order rejected
-    busy_portfolio = portfolio.model_copy(update={"pending_order_ids": ("exec-1",)})
-    rejected_pending = asyncio.run(engine.assess(decision, busy_portfolio, market))
-    assert rejected_pending.outcome == "reject"
-    assert "pending_orders_outstanding" in rejected_pending.reasons
+    # Zero spread is rejected by default across the unified validator and ShadowCostModel
+    zero_quote = make_quote(bid="1.08500", ask="1.08500", received_at=T0)
+    zero_res = validate_market_quote(
+        make_market(quote=zero_quote, as_of=T0), as_of=T0, policy=policy
+    )
+    assert zero_res.valid is False
+    assert zero_res.reason == "zero_spread_rejected"
+
+    cost = ShadowCostModel()
+    assert cost.spread_floor_pips == Decimal("0")
+    with pytest.raises(ValueError, match="Zero-spread quote cannot be filled"):
+        cost.execution_price(zero_quote, buy=True)
+    with pytest.raises(ValueError, match="allow_synthetic_spread_floor=True"):
+        ShadowCostModel(spread_floor_pips=Decimal("0.1"), allow_synthetic_spread_floor=False)
 
 
-def test_sqlite_shadow_ledger_separates_receipts_from_fills_and_runs_protective_exits(tmp_path):
-    now = T0 + timedelta(seconds=2)
+def test_ignore_and_hold_never_liquidate_open_position_and_close_requires_thesis(tmp_path):
+    """Section 五: IGNORE_EVENT and HOLD keep open positions; CLOSE requires open position & explicit thesis."""
+    now = T0
+    memory = SQLiteThesisMemory(tmp_path / "mem.sqlite", clock=lambda: now, allow_targets=True)
     ledger = SQLiteShadowLedger(
         tmp_path / "shadow.sqlite",
-        initial_cash_usd=Decimal("10000"),
-        cost_model=ShadowCostModel(),
+        exit_policy=ProtectiveExitPolicy(max_position_loss_usd=Decimal("30")),
+        clock=lambda: now,
+    )
+
+    open_prop = SinglePassProposal(
+        memory_action="create",
+        thesis_id=None,
+        status="active",
+        narrative="ECB hawkish hike supports EUR/USD.",
+        instruments=("EUR/USD",),
+        invalidation_conditions=("ECB turns dovish",),
+        confidence=0.8,
+        evidence_role="support",
+        evidence_quote="ECB signals rate hike",
+        portfolio_action="SET_TARGET",
+        target_direction="long",
+        target_weight=Decimal("0.20"),
+        target_thesis_ids=("__current__",),
+        rationale="Open 20% long EUR/USD.",
+    )
+    ignore_prop = SinglePassProposal(
+        memory_action="ignore",
+        portfolio_action="IGNORE_EVENT",
+        target_direction="flat",
+        target_weight=Decimal("0"),
+        target_thesis_ids=(),
+        rationale="Irrelevant noise; ignore event.",
+    )
+    hold_prop = SinglePassProposal(
+        memory_action="ignore",
+        portfolio_action="HOLD",
+        target_direction="flat",
+        target_weight=Decimal("0"),
+        target_thesis_ids=(),
+        rationale="Uncertain follow-up; hold existing EUR/USD position.",
+    )
+    client = SequencedJSONClient(open_prop, ignore_prop, hold_prop)
+    agent = SinglePassTradingAgent(client, clock=lambda: now)
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: make_market(as_of=ts),
+        agent=agent,
+        shadow_executor=ledger,
+        clock=lambda: now,
+    )
+    try:
+        # 1. Open position on Event 1
+        ev1 = Event(
+            event_id="ev-open",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:1",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="European Central Bank: ECB signals rate hike for EUR/USD.",
+        )
+        r1 = asyncio.run(runtime.run_cycle(ev1))
+        assert r1.status == "shadow_recorded"
+        now = T0 + timedelta(seconds=1)
+        ledger.clock = lambda: now
+        fills = ledger.fill_pending(make_market(as_of=now))
+        assert len(fills) == 1
+        held_qty = fills[0].new_quantity
+        assert held_qty > Decimal("0")
+
+        # 2. Event 2 returns IGNORE_EVENT while holding position -> does NOT close position!
+        now = T0 + timedelta(seconds=5)
+        ev2 = Event(
+            event_id="ev-ignore",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:2",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="Minor commentary on EUR/USD market session.",
+        )
+        r2 = asyncio.run(runtime.run_cycle(ev2))
+        assert r2.status == "no_target"
+        assert r2.decision is not None and r2.decision.target is None
+        assert ledger.snapshot_sync(market=make_market(as_of=now)).positions[0].quantity == held_qty
+
+        # 3. Event 3 returns HOLD while holding position -> does NOT close position!
+        now = T0 + timedelta(seconds=10)
+        ev3 = Event(
+            event_id="ev-hold",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:3",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="Mixed macro commentary on EUR/USD.",
+        )
+        r3 = asyncio.run(runtime.run_cycle(ev3))
+        assert r3.status == "no_target"
+        assert r3.decision is not None and r3.decision.target is None
+        assert ledger.snapshot_sync(market=make_market(as_of=now)).positions[0].quantity == held_qty
+
+        # 4. CLOSE without target_thesis_ids is rejected by schema
+        with pytest.raises(ValueError, match="CLOSE requires explicit target_thesis_ids"):
+            SinglePassProposal(
+                memory_action="ignore",
+                evidence_quote="ECB signals",
+                portfolio_action="CLOSE",
+                target_direction="flat",
+                target_weight=Decimal("0"),
+                target_thesis_ids=(),
+                rationale="Try close without thesis",
+            )
+    finally:
+        ledger.close()
+
+
+def test_post_llm_market_refresh_and_inference_state_change_invalidation(tmp_path):
+    """Section 三: Refresh market/portfolio after >2s LLM call; reject if portfolio changed during inference."""
+    now = T0
+    memory = SQLiteThesisMemory(tmp_path / "mem.sqlite", clock=lambda: now, allow_targets=True)
+    ledger = SQLiteShadowLedger(
+        tmp_path / "shadow.sqlite",
+        exit_policy=ProtectiveExitPolicy(max_position_loss_usd=Decimal("30")),
+        clock=lambda: now,
+    )
+
+    open_prop = SinglePassProposal(
+        memory_action="create",
+        thesis_id=None,
+        status="active",
+        narrative="ECB rate hike supports EUR/USD.",
+        instruments=("EUR/USD",),
+        invalidation_conditions=("ECB pauses",),
+        confidence=0.8,
+        evidence_role="support",
+        evidence_quote="ECB Governing Council signals a 25 bps rate hike",
+        portfolio_action="SET_TARGET",
+        target_direction="long",
+        target_weight=Decimal("0.20"),
+        target_thesis_ids=("__current__",),
+        rationale="Open 20% long EUR/USD.",
+    )
+    add_prop = SinglePassProposal(
+        memory_action="create",
+        thesis_id=None,
+        status="active",
+        narrative="Follow-up ECB comment adds conviction.",
+        instruments=("EUR/USD",),
+        invalidation_conditions=("ECB pauses",),
+        confidence=0.85,
+        evidence_role="support",
+        evidence_quote="Lagarde confirms further tightening",
+        portfolio_action="SET_TARGET",
+        target_direction="long",
+        target_weight=Decimal("0.25"),
+        target_thesis_ids=("__current__",),
+        rationale="Increase long EUR/USD to 25%.",
+    )
+
+    async def simulate_slow_llm(call_num: int, user_json: str) -> None:
+        nonlocal now
+        # Advance clock by 4.5 seconds during LLM call (> 2.0s max_quote_age_ms!)
+        now = now + timedelta(milliseconds=4500)
+        if call_num == 2:
+            # During the second LLM call, a protective exit flattens the open position!
+            crash_quote = make_quote(bid="1.05000", ask="1.05010", received_at=now)
+            ledger.evaluate_protective_exits(make_market(quote=crash_quote, as_of=now))
+
+    client = SequencedJSONClient(open_prop, add_prop, on_call=simulate_slow_llm)
+    agent = SinglePassTradingAgent(client, clock=lambda: now)
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: make_market(
+            quote=make_quote(received_at=ts - timedelta(milliseconds=200)),
+            as_of=ts,
+        ),
+        agent=agent,
+        risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
+        shadow_executor=ledger,
+        clock=lambda: now,
+    )
+    try:
+        # 1. Event 1: LLM takes 4.5s. Pre-LLM quote is now 4.7s old, but post-LLM refresh
+        # fetches a fresh quote (0.2s old) and preserves pre-LLM context in runtime_events!
+        ev1 = Event(
+            event_id="ev-slow-1",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:slow1",
+            source_timestamp=T0,
+            received_timestamp=T0,
+            raw_text="ECB Governing Council signals a 25 bps rate hike for EUR/USD.",
+        )
+        r1 = asyncio.run(runtime.run_cycle(ev1))
+        assert r1.status == "shadow_recorded"
+        assert runtime.state_store is not None
+        saved_row = runtime.state_store.get_event_state("ev-slow-1")
+        assert saved_row is not None and saved_row["context_json"] is not None
+        saved_ctx = json.loads(saved_row["context_json"])
+        assert datetime.fromisoformat(saved_ctx["as_of"]) == T0
+
+        # Fill Event 1 order so position is open at shadow-snapshot-1
+        now = now + timedelta(seconds=1)
+        fills = ledger.fill_pending(make_market(quote=make_quote(received_at=now), as_of=now))
+        assert len(fills) == 1
+
+        # 2. Event 2: During the 4.5s LLM inference, protective stop-loss fires and changes
+        # portfolio state from shadow-snapshot-1 (long) to shadow-snapshot-2 (flat).
+        # Post-LLM refresh detects the state change and rejects the stale target!
+        ev2 = Event(
+            event_id="ev-slow-2",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:slow2",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="Lagarde confirms further tightening for EUR/USD.",
+        )
+        r2 = asyncio.run(runtime.run_cycle(ev2))
+        assert r2.status == "target_rejected"
+        assert r2.reason == "portfolio_state_changed_during_inference"
+    finally:
+        ledger.close()
+
+
+def test_pending_order_expiry_and_kill_switch_reverification_at_fill(tmp_path):
+    """Section 四: Expired orders become 'expired' (not filled=1); kill switch blocks entry at fill."""
+    now = T0 + timedelta(seconds=1)
+    ledger = SQLiteShadowLedger(
+        tmp_path / "shadow.sqlite",
+        exit_policy=ProtectiveExitPolicy(max_position_loss_usd=Decimal("30")),
+        clock=lambda: now,
+    )
+    try:
+        # 1. Record an order that expires in 10 seconds
+        snap0 = ledger.snapshot_sync()
+        dec1 = make_decision(
+            decision_id="dec-exp",
+            event_id="ev-exp",
+            snapshot_id=snap0.snapshot_id,
+            started_at=T0,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=10),
+        )
+        engine = DeterministicHardRiskEngine(clock=lambda: now)
+        assess1 = asyncio.run(engine.assess(dec1, snap0, make_market(as_of=now)))
+        rcpt1 = ledger.record_sync(dec1, assess1)
+        assert rcpt1.status == "recorded"
+
+        # Advance clock past decision.valid_until (15s later) and provide a valid quote
+        now = now + timedelta(seconds=15)
+        fills = ledger.fill_pending(make_market(as_of=now))
+        assert fills == ()
+        rep = ledger.report(market=make_market(as_of=now))
+        assert rep["order_status_counts"].get("expired") == 1
+        assert rep["order_status_counts"].get("filled", 0) == 0
+        assert rep["receipts"][0]["order_status"] == "expired"
+        assert rep["receipts"][0]["terminal_reason"] == "decision_expired_before_fill"
+
+        # 2. Record a second order while kill switch is False, then enable kill switch before fill!
+        snap1 = ledger.snapshot_sync()
+        dec2 = make_decision(
+            decision_id="dec-ks",
+            event_id="ev-ks",
+            snapshot_id=snap1.snapshot_id,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess2 = asyncio.run(engine.assess(dec2, snap1, make_market(as_of=now)))
+        rcpt2 = ledger.record_sync(dec2, assess2)
+        assert rcpt2.status == "recorded"
+
+        now = now + timedelta(seconds=1)
+        ks_policy = RiskPolicy(kill_switch_active=True)
+        fills_ks = ledger.fill_pending(make_market(as_of=now), risk_policy=ks_policy)
+        assert fills_ks == ()
+        rep2 = ledger.report(market=make_market(as_of=now))
+        assert rep2["order_status_counts"].get("rejected") == 1
+        assert rep2["receipts"][1]["order_status"] == "rejected"
+        assert rep2["receipts"][1]["terminal_reason"] == "kill_switch_active_at_fill"
+    finally:
+        ledger.close()
+
+
+def test_protective_exit_defers_on_bad_quotes_and_executes_when_valid_quote_returns(tmp_path):
+    """Section 二 & 六: When protective exit lacks a valid quote, persist pending_exit_reason and fault."""
+    now = T0 + timedelta(seconds=1)
+    ledger = SQLiteShadowLedger(
+        tmp_path / "shadow.sqlite",
         exit_policy=ProtectiveExitPolicy(
-            max_holding_seconds=1800,
-            max_position_loss_usd=Decimal("15.00"),
-            daily_close_utc_hour=21,
+            max_holding_seconds=60, max_position_loss_usd=Decimal("20")
         ),
         clock=lambda: now,
     )
     try:
-        initial_snap = ledger.snapshot_sync()
-        assert initial_snap.snapshot_id == "shadow-snapshot-0"
-        assert initial_snap.positions == ()
-
-        market = make_market(as_of=now)
-        decision = make_decision(snapshot_id=initial_snap.snapshot_id)
+        snap0 = ledger.snapshot_sync()
+        dec = make_decision(snapshot_id=snap0.snapshot_id, completed_at=now)
         engine = DeterministicHardRiskEngine(clock=lambda: now)
-        assessment = asyncio.run(engine.assess(decision, initial_snap, market))
-        assert assessment.outcome == "approve"
+        assess = asyncio.run(engine.assess(dec, snap0, make_market(as_of=now)))
+        ledger.record_sync(dec, assess)
 
-        receipt = ledger.record_sync(decision, assessment)
-        assert receipt.status == "recorded"
-        # Deduplication returns identical receipt
-        assert ledger.record_sync(decision, assessment) == receipt
+        now = now + timedelta(seconds=1)
+        fills = ledger.fill_pending(make_market(as_of=now))
+        assert len(fills) == 1
+        open_qty = fills[0].new_quantity
 
-        # Recording a receipt does NOT immediately change positions; it adds a pending order
-        pending_snap = ledger.snapshot_sync()
-        assert pending_snap.positions == ()
-        assert pending_snap.pending_order_ids == (receipt.execution_id,)
-
-        # Quote older than recorded_at cannot causally fill the order
-        stale_fill_market = make_market(
-            quote=make_quote(received_at=now - timedelta(seconds=1)),
+        # Hold horizon expires (70s > 60s), but quotes are bad (missing, stale, zero-spread, wide-spread)
+        now = now + timedelta(seconds=70)
+        # (a) Missing market
+        assert ledger.evaluate_protective_exits(None) == ()
+        # (b) Zero-spread quote
+        zero_mkt = make_market(
+            quote=make_quote(bid="1.08400", ask="1.08400", received_at=now), as_of=now
+        )
+        assert ledger.evaluate_protective_exits(zero_mkt) == ()
+        # (c) Stale quote
+        stale_mkt = make_market(
+            quote=make_quote(
+                bid="1.08400",
+                ask="1.08410",
+                received_at=now - timedelta(seconds=5),
+                source_at=now - timedelta(seconds=5),
+                bridge_at=now - timedelta(seconds=5),
+            ),
             as_of=now,
         )
-        assert ledger.fill_pending(stale_fill_market) == ()
+        assert ledger.evaluate_protective_exits(stale_mkt) == ()
 
-        # Fresh quote at or after recorded_at fills the pending order
-        fill_time = now + timedelta(seconds=1)
-        ledger.clock = lambda: fill_time
-        fill_market = make_market(
-            quote=make_quote(bid="1.08500", ask="1.08510", received_at=fill_time),
-            as_of=fill_time,
+        # Position is STILL open (not faked as closed), and pending_exit_reason is persisted!
+        snap_deferred = ledger.snapshot_sync(market=zero_mkt)
+        assert snap_deferred.positions[0].quantity == open_qty
+        assert snap_deferred.pending_exit_reason == "protective_max_holding_horizon"
+        assert snap_deferred.valuation_valid is False
+
+        # While pending_exit_reason is set, risk engine blocks any new risk-increasing proposal
+        add_dec = make_decision(
+            decision_id="dec-add",
+            event_id="ev-add",
+            snapshot_id=snap_deferred.snapshot_id,
+            weight="0.25",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
         )
-        fills = ledger.fill_pending(fill_market)
-        assert len(fills) == 1
-        fill = fills[0]
-        assert fill.kind == "target_fill"
-        assert fill.delta_quantity > Decimal("0")
-        assert fill.commission_usd > Decimal("0")
-
-        post_fill_snap = ledger.snapshot_sync(market=fill_market)
-        assert post_fill_snap.pending_order_ids == ()
-        assert len(post_fill_snap.positions) == 1
-        assert post_fill_snap.positions[0].quantity == fill.new_quantity
-
-        # Protective stop-loss triggers when price drops sharply without calling any LLM
-        crash_time = fill_time + timedelta(seconds=30)
-        ledger.clock = lambda: crash_time
-        crash_market = make_market(
-            quote=make_quote(bid="1.06000", ask="1.06010", received_at=crash_time),
-            as_of=crash_time,
+        valid_now_mkt = make_market(
+            quote=make_quote(bid="1.08400", ask="1.08410", received_at=now), as_of=now
         )
-        exit_fills = ledger.evaluate_protective_exits(crash_market)
+        reject_add = asyncio.run(engine.assess(add_dec, snap_deferred, valid_now_mkt))
+        assert reject_add.outcome == "reject"
+        assert "protective_exit_pending" in reject_add.reasons
+
+        # Once valid quote arrives, evaluate_protective_exits executes the deferred exit and clears pending_exit_reason!
+        exit_fills = ledger.evaluate_protective_exits(valid_now_mkt)
         assert len(exit_fills) == 1
         assert exit_fills[0].kind == "protective_exit"
-        assert exit_fills[0].reason == "protective_stop_loss"
+        assert exit_fills[0].reason == "protective_max_holding_horizon"
         assert exit_fills[0].new_quantity == Decimal("0")
-        assert exit_fills[0].realized_pnl_usd < Decimal("0")
 
-        flat_snap = ledger.snapshot_sync(market=crash_market)
-        assert flat_snap.positions == ()
-        report = ledger.report(market=crash_market)
-        assert report["receipt_count"] == 1
-        assert report["fill_count"] == 2
-        assert report["execution_authorized"] is False
+        snap_after = ledger.snapshot_sync(market=valid_now_mkt)
+        assert snap_after.positions == ()
+        assert snap_after.pending_exit_reason is None
     finally:
         ledger.close()
 
 
-def test_intraday_event_runtime_end_to_end_pipeline(tmp_path):
-    db_path = tmp_path / "memory.sqlite"
-    memory = SQLiteThesisMemory(
-        db_path, clock=lambda: T0 + timedelta(seconds=1), allow_targets=True
-    )
-    ledger = SQLiteShadowLedger(tmp_path / "shadow.sqlite", clock=lambda: T0 + timedelta(seconds=1))
-    audit = InMemoryAuditSink()
+def test_timezone_aware_daily_close_dst_missed_cutoff_and_daily_loss_persistence(tmp_path):
+    """Section 六: DST-aware daily close window, missed cutoff recovery, and persistent daily loss limit."""
+    # 1. Verify EDT (summer, UTC-4: 16:55 NY == 20:55 UTC) vs EST (winter, UTC-5: 16:55 NY == 21:55 UTC)
+    summer_ts = datetime(2026, 7, 15, 20, 56, 0, tzinfo=UTC)
+    winter_ts = datetime(2026, 1, 15, 20, 56, 0, tzinfo=UTC)
+    winter_cutoff_ts = datetime(2026, 1, 15, 21, 56, 0, tzinfo=UTC)
+    assert is_in_daily_close_window(summer_ts) is True
+    assert is_in_daily_close_window(winter_ts) is False
+    assert is_in_daily_close_window(winter_cutoff_ts) is True
 
-    proposal = SinglePassProposal(
+    # 2. Open position before 16:55 NY (20:55 UTC in EDT), miss the cutoff window while offline,
+    # and recover at 00:30 UTC (after midnight UTC!). Position must still close via protective_daily_close!
+    open_time = datetime(2026, 7, 15, 19, 0, 0, tzinfo=UTC)
+    now = open_time
+    db_file = tmp_path / "daily_shadow.sqlite"
+    ledger = SQLiteShadowLedger(
+        db_file,
+        exit_policy=ProtectiveExitPolicy(
+            max_holding_seconds=86400,
+            max_position_loss_usd=Decimal("500"),
+            max_daily_loss_usd=Decimal("50"),
+        ),
+        risk_policy=RiskPolicy(max_daily_loss_usd=Decimal("50")),
+        clock=lambda: now,
+    )
+    try:
+        snap0 = ledger.snapshot_sync()
+        dec = make_decision(
+            snapshot_id=snap0.snapshot_id,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        engine = DeterministicHardRiskEngine(
+            policy=RiskPolicy(max_daily_loss_usd=Decimal("50")), clock=lambda: now
+        )
+        assess = asyncio.run(engine.assess(dec, snap0, make_market(as_of=now)))
+        ledger.record_sync(dec, assess)
+        now = open_time + timedelta(seconds=1)
+        assert len(ledger.fill_pending(make_market(as_of=now))) == 1
+
+        # Jump past midnight UTC (00:30 UTC next calendar day, after missed 20:55 UTC close!)
+        now = datetime(2026, 7, 16, 0, 30, 0, tzinfo=UTC)
+        missed_fills = ledger.evaluate_protective_exits(make_market(as_of=now))
+        assert len(missed_fills) == 1
+        assert missed_fills[0].reason == "protective_daily_close"
+        assert missed_fills[0].new_quantity == Decimal("0")
+
+        # 3. Trigger daily loss limit (> $50 loss) and verify it persists across ledger restart!
+        snap1 = ledger.snapshot_sync(market=make_market(as_of=now))
+        dec2 = make_decision(
+            decision_id="dec-loss",
+            event_id="ev-loss",
+            snapshot_id=snap1.snapshot_id,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess2 = asyncio.run(engine.assess(dec2, snap1, make_market(as_of=now)))
+        ledger.record_sync(dec2, assess2)
+        now = now + timedelta(seconds=1)
+        assert len(ledger.fill_pending(make_market(as_of=now))) == 1
+
+        # Price drops from 1.08510 to 1.05000 -> unrealized loss > $50 triggers daily loss limit!
+        now = now + timedelta(seconds=10)
+        drop_mkt = make_market(
+            quote=make_quote(bid="1.05000", ask="1.05010", received_at=now), as_of=now
+        )
+        loss_exits = ledger.evaluate_protective_exits(drop_mkt)
+        assert len(loss_exits) == 1
+        assert loss_exits[0].new_quantity == Decimal("0")
+    finally:
+        ledger.close()
+
+    # Reopen ledger on the same file (simulating process restart on the same trading day)
+    reopened = SQLiteShadowLedger(
+        db_file,
+        exit_policy=ProtectiveExitPolicy(max_daily_loss_usd=Decimal("50")),
+        risk_policy=RiskPolicy(max_daily_loss_usd=Decimal("50")),
+        clock=lambda: now,
+    )
+    try:
+        reopened_snap = reopened.snapshot_sync(market=make_market(as_of=now))
+        assert reopened_snap.daily_loss_limit_triggered is True
+        # New risk-increasing decision on the same trading day is rejected by HardRiskEngine!
+        dec3 = make_decision(
+            decision_id="dec-after-restart",
+            event_id="ev-after-restart",
+            snapshot_id=reopened_snap.snapshot_id,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        engine_reopened = DeterministicHardRiskEngine(
+            policy=RiskPolicy(max_daily_loss_usd=Decimal("50")), clock=lambda: now
+        )
+        assess3 = asyncio.run(engine_reopened.assess(dec3, reopened_snap, make_market(as_of=now)))
+        assert assess3.outcome == "reject"
+        assert "daily_loss_limit_exceeded" in assess3.reasons
+    finally:
+        reopened.close()
+
+
+def test_crash_after_memory_commit_recovers_and_transient_failure_retries(tmp_path):
+    """Section 七: Transient failure retries without _seen lockup; crash after memory.commit recovers."""
+    now = T0
+    mem_path = tmp_path / "mem.sqlite"
+    shd_path = tmp_path / "shadow.sqlite"
+    memory = SQLiteThesisMemory(mem_path, clock=lambda: now, allow_targets=True)
+    ledger = SQLiteShadowLedger(shd_path, clock=lambda: now)
+    wscn_filter = WallStreetCNFilter(clock=lambda: now)
+
+    good_prop = SinglePassProposal(
         memory_action="create",
         thesis_id=None,
         status="active",
-        narrative="ECB rate hike guidance strengthens EUR/USD.",
+        narrative="ECB rate hike supports EUR/USD.",
         instruments=("EUR/USD",),
-        invalidation_conditions=("ECB pauses tightening",),
+        invalidation_conditions=("ECB pauses",),
         confidence=0.8,
         evidence_role="support",
         evidence_quote="ECB Governing Council signals a 25 bps rate hike",
+        portfolio_action="SET_TARGET",
         target_direction="long",
         target_weight=Decimal("0.20"),
         target_thesis_ids=("__current__",),
-        rationale="ECB signals rate hike; initiate 20% EUR/USD long exposure.",
+        rationale="Open 20% long EUR/USD.",
     )
-    agent = SinglePassTradingAgent(
-        FakeJSONClient(proposal),
-        clock=lambda: T0 + timedelta(seconds=1),
-    )
-    wscn_filter = WallStreetCNFilter(clock=lambda: T0 + timedelta(seconds=1))
+    # First call raises ConnectionError; second call succeeds
+    client = SequencedJSONClient(ConnectionError("temporary LLM outage"), good_prop)
+    agent = SinglePassTradingAgent(client, clock=lambda: now)
     runtime = IntradayEventRuntime(
         memory=memory,
         portfolio_state=ledger,
-        market_provider=lambda now: make_market(as_of=now),
+        market_provider=lambda ts: make_market(as_of=ts),
         agent=agent,
-        target_validator=DeterministicTargetValidator(),
-        risk_engine=DeterministicHardRiskEngine(clock=lambda: T0 + timedelta(seconds=1)),
+        risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
         shadow_executor=ledger,
-        audit_sink=audit,
         event_filter=wscn_filter,
-        clock=lambda: T0 + timedelta(seconds=1),
+        clock=lambda: now,
     )
-
     try:
-        # 1. Irrelevant equity noise is persisted but filtered out before LLM
-        noise_event = Event(
-            event_id="ev-noise",
+        ev = Event(
+            event_id="ev-retry-1",
             source="wallstreetcn",
             source_type="news",
-            source_reference="wallstreetcn:news:1",
-            source_timestamp=T0,
-            received_timestamp=T0,
-            raw_text="某A股上市公司发布季度财报。",
-        )
-        noise_res = asyncio.run(runtime.run_cycle(noise_event))
-        assert noise_res.status == "filtered_out"
-        assert noise_res.decision is None
-
-        # 2. Relevant ECB macro headline runs full pipeline through risk and shadow ledger
-        ecb_event = Event(
-            event_id="ev-ecb",
-            source="wallstreetcn",
-            source_type="news",
-            source_reference="wallstreetcn:news:2",
-            source_timestamp=T0,
-            received_timestamp=T0,
+            source_reference="wscn:retry1",
+            source_timestamp=now,
+            received_timestamp=now,
             raw_text="European Central Bank: ECB Governing Council signals a 25 bps rate hike for EUR/USD.",
         )
-        res = asyncio.run(runtime.run_cycle(ecb_event))
-        assert res.status == "shadow_recorded"
-        assert res.committed_memory_version == 1
-        assert res.assessment is not None and res.assessment.outcome == "approve"
-        assert res.receipt is not None and res.receipt.status == "recorded"
+        # Attempt 1 fails with transient LLM error -> status is reasoning_failed
+        fail_res = asyncio.run(runtime.run_cycle(ev))
+        assert fail_res.status == "reasoning_failed"
+        assert client.calls == 1
 
-        # Fill the recorded shadow target on next quote tick
-        fill_time = T0 + timedelta(seconds=2)
-        ledger.clock = lambda: fill_time
-        fills = ledger.fill_pending(make_market(as_of=fill_time))
+        # Attempt 2 retries the SAME event -> not blocked by _seen, succeeds!
+        now = T0 + timedelta(seconds=1)
+        ok_res = asyncio.run(runtime.run_cycle(ev))
+        assert ok_res.status == "shadow_recorded"
+        assert client.calls == 2
+
+        # Attempt 3 (duplicate delivery) -> returns persisted result with zero new LLM calls!
+        dup_res = asyncio.run(runtime.run_cycle(ev))
+        assert dup_res.status == "shadow_recorded"
+        assert dup_res.reused is True
+        assert client.calls == 2
+
+        # Fill the first event's order so pending_order_ids is clear before crash recovery test
+        now = T0 + timedelta(seconds=2)
+        ledger.fill_pending(make_market(as_of=now))
+
+        # Now simulate a crash right after memory.commit(decision) for Event 2!
+        now = T0 + timedelta(seconds=5)
+        snap1 = ledger.snapshot_sync(market=make_market(as_of=now))
+        ev2 = Event(
+            event_id="ev-crash-2",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:crash2",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="ECB Governing Council signals further tightening for EUR/USD.",
+        )
+        asyncio.run(memory.record_event(ev2))
+        crash_dec = make_decision(
+            decision_id="dec-crash-2",
+            event_id="ev-crash-2",
+            snapshot_id=snap1.snapshot_id,
+            weight="0.25",
+            thesis_id="t-crash-2",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        # Commit to memory, and write 'memory_committed' in runtime_events without calling shadow_executor.record!
+        crash_dec = crash_dec.model_copy(update={"based_on_memory_version": 1})
+        ver2 = asyncio.run(memory.commit(crash_dec))
+        assert runtime.state_store is not None
+        runtime.state_store.upsert_event_state(
+            event_id=ev2.event_id,
+            source_reference=ev2.source_reference,
+            received_at=ev2.received_timestamp,
+            now=now,
+            state="memory_committed",
+            reason="memory_committed",
+            decision_id=crash_dec.decision_id,
+            decision_json=crash_dec.model_dump_json(),
+            memory_version=ver2,
+        )
+
+        # Recover incomplete events: recovers without calling LLM (client.calls stays 2) and records shadow receipt!
+        now = T0 + timedelta(seconds=6)
+        recovered_list = asyncio.run(runtime.recover_incomplete())
+        assert len(recovered_list) == 1
+        assert recovered_list[0].event_id == "ev-crash-2"
+        assert recovered_list[0].recovered is True
+        assert recovered_list[0].status == "shadow_recorded"
+        assert client.calls == 2
+    finally:
+        if runtime.state_store is not None:
+            runtime.state_store.close()
+        ledger.close()
+
+
+def test_full_pnl_and_fee_accounting_across_open_add_reduce_reverse_close(tmp_path):
+    """Section 五 & 八: Reconcile cash, realized PnL, unrealized PnL, and fees across all position transitions."""
+    now = T0
+    ledger = SQLiteShadowLedger(
+        tmp_path / "acct.sqlite",
+        initial_cash_usd=Decimal("10000.00"),
+        clock=lambda: now,
+    )
+    engine = DeterministicHardRiskEngine(
+        policy=RiskPolicy(max_position_weight=Decimal("0.50"), max_gross_weight=Decimal("0.50")),
+        clock=lambda: now,
+    )
+
+    def execute_target(
+        idx: int, weight: str, bid: str, ask: str, action: str = "SET_TARGET"
+    ) -> None:
+        nonlocal now
+        mkt = make_market(quote=make_quote(bid=bid, ask=ask, received_at=now), as_of=now)
+        snap = ledger.snapshot_sync(market=mkt)
+        dec = make_decision(
+            decision_id=f"d-{idx}",
+            event_id=f"e-{idx}",
+            snapshot_id=snap.snapshot_id,
+            weight=weight,
+            portfolio_action=action,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess = asyncio.run(engine.assess(dec, snap, mkt))
+        assert assess.outcome == "approve", assess.reasons
+        rcpt = ledger.record_sync(dec, assess)
+        assert rcpt.status == "recorded"
+        now = now + timedelta(seconds=1)
+        fill_mkt = make_market(quote=make_quote(bid=bid, ask=ask, received_at=now), as_of=now)
+        fills = ledger.fill_pending(fill_mkt, risk_policy=engine.policy)
         assert len(fills) == 1
-        assert fills[0].new_quantity > Decimal("0")
+        rep = ledger.report(market=fill_mkt)
+        cash = Decimal(rep["cash_usd"])
+        realized = Decimal(rep["realized_pnl_usd"])
+        fees = Decimal(rep["total_fees_usd"])
+        # Accounting identity: cash == initial_cash + realized_pnl - total_fees
+        assert cash == Decimal("10000.00") + realized - fees
 
-        # Max holding horizon protective exit triggers when 1800s elapse without LLM
-        horizon_time = fill_time + timedelta(seconds=1801)
-        ledger.clock = lambda: horizon_time
-        horizon_fills = ledger.evaluate_protective_exits(make_market(as_of=horizon_time))
-        assert len(horizon_fills) == 1
-        assert horizon_fills[0].kind == "protective_exit"
-        assert horizon_fills[0].reason == "protective_max_holding_horizon"
-        assert horizon_fills[0].new_quantity == Decimal("0")
+    try:
+        # 1. Open Long 20%
+        execute_target(1, "0.20", "1.08000", "1.08010", "SET_TARGET")
+        assert Decimal(ledger.report()["quantity_eur"]) > Decimal("0")
+        qty_open = Decimal(ledger.report()["quantity_eur"])
+
+        # 2. Add to Long 35%
+        now = now + timedelta(seconds=5)
+        execute_target(2, "0.35", "1.08100", "1.08110", "SET_TARGET")
+        qty_added = Decimal(ledger.report()["quantity_eur"])
+        assert qty_added > qty_open
+
+        # 3. Partial reduction to Long 15%
+        now = now + timedelta(seconds=5)
+        execute_target(3, "0.15", "1.08200", "1.08210", "SET_TARGET")
+        qty_reduced = Decimal(ledger.report()["quantity_eur"])
+        assert Decimal("0") < qty_reduced < qty_added
+
+        # 4. Reversal from Long (+15%) to Short (-20%)
+        now = now + timedelta(seconds=5)
+        execute_target(4, "-0.20", "1.08150", "1.08160", "SET_TARGET")
+        qty_reversed = Decimal(ledger.report()["quantity_eur"])
+        assert qty_reversed < Decimal("0")
+
+        # 5. Explicit CLOSE to flat (0%)
+        now = now + timedelta(seconds=5)
+        execute_target(5, "0", "1.08050", "1.08060", "CLOSE")
+        rep_final = ledger.report()
+        assert Decimal(rep_final["quantity_eur"]) == Decimal("0")
+        assert rep_final["avg_entry_price"] is None
+        assert rep_final["fill_count"] == 5
     finally:
         ledger.close()
+
+
+def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_path, capsys):
+    """Section 一 & 八: ShadowRunner runs timed exits even while LLM hangs; CLI start/status/stop/report work."""
+    now = datetime.now(UTC)
+    shd_db = tmp_path / "runner_shadow.sqlite"
+    mem_db = tmp_path / "runner_mem.sqlite"
+    memory = SQLiteThesisMemory(mem_db, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        exit_policy=ProtectiveExitPolicy(max_holding_seconds=1),
+    )
+
+    # Open a position in ledger first
+    snap0 = ledger.snapshot_sync()
+    dec = make_decision(
+        snapshot_id=snap0.snapshot_id,
+        started_at=now - timedelta(seconds=2),
+        completed_at=now - timedelta(seconds=2),
+        valid_until=now + timedelta(seconds=60),
+    )
+    engine = DeterministicHardRiskEngine()
+    assess = asyncio.run(engine.assess(dec, snap0, make_market(as_of=now)))
+    ledger.record_sync(dec, assess)
+    fill_ts = datetime.now(UTC)
+    fills = ledger.fill_pending(make_market(as_of=fill_ts))
+    assert len(fills) == 1
+    assert ledger.snapshot_sync().positions != ()
+
+    class HungAgent:
+        async def decide(self, context):
+            await asyncio.sleep(10.0)
+            raise RuntimeError("unreachable")
+
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: make_market(as_of=ts),
+        agent=HungAgent(),
+        risk_engine=engine,
+        shadow_executor=ledger,
+        state_store=state_store,
+    )
+    runner = ShadowRunner(
+        runtime=runtime,
+        ledger=ledger,
+        quote_interval_seconds=0.1,
+        protection_interval_seconds=0.1,
+        event_scan_interval_seconds=0.1,
+        llm_timeout_seconds=0.2,
+    )
+    try:
+        summary = asyncio.run(runner.run(duration_seconds=1.3))
+        # Position was automatically flattened by the independent protection loop!
+        assert summary["open_quantity_eur"] == "0"
+        assert summary["ledger"]["fill_count"] == 2
+        assert summary["ledger"]["fills"][-1]["kind"] == "protective_exit"
+    finally:
+        ledger.close()
+        state_store.close()
+
+    # Verify CLI status, stop, recover, and report commands
+    for subcmd in ("status", "stop", "recover", "report"):
+        main(["shadow", "--shadow-db", str(shd_db), "--memory-db", str(mem_db), subcmd])
+        out = json.loads(capsys.readouterr().out)
+        assert out["execution_authorized"] is False
+
+
+def test_kill_switch_allows_risk_reduction_blocks_reversal_and_shutdown_preserves_unclosed_position(
+    tmp_path,
+):
+    """Section 一 & 六: Kill switch permits CLOSE/reduction, blocks reversal; runner shutdown never fakes exit fill."""
+    assert (
+        classify_exposure_change(
+            Decimal("1000"), Decimal("10000"), Decimal("1.08500"), Decimal("0")
+        )
+        == "risk_reducing"
+    )
+    assert (
+        classify_exposure_change(
+            Decimal("1000"), Decimal("10000"), Decimal("1.08500"), Decimal("-0.10")
+        )
+        == "reversal_risk_increasing"
+    )
+
+    now = T0
+    shd_db = tmp_path / "unclosed.sqlite"
+    mem_db = tmp_path / "unclosed_mem.sqlite"
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: now, allow_targets=True)
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        exit_policy=ProtectiveExitPolicy(max_holding_seconds=10),
+        clock=lambda: now,
+    )
+    validator = DeterministicTargetValidator()
+
+    # Open position when kill switch is False
+    snap0 = ledger.snapshot_sync()
+    dec_open = make_decision(
+        snapshot_id=snap0.snapshot_id,
+        weight="0.20",
+        started_at=now,
+        completed_at=now,
+        valid_until=now + timedelta(seconds=60),
+    )
+    validator.validate(dec_open.target, snap0)  # type: ignore[arg-type]
+    engine_normal = DeterministicHardRiskEngine(clock=lambda: now)
+    assess_open = asyncio.run(engine_normal.assess(dec_open, snap0, make_market(as_of=now)))
+    ledger.record_sync(dec_open, assess_open)
+    now = now + timedelta(seconds=1)
+    assert len(ledger.fill_pending(make_market(as_of=now))) == 1
+
+    # Now enable kill switch while position is open:
+    # - Reversal (-0.10) MUST be rejected with reversal_blocked_by_kill_switch
+    # - Explicit CLOSE (0) MUST be approved even with kill switch active!
+    snap_open = ledger.snapshot_sync(market=make_market(as_of=now))
+    engine_ks = DeterministicHardRiskEngine(
+        policy=RiskPolicy(kill_switch_active=True), clock=lambda: now
+    )
+    dec_rev = make_decision(
+        decision_id="dec-rev",
+        event_id="ev-rev",
+        snapshot_id=snap_open.snapshot_id,
+        weight="-0.10",
+        started_at=now,
+        completed_at=now,
+        valid_until=now + timedelta(seconds=60),
+    )
+    assess_rev = asyncio.run(engine_ks.assess(dec_rev, snap_open, make_market(as_of=now)))
+    assert assess_rev.outcome == "reject"
+    assert "reversal_blocked_by_kill_switch" in assess_rev.reasons
+
+    dec_close = make_decision(
+        decision_id="dec-close-ks",
+        event_id="ev-close-ks",
+        snapshot_id=snap_open.snapshot_id,
+        weight="0",
+        portfolio_action="CLOSE",
+        started_at=now,
+        completed_at=now,
+        valid_until=now + timedelta(seconds=60),
+    )
+    assess_close = asyncio.run(engine_ks.assess(dec_close, snap_open, make_market(as_of=now)))
+    assert assess_close.outcome == "approve"
+
+    # Now advance time past max_holding_seconds (20s > 10s), but quotes are missing (empty MarketSnapshot)!
+    # Running ShadowRunner to completion must NOT fabricate a close fill; it must persist open position & pending_exit_reason.
+    now = now + timedelta(seconds=20)
+    empty_market = MarketSnapshot(snapshot_id="empty", as_of=now, quotes=())
+
+    class IdleAgent:
+        async def decide(self, context):
+            raise RuntimeError("unused")
+
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: empty_market,
+        agent=IdleAgent(),
+        risk_engine=engine_normal,
+        shadow_executor=ledger,
+        clock=lambda: now,
+    )
+    runner = ShadowRunner(
+        runtime=runtime,
+        ledger=ledger,
+        quote_interval_seconds=0.05,
+        protection_interval_seconds=0.05,
+        event_scan_interval_seconds=0.05,
+        clock=lambda: now,
+    )
+    try:
+        summary = asyncio.run(runner.run(duration_seconds=0.15))
+        assert Decimal(summary["open_quantity_eur"]) > Decimal("0")
+        assert summary["pending_exit_reason"] == "protective_max_holding_horizon"
+    finally:
+        if runtime.state_store is not None:
+            runtime.state_store.close()
+        ledger.close()
+
+
+def test_shadow_runner_skips_baseline_snapshot_and_processes_new_live_arrival(tmp_path):
+    """Section 九.5: Baseline snapshot revisions are not treated as live arrivals when allow_baseline_revisions=False."""
+    from eventlens.observer import CaptureBatch, ObserverStore, SourceRecord
+
+    now = datetime.now(UTC)
+    obs_db = tmp_path / "obs_live.sqlite"
+    shd_db = tmp_path / "shd_live.sqlite"
+    mem_db = tmp_path / "mem_live.sqlite"
+
+    obs = ObserverStore(obs_db, clock=lambda: now)
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: now, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    ledger = SQLiteShadowLedger(shd_db, clock=lambda: now)
+
+    rec_base = SourceRecord(
+        source_id="1001",
+        kind="news",
+        source_url="https://wallstreetcn.com/livenews/1001",
+        title="ECB signals hawkish rate stance for EUR/USD",
+        text="ECB Governing Council signals higher eurozone rates supporting EUR/USD.",
+        publisher_display_at=now - timedelta(seconds=10),
+        importance=3,
+    )
+    batch1 = CaptureBatch(
+        provider="wallstreetcn",
+        stream="news/global",
+        kind="news",
+        basis="live_poll",
+        request_url="https://api-one-wscn.awtmt.com/apiv1/content/lives",
+        request_started_at=now - timedelta(seconds=1),
+        received_at=now,
+        elapsed_ms=10.0,
+        attempts=1,
+        payload=b'{"baseline":1}',
+        records=(rec_base,),
+    )
+    obs.record(batch1)
+
+    now = now + timedelta(seconds=5)
+    rec_new = SourceRecord(
+        source_id="1002",
+        kind="news",
+        source_url="https://wallstreetcn.com/livenews/1002",
+        title="Fed chair speech impacts EUR/USD outlook",
+        text="Federal Reserve commentary shifts USD rate expectations against EUR/USD.",
+        publisher_display_at=now - timedelta(seconds=1),
+        importance=3,
+    )
+    batch2 = CaptureBatch(
+        provider="wallstreetcn",
+        stream="news/global",
+        kind="news",
+        basis="live_poll",
+        request_url="https://api-one-wscn.awtmt.com/apiv1/content/lives",
+        request_started_at=now - timedelta(seconds=1),
+        received_at=now,
+        elapsed_ms=10.0,
+        attempts=1,
+        payload=b'{"new":2}',
+        records=(rec_new, rec_base),
+    )
+    obs.record(batch2)
+
+    called_ids: list[str] = []
+
+    class RecordingHoldAgent:
+        async def decide(self, context):
+            called_ids.append(context.event.event_id)
+            return AgentDecision(
+                decision_id=f"dec-{context.event.event_id}",
+                event_id=context.event.event_id,
+                based_on_memory_version=context.memory.memory_version,
+                based_on_snapshot_id=context.portfolio.snapshot_id,
+                provider="deepseek",
+                model_version="deepseek-flash",
+                prompt_version="single-pass-agent-v2",
+                started_at=now,
+                completed_at=now,
+                valid_until=now + timedelta(seconds=60),
+                portfolio_action="IGNORE_EVENT",
+                thesis_changes=(),
+                target=None,
+                rationale="observed_live",
+            )
+
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: make_market(as_of=ts),
+        agent=RecordingHoldAgent(),
+        risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
+        shadow_executor=ledger,
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    runner = ShadowRunner(
+        runtime=runtime,
+        ledger=ledger,
+        observer_store=obs,
+        allow_baseline_revisions=False,
+        clock=lambda: now,
+    )
+    try:
+        asyncio.run(runner.step_events())
+        assert called_ids == ["wallstreetcn:news:1002:r1"]
+        rep = state_store.summary_report()
+        assert rep["reason_counts"]["baseline_snapshot_not_live_arrival"] == 1
+        assert rep["state_counts"]["no_target"] == 1
+    finally:
+        obs.close()
+        ledger.close()
+        state_store.close()

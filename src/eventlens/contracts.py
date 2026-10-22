@@ -1,6 +1,6 @@
 """Immutable boundary objects. LLM output is a proposal, never an executed position."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
@@ -109,11 +109,24 @@ class PortfolioSnapshot(Contract):
     positions: tuple[Position, ...] = ()
     # Outstanding orders must be included before computing any new execution delta.
     pending_order_ids: tuple[Identifier, ...] = ()
+    unrealized_pnl_usd: Decimal = Decimal("0")
+    realized_pnl_usd: Decimal = Decimal("0")
+    total_fees_usd: Decimal = Decimal("0")
+    daily_pnl_usd: Decimal = Decimal("0")
+    daily_loss_limit_triggered: bool = False
+    pending_exit_reason: str | None = None
+    valuation_valid: bool = True
+    valuation_reason: str = "flat_no_quote_needed"
 
 
 class Quote(Contract):
     instrument: Identifier
+    source_at: Timestamp | None = None
+    bridge_at: Timestamp | None = None
     received_at: Timestamp
+    available_at: Timestamp | None = None
+    source_provider: Identifier | None = None
+    basis: Literal["live_poll", "synthetic_fixture"] | None = None
     bid: Decimal = Field(gt=0)
     ask: Decimal = Field(gt=0)
 
@@ -121,7 +134,39 @@ class Quote(Contract):
     def valid_spread(self) -> Self:
         if self.ask < self.bid:
             raise ValueError("Ask must not be below bid")
+        if (
+            self.source_at is not None
+            and self.bridge_at is not None
+            and self.source_at > self.bridge_at
+        ):
+            raise ValueError("Quote source_at cannot exceed bridge_at")
+        if self.source_at is not None and self.source_at > self.received_at:
+            raise ValueError("Quote source_at cannot exceed received_at")
+        if self.bridge_at is not None and self.bridge_at > self.received_at:
+            raise ValueError("Quote bridge_at cannot exceed received_at")
+        if self.available_at is not None and self.received_at > self.available_at:
+            raise ValueError("Quote received_at cannot exceed available_at")
         return self
+
+    @property
+    def effective_source_at(self) -> datetime:
+        return self.source_at if self.source_at is not None else self.received_at
+
+    @property
+    def receipt_lag_ms(self) -> float | None:
+        if self.source_at is None:
+            return None
+        return (self.received_at - self.source_at).total_seconds() * 1000.0
+
+    @property
+    def has_verified_provenance(self) -> bool:
+        return (
+            self.source_at is not None
+            and self.bridge_at is not None
+            and self.available_at is not None
+            and self.source_provider is not None
+            and self.basis == "live_poll"
+        )
 
 
 class MarketSnapshot(Contract):
@@ -131,8 +176,13 @@ class MarketSnapshot(Contract):
 
     @model_validator(mode="after")
     def valid_quotes(self) -> Self:
-        if any(quote.received_at > self.as_of for quote in self.quotes):
-            raise ValueError("Market snapshot cannot contain future quotes")
+        for quote in self.quotes:
+            if quote.received_at > self.as_of:
+                raise ValueError("Market snapshot cannot contain future quotes")
+            if quote.source_at is not None and quote.source_at > self.as_of:
+                raise ValueError("Market snapshot cannot contain future quote source_at")
+            if quote.available_at is not None and quote.available_at > self.as_of:
+                raise ValueError("Market snapshot cannot contain future quote available_at")
         instruments = [quote.instrument for quote in self.quotes]
         if len(instruments) != len(set(instruments)):
             raise ValueError("Duplicate instrument quote")
@@ -199,6 +249,7 @@ class AgentDecision(Contract):
     thesis_changes: tuple[ThesisChange, ...] = ()
     # None means no portfolio adjustment, not liquidation.
     target: TargetPortfolio | None = None
+    portfolio_action: Literal["IGNORE_EVENT", "HOLD", "SET_TARGET", "CLOSE"] | None = None
     rationale: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -252,5 +303,14 @@ class AuditRecord(Contract):
     component: Literal["collector", "filter", "agent", "memory", "risk", "execution", "runtime"]
     event_id: Identifier | None = None
     decision_id: Identifier | None = None
+    thesis_ids: tuple[Identifier, ...] = ()
+    target_id: Identifier | None = None
+    assessment_id: Identifier | None = None
+    execution_id: Identifier | None = None
+    fill_id: Identifier | None = None
+    model_version: str | None = None
+    prompt_version: str | None = None
+    policy_version: str | None = None
+    cost_model_version: str | None = None
     outcome: str
     detail: str
