@@ -28,6 +28,8 @@ namespace cAlgo.Robots
         private double _pendingAsk;
         private bool _hasPending;
         private bool _lastEmittedPositiveSpread;
+        private double _lastEmittedBid;
+        private double _lastEmittedAsk;
         private long _lastSample = -10000;
         private long _sequence;
         private long _rawTicks;
@@ -117,8 +119,10 @@ namespace cAlgo.Robots
                 return;
             var positiveSpread = _pendingAsk > _pendingBid;
             var spreadStateChanged = positiveSpread != _lastEmittedPositiveSpread;
+            var priceChanged = Math.Abs(_pendingBid - _lastEmittedBid) > 1e-9 ||
+                               Math.Abs(_pendingAsk - _lastEmittedAsk) > 1e-9;
             var effectiveInterval = Math.Min(SampleIntervalMilliseconds, 200);
-            if (!force && !positiveSpread && !spreadStateChanged &&
+            if (!force && !priceChanged && !positiveSpread && !spreadStateChanged &&
                 _elapsed.ElapsedMilliseconds - _lastSample < effectiveInterval)
                 return;
             var now = DateTime.UtcNow;
@@ -127,6 +131,8 @@ namespace cAlgo.Robots
                 return;
             _lastSample = _elapsed.ElapsedMilliseconds;
             _lastEmittedPositiveSpread = positiveSpread;
+            _lastEmittedBid = _pendingBid;
+            _lastEmittedAsk = _pendingAsk;
             // Tick.Time follows the robot's UTC timezone; it is not a receipt clock.
             Write(new { version = 1, kind = "quote", session_id = _session, sequence = ++_sequence,
                 symbol = SymbolName, source_at = _pendingTime.ToString("o", CultureInfo.InvariantCulture),

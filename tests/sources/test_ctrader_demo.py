@@ -547,13 +547,20 @@ def test_receiver_rejects_numeric_symbol_metadata_decimals(tmp_path):
 def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
     code = Path("ctrader/EventLensQuoteBridge.cs").read_text()
     assert "spreadStateChanged" in code and "_lastEmittedPositiveSpread" in code
+    assert "priceChanged" in code and "_lastEmittedBid" in code
     assert "FlushPendingIfDue(true)" in code
     with pytest.raises(ValidationError):
         start(sample_interval_ms=50)
-    s1 = start(sample_interval_ms=200)
+    s1 = start(
+        sample_interval_ms=200,
+        commission="3",
+        commission_type="UsdPerMillionUsdVolume",
+    )
     assert s1.sample_interval_ms == 200
 
-    store = QuoteStore(tmp_path / "multi.sqlite", clock=lambda: NOW + timedelta(seconds=10))
+    store = QuoteStore(
+        tmp_path / "multi.sqlite", clock=lambda: NOW + timedelta(seconds=3, milliseconds=50)
+    )
     receiver = DemoQuoteCollector(store, NOW - timedelta(seconds=1), allow_multiple_sessions=True)
     assert receiver.accept(s1.model_dump_json(), NOW) == "start"
     # Second start while first session is still open is rejected
@@ -561,6 +568,8 @@ def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
         session_id="00000000-0000-4000-8000-000000000002",
         started_at=NOW + timedelta(seconds=1),
         sample_interval_ms=200,
+        commission="3",
+        commission_type="UsdPerMillionUsdVolume",
     )
     assert receiver.accept(s2.model_dump_json(), NOW + timedelta(seconds=1)) == "rejected"
     # Close first session, then second session is accepted
@@ -577,10 +586,20 @@ def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
         session_id="00000000-0000-4000-8000-000000000002",
         source_at=NOW + timedelta(seconds=3),
         bridge_at=NOW + timedelta(seconds=3, milliseconds=10),
+        bid="1.12403",
+        ask="1.12403",
     )
     assert (
         receiver.accept(q2.model_dump_json(), NOW + timedelta(seconds=3, milliseconds=20))
         == "quote"
     )
     assert store.report()["sessions"] == 2 and store.report()["quotes"] == 1
+    events = ObserverStore(
+        tmp_path / "razor_events.sqlite", clock=lambda: NOW + timedelta(seconds=3)
+    )
+    add_event(events, received=NOW + timedelta(seconds=3))
+    aligned = align_news(events, store, "test-news", NOW + timedelta(seconds=3, milliseconds=500))
+    assert aligned["status"] == "aligned_observation"
+    assert aligned["spread"] == "0.00000"
+    events.close()
     store.close()

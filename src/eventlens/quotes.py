@@ -88,6 +88,8 @@ class QuoteObservation(Contract):
     received_at: Timestamp
     recorded_at: Timestamp
     available_at: Timestamp
+    commission: Decimal | None = Field(default=None, ge=0)
+    commission_type: Identifier | None = None
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
@@ -284,19 +286,24 @@ class QuoteStore:
         with self._lock:
             cutoff = utc(cutoff)
             row = self.db.execute(
-                """SELECT * FROM quote_observations WHERE symbol=? AND basis=?
-                AND available_at IS NOT NULL AND available_at<=? ORDER BY received_at DESC,
-                source_at DESC, sequence DESC LIMIT 1""",
+                """SELECT o.*, s.start AS session_start FROM quote_observations o
+                JOIN quote_sessions s ON s.session_id = o.session_id
+                WHERE o.symbol=? AND o.basis=?
+                AND o.available_at IS NOT NULL AND o.available_at<=? ORDER BY o.received_at DESC,
+                o.source_at DESC, o.sequence DESC LIMIT 1""",
                 (symbol, basis, cutoff.isoformat()),
             ).fetchone()
             if row is None:
                 return None
+            start = BridgeStart.model_validate_json(row["session_start"])
             return QuoteObservation(
                 basis=row["basis"],
                 quote=BridgeQuote.model_validate_json(row["quote"]),
                 received_at=row["received_at"],
                 recorded_at=row["recorded_at"],
                 available_at=row["available_at"],
+                commission=start.commission,
+                commission_type=start.commission_type,
             )
 
     def report(self) -> dict[str, Any]:
@@ -470,6 +477,12 @@ def align_news(
     quote_bridge_to_receipt = (
         (quote.received_at - quote.quote.bridge_at).total_seconds() if quote else None
     )
+    has_commission = (
+        quote is not None
+        and quote.commission is not None
+        and quote.commission > Decimal("0")
+        and quote.commission_type == "UsdPerMillionUsdVolume"
+    )
     status = (
         "missing_event"
         if event is None
@@ -480,7 +493,7 @@ def align_news(
         else "stale_quote"
         if quote_age is not None and quote_age > max_quote_age
         else "zero_spread"
-        if quote.quote.ask == quote.quote.bid
+        if quote.quote.ask == quote.quote.bid and not has_commission
         else "aligned_observation"
     )
     return {
@@ -532,6 +545,8 @@ def build_market_snapshot(
                 basis=obs.basis,
                 bid=obs.quote.bid,
                 ask=obs.quote.ask,
+                commission=obs.commission,
+                commission_type=obs.commission_type,
             ),
         ),
     )
@@ -547,6 +562,7 @@ class QuoteQualityPolicy(Contract):
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
+    allow_commission_bearing_zero_spread: bool = True
     require_verified_provenance: bool = False
 
 
@@ -637,7 +653,10 @@ def validate_market_quote(
             has_verified_provenance=quote.has_verified_provenance,
         )
 
-    if spread <= Decimal("0") and not policy.allow_zero_spread:
+    zero_spread_allowed = policy.allow_zero_spread or (
+        policy.allow_commission_bearing_zero_spread and quote.has_verified_commission
+    )
+    if spread <= Decimal("0") and not zero_spread_allowed:
         return QuoteValidationResult(
             valid=False,
             reason="zero_spread_rejected",

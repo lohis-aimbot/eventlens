@@ -132,6 +132,8 @@ class Quote(Contract):
     basis: Literal["live_poll", "synthetic_fixture"] | None = None
     bid: Decimal = Field(gt=0)
     ask: Decimal = Field(gt=0)
+    commission: Decimal | None = Field(default=None, ge=0)
+    commission_type: Identifier | None = None
 
     @model_validator(mode="after")
     def valid_spread(self) -> Self:
@@ -169,6 +171,15 @@ class Quote(Contract):
             and self.available_at is not None
             and self.source_provider is not None
             and self.basis == "live_poll"
+        )
+
+    @property
+    def has_verified_commission(self) -> bool:
+        return (
+            self.has_verified_provenance
+            and self.commission is not None
+            and self.commission > Decimal("0")
+            and self.commission_type == "UsdPerMillionUsdVolume"
         )
 
 

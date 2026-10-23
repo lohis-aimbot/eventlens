@@ -2012,3 +2012,172 @@ def test_stop_request_duration_expiry_and_concurrent_stop_fill_block_new_risk_wh
     finally:
         ledger.close()
         state_store.close()
+
+
+def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp_path):
+    """Verify commission-bearing Razor ECN 0.0-pip quotes pass validation, align, and fill with commission while unverified 0-pip quotes are still rejected."""
+    now = T0
+    qstore = QuoteStore(tmp_path / "razor_quotes.sqlite", clock=lambda: now)
+    memory = SQLiteThesisMemory(
+        tmp_path / "razor_mem.sqlite", clock=lambda: now, allow_targets=True
+    )
+    ledger = SQLiteShadowLedger(
+        tmp_path / "razor_shadow.sqlite",
+        exit_policy=ProtectiveExitPolicy(max_holding_seconds=10),
+        clock=lambda: now,
+    )
+    try:
+        # 1. Start a Pepperstone Razor ECN session with commission=3 UsdPerMillionUsdVolume
+        qstore.start(
+            BridgeStart(
+                version=1,
+                kind="start",
+                session_id=SESSION,
+                account_mode="demo",
+                running_mode="realtime",
+                symbol="EURUSD",
+                started_at=now - timedelta(seconds=5),
+                sample_interval_ms=200,
+                duration_seconds=60,
+                digits=5,
+                pip_size=Decimal("0.0001"),
+                commission=Decimal("3"),
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            now - timedelta(seconds=5),
+            basis="live_poll",
+        )
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=1,
+                symbol="EURUSD",
+                source_at=now - timedelta(milliseconds=150),
+                bridge_at=now - timedelta(milliseconds=80),
+                bid=Decimal("1.12403"),
+                ask=Decimal("1.12403"),
+            ),
+            now - timedelta(milliseconds=40),
+            '{"kind":"quote"}',
+        )
+        snap = build_market_snapshot(qstore, now)
+        q = snap.quotes[0]
+        assert q.bid == q.ask == Decimal("1.12403")
+        assert q.commission == Decimal("3")
+        assert q.commission_type == "UsdPerMillionUsdVolume"
+        assert q.has_verified_commission is True
+
+        # Default QuoteQualityPolicy accepts verified commission-bearing ECN 0.0-pip quote
+        res_valid = validate_market_quote(snap, as_of=now)
+        assert res_valid.valid is True
+        assert res_valid.reason == "quote_valid"
+        assert res_valid.spread_pips == Decimal("0")
+
+        # Explicitly disabling allow_commission_bearing_zero_spread still rejects it
+        res_strict = validate_market_quote(
+            snap,
+            as_of=now,
+            policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=False),
+        )
+        assert res_strict.valid is False
+        assert res_strict.reason == "zero_spread_rejected"
+
+        # Unverified 0.0-pip quote (without commission metadata) is still rejected
+        unverified_zero = make_quote(bid="1.12403", ask="1.12403", received_at=now)
+        assert unverified_zero.has_verified_commission is False
+        res_unverified = validate_market_quote(
+            make_market(quote=unverified_zero, as_of=now), as_of=now
+        )
+        assert res_unverified.valid is False
+        assert res_unverified.reason == "zero_spread_rejected"
+
+        # 2. Full runtime cycle + fill + protective exit on Razor 0.0-pip ECN quotes
+        open_prop = SinglePassProposal(
+            memory_action="create",
+            thesis_id=None,
+            status="active",
+            narrative="ECB hawkish surprise supports EUR/USD.",
+            instruments=("EUR/USD",),
+            invalidation_conditions=("ECB reverses stance",),
+            confidence=0.8,
+            evidence_role="support",
+            evidence_quote="ECB Governing Council raises deposit facility rate",
+            portfolio_action="SET_TARGET",
+            target_direction="long",
+            target_weight=Decimal("0.20"),
+            target_thesis_ids=("__current__",),
+            rationale="Open 20% long EUR/USD on Razor ECN feed.",
+        )
+        client = SequencedJSONClient(open_prop)
+        agent = SinglePassTradingAgent(client, clock=lambda: now)
+        runtime = IntradayEventRuntime(
+            memory=memory,
+            portfolio_state=ledger,
+            market_provider=lambda ts: build_market_snapshot(qstore, ts),
+            agent=agent,
+            risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
+            shadow_executor=ledger,
+            clock=lambda: now,
+        )
+        ev = Event(
+            event_id="ev-razor-1",
+            source="wallstreetcn",
+            source_type="news",
+            source_reference="wscn:razor1",
+            source_timestamp=now,
+            received_timestamp=now,
+            raw_text="ECB Governing Council raises deposit facility rate for EUR/USD.",
+        )
+        cycle_res = asyncio.run(runtime.run_cycle(ev))
+        assert cycle_res.status == "shadow_recorded"
+
+        # Record a causal post-decision 0.0-pip Razor quote and fill the pending order
+        now = now + timedelta(seconds=1)
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=2,
+                symbol="EURUSD",
+                source_at=now - timedelta(milliseconds=120),
+                bridge_at=now - timedelta(milliseconds=60),
+                bid=Decimal("1.12405"),
+                ask=Decimal("1.12405"),
+            ),
+            now - timedelta(milliseconds=20),
+            '{"kind":"quote"}',
+        )
+        fills = ledger.fill_pending(build_market_snapshot(qstore, now))
+        assert len(fills) == 1
+        assert fills[0].synthetic_assumption is False
+        assert fills[0].commission_usd > Decimal("0")
+        assert fills[0].new_quantity > Decimal("0")
+
+        # Advance past max_holding_seconds (10s) and execute protective exit on a 0.0-pip Razor quote
+        now = now + timedelta(seconds=15)
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=3,
+                symbol="EURUSD",
+                source_at=now - timedelta(milliseconds=100),
+                bridge_at=now - timedelta(milliseconds=50),
+                bid=Decimal("1.12420"),
+                ask=Decimal("1.12420"),
+            ),
+            now - timedelta(milliseconds=10),
+            '{"kind":"quote"}',
+        )
+        exit_fills = ledger.evaluate_protective_exits(build_market_snapshot(qstore, now))
+        assert len(exit_fills) == 1
+        assert exit_fills[0].kind == "protective_exit"
+        assert exit_fills[0].new_quantity == Decimal("0")
+        assert exit_fills[0].realized_pnl_usd > Decimal("0")
+    finally:
+        ledger.close()
+        qstore.close()

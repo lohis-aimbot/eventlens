@@ -74,7 +74,11 @@ class ShadowCostModel(Contract):
     def execution_price(self, quote: Quote, *, buy: bool) -> tuple[Decimal, bool]:
         if quote.ask < quote.bid:
             raise ValueError("Crossed quote rejected")
-        if quote.ask == quote.bid and not self.allow_synthetic_spread_floor:
+        if (
+            quote.ask == quote.bid
+            and not self.allow_synthetic_spread_floor
+            and not quote.has_verified_commission
+        ):
             raise ValueError("Zero-spread quote cannot be filled without explicit synthetic opt-in")
         mid = (quote.bid + quote.ask) / Decimal("2")
         synthetic_used = False
@@ -95,9 +99,18 @@ class ShadowCostModel(Contract):
         )
         return raw.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), synthetic_used
 
-    def fee_usd(self, units: Decimal, price: Decimal) -> Decimal:
+    def fee_usd(self, units: Decimal, price: Decimal, *, quote: Quote | None = None) -> Decimal:
         notional_usd = abs(units) * price
-        fee = notional_usd * self.commission_bps / BPS + self.fixed_fee_usd
+        bps_fee = notional_usd * self.commission_bps / BPS
+        broker_fee = Decimal("0")
+        if (
+            quote is not None
+            and quote.commission is not None
+            and quote.commission > Decimal("0")
+            and quote.commission_type == "UsdPerMillionUsdVolume"
+        ):
+            broker_fee = notional_usd * quote.commission / Decimal("1000000")
+        fee = max(bps_fee, broker_fee) + self.fixed_fee_usd
         return fee.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
@@ -1227,7 +1240,7 @@ class SQLiteShadowLedger:
 
         buy = delta > Decimal("0")
         fill_price, synthetic_used = self.cost_model.execution_price(quote, buy=buy)
-        commission = self.cost_model.fee_usd(delta, fill_price)
+        commission = self.cost_model.fee_usd(delta, fill_price, quote=quote)
         new_qty = prior_qty + delta
         realized_trade = Decimal("0.00")
 
