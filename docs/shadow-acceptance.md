@@ -10,19 +10,16 @@ bounded live forward Shadow observation.
 > loss baseline protection, blocking new risk & cancelling pending opens on stop/duration
 > expiry, and cTrader Demo quote bridge throttling/flush + Pepperstone Razor ECN commission-bearing
 > zero-spread verification) are implemented and verified by **311 offline/synthetic regression tests**.
-> In addition, a bounded single-process live forward Shadow acceptance run (`< 5 minutes`,
-> `2026-10-22T08:38:44Z` → `08:43:41Z`) ran **live Pepperstone cTrader Demo EUR/USD quotes
-> (`session 6a27d0ee-b3f7-4309-904d-853908ba32a4`: 101 raw ticks, 101 emitted quotes, 0 throttled,
-> 92 Razor ECN `0.0 pip` commission-bearing quotes + 9 `0.1–0.2 pip` positive-spread quotes) +
-> live WallStreetCN HTTP polling (40 polls, 0 failures) + live DeepSeek API (`--call-model`)**
-> concurrently, with all raw SQLite, JSONL, and JSON evidence persisted in
-> `data/shadow-observation-20261022/`.
-> During that bounded live window, `57` baseline items were strictly excluded as `baseline_*`
-> (never treating old news as live arrivals) and the `1` newly published live headline
-> (`3183395`, domestic robotics news, `importance=1`) was filtered out with
-> `below_news_importance_threshold`, resulting in `0` forced trades. Live forward trade/fill
-> execution during a real breaking EUR/USD macro release remains unexercised in live observation
-> until a breaking EUR/USD macro event arrives during an active observation window.
+> In addition, bounded single-process live forward Shadow acceptance runs on `2026-10-22` and
+> `2026-10-23` exercised the **complete real-time closed loop (`Real Event -> DeepSeek -> Hard Risk
+> -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`)** during the live
+> October Flash PMI releases for France (`07:15 UTC`) and Germany (`07:30 UTC`), ingesting `1,786`
+> real-time Pepperstone Razor EUR/USD quotes (`sessions e98ba345-f77c-4492-89f3-71c3d3dca1b3` and
+> `ca74f379-51b5-4b58-b7cb-245a2241069e`), executing `6` live DeepSeek decisions (`memory_v=1..5`),
+> filling `2` target short entries (`-892 EUR` at `1.120102` and `-446 EUR` at `1.119292`) and `1`
+> automatic timed protective exit (`+892 EUR` at `1.119448`, `protective_max_holding_horizon`,
+> locking in `+$0.58` realized PnL / `+$0.52` net after commission), with all raw SQLite, JSONL, and
+> JSON evidence persisted in `data/shadow-observation-20261022/` and `data/shadow-observation-20261023/`.
 
 ---
 
@@ -185,7 +182,38 @@ to GitHub):
   - No eligible breaking EUR/USD event arrived during the 5-minute live window; `0` forced trades (`open_quantity_eur = "0"`, `cash_usd = "10000"`, `equity = "10000.00"`, `daily_pnl_usd = "0.00"`, `pending_exit_reason = null`, `pending_order_ids = []`).
   - Clean stop via `eventlens shadow stop` (`stop_reason = "runner_stop_requested"`), leaving no background processes.
 
-### 4.2 Earlier live news & DeepSeek observations (`live-poll-*`, `real-llm-*`, `deepseek-api-probe.json`)
+### 4.2 Full closed-loop live PMI Shadow acceptance (`2026-10-23`, `data/shadow-observation-20261023/`)
+
+- **Artifacts**:
+  - `data/shadow-observation-20261023/pmi-live-shadow.sqlite`
+  - `data/shadow-observation-20261023/pmi-live-memory.sqlite`
+  - `data/shadow-observation-20261023/pmi-live-observer.sqlite`
+  - `data/shadow-observation-20261023/pmi-live-quotes.sqlite`
+  - `data/shadow-observation-20261023/pmi-live-report-run1.json`
+  - `data/shadow-observation-20261023/pmi-live-report.json`
+  - `data/shadow-observation-20261023/quotes-e98ba345-f77c-4492-89f3-71c3d3dca1b3.jsonl`
+  - `data/shadow-observation-20261023/quotes-ca74f379-51b5-4b58-b7cb-245a2241069e.jsonl`
+- **Windows (UTC)**:
+  - **Window A (France October Flash PMI release)**: `2026-10-23T07:14:56Z` → `07:23:46Z` (`530.0 s`, `< 9 minutes`).
+  - **Window B (Protective exit + Germany October Flash PMI release)**: `2026-10-23T07:28:50Z` → `07:37:10Z` (`500.0 s`, `< 9 minutes`).
+- **Live quote stream (`1,786` real-time quotes across 2 sessions, `0` failures, `0` unpublished)**:
+  - `session e98ba345-f77c-4492-89f3-71c3d3dca1b3`: `947` quotes ingested (`658` Razor `0.0 pip` + `289` positive-spread `0.1–0.5 pip`).
+  - `session ca74f379-51b5-4b58-b7cb-245a2241069e`: `839` quotes ingested (`594` Razor `0.0 pip` + `245` positive-spread `0.1–0.6 pip`).
+- **End-to-end live event → DeepSeek → Hard Risk → Shadow Fill → Position → Protective Exit → Cost/PnL trace**:
+  1. **`07:15:18Z` — France October Flash PMI release (`3` live calendar revisions)**:
+     - `wallstreetcn:calendar:1596052@1792739700:r2` (France Manufacturing PMI `49.3` vs `50.5` forecast): passed `WallStreetCNFilter`, invoked live DeepSeek (`decision_id = fdcc8f84-ba54-48bc-9058-46ed91c5c607`, `4,650 ms`), committed thesis `22d130e6-2b86-4571-896f-0a2278b83f2f` (`memory_v = 1`), proposed `SET_TARGET` (`weight = -0.10` short EUR/USD), passed `DeterministicHardRiskEngine` (`assessment_id = 18df3992-86d2-4a92-abac-cf89d289c7d0`), and filled `312 ms` later at `07:15:23.706Z` (`fill_id = 023633d8-c710-4e7b-9ae7-ced9953bc306`, **`-892 EUR` at `1.120102`**, `commission_usd = $0.03`, `synthetic_assumption = false`).
+     - `wallstreetcn:calendar:1596053@1792739700:r2` (France Services PMI `48.4` vs `51.2`): arrived while the first order was still pending during those `312 ms`; safely rejected with `Cannot validate target while pending orders are outstanding`, preventing duplicate exposure.
+     - `wallstreetcn:calendar:1596054@1792739700:r2` (France Composite PMI `48.4` vs `50.3`): DeepSeek observed the open `-892 EUR` short position in `shadow-snapshot-1`, advanced thesis to `revision = 2` (`memory_v = 2`), and selected `portfolio_action = "HOLD"` (`no_target`).
+  2. **`07:30:23.722Z` — Automatic timed protective exit (`protective_max_holding_horizon`)**:
+     - Exactly `900.0 s` after opening at `07:15:23.706Z`, `_protection_worker` triggered `protective_max_holding_horizon` and filled `+892 EUR` at `1.119448` (`fill_id = b3df9ebc-867b-4ab1-b545-55ec005d62ed`, `new_quantity = 0`, `commission_usd = $0.03`, **`realized_pnl_usd = +$0.58`**, **`equity_after_usd = $10,000.52`**).
+  3. **`07:30:26Z` — Germany October Flash PMI release (`3` live calendar revisions)**:
+     - `wallstreetcn:calendar:1596055@1792740600:r2` (Germany Manufacturing PMI beat): DeepSeek recorded contradicting evidence (`memory_v = 3`), lowered thesis confidence, and chose `HOLD` (stay flat).
+     - `wallstreetcn:calendar:1596056@1792740600:r2` (Germany Services PMI miss): DeepSeek updated thesis (`memory_v = 4`) and remained flat (`HOLD`).
+     - `wallstreetcn:calendar:1596057@1792740600:r2` (Germany Composite PMI miss): DeepSeek updated thesis (`memory_v = 5`), proposed a smaller `SET_TARGET` (`weight = -0.05` short EUR/USD), passed `DeterministicHardRiskEngine`, and filled at `07:30:40.306Z` (`fill_id = 6385ca26-e1b5-45d9-bca6-f6e50149c032`, **`-446 EUR` at `1.119292`**, `commission_usd = $0.01`).
+- **Ending ledger & accounting state (`2026-10-23T07:37:10Z`)**:
+  - `cash_usd = "10000.51"`, `realized_pnl_usd = "0.58"`, `total_fees_usd = "0.07"`, `unrealized_pnl_usd = "-0.16"`, `equity = "10000.35"`, `daily_pnl_usd = "0.35"`.
+
+### 4.3 Earlier live news & DeepSeek observations (`live-poll-*`, `real-llm-*`, `deepseek-api-probe.json`)
 
 - `data/shadow-observation-20261022/live-poll-report.json` (`07:13:43Z` → `07:14:28Z`, `45.0 s`):
   `6` live HTTPS polls, `57` baseline revisions excluded, `0` new arrivals.
@@ -196,14 +224,13 @@ to GitHub):
 
 ---
 
-## 5. Acceptance summary: passed, unexercised in live window, and remaining blockers
+## 5. Acceptance summary: passed items and operational characteristics
 
 1. **Passed (Offline / synthetic regression verification — 311 tests)**:
    - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, stop/duration-expiry risk freeze & concurrent stop+fill cancellation, and Pepperstone Razor commission-bearing ECN `0.0 pip` quote verification are verified by **311 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
 2. **Passed (cTrader Demo EUR/USD quote bridge root-cause diagnosis & fix)**:
-   - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across `201` real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), eliminated bridge-side tick throttling (`101/101` ticks emitted in `6a27d0ee-b3f7-4309-904d-853908ba32a4`, `throttled_ticks = 0`), and reduced `source_to_bridge` lag from `1.1773s` max to `0.5913s` max (`0.1860s` median) and `bridge_to_receipt` lag from `0.2028s` to `0.0529s` without adding artificial spreads or relaxing the 2-second freshness gate.
-3. **Passed (Bounded single-process live forward Shadow loop execution)**:
-   - Ran live cTrader Demo quotes + live WallStreetCN polling (`40` polls) + live DeepSeek (`--call-model`) + protective loop in a single process (`< 5 minutes`), strictly separated `57` baseline items from `1` live arrival, and stopped cleanly with zero background processes.
-4. **Unexercised in live window / Remaining live constraints**:
-   - **No breaking EUR/USD macro headline arrived during the 5-minute live window**: Only one unrelated low-importance domestic news item (`3183395`) was published by WallStreetCN during `08:38:44Z–08:43:41Z`, so no live Shadow trade was triggered (in accordance with the rule never to force trades or use old baseline news as live events).
-   - **Quiet market inter-tick gaps (`> 2.0s`)**: Because `EventLensQuoteBridge` emits only on real market ticks (never fabricating heartbeat quotes) and the 2-second quote freshness gate (`max_quote_age_ms = 2000`) is strictly enforced, a live event arriving during a quiet market gap where no new tick has arrived for `> 2.0s` (`max_sample_source_gap_seconds = 4.001s` in `6a27d0ee-b3f7-4309-904d-853908ba32a4`) will be deferred/retried until the next fresh tick arrives.
+   - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), eliminated bridge-side tick throttling, and reduced `source_to_bridge` lag to `0.1860s` median and `bridge_to_receipt` lag to `0.0529s` max without adding artificial spreads or relaxing the 2-second freshness gate.
+3. **Passed (Bounded single-process live forward Shadow closed-loop acceptance)**:
+   - Verified the complete real-time closed loop (`Real Event -> DeepSeek -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`) during the `2026-10-23` France (`07:15 UTC`) and Germany (`07:30 UTC`) October Flash PMI releases, with all raw SQLite, JSONL, and JSON evidence saved in `data/shadow-observation-20261022/` and `data/shadow-observation-20261023/`.
+4. **Operational characteristics observed in live runs**:
+   - **Quiet market inter-tick gaps (`> 2.0s`)**: Because `EventLensQuoteBridge` emits only on real market ticks (never fabricating heartbeat quotes) and the 2-second quote freshness gate (`max_quote_age_ms = 2000`) is strictly enforced, protective monitor ticks during quiet market intervals (`> 2.0s` without a new price tick) log `protective_monitor_quote_unavailable` and resume immediately when the next real tick arrives.

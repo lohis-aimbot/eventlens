@@ -1520,15 +1520,59 @@ class ShadowRunner:
             "rejected": 0,
         }
         if self.quote_bridge_dir is not None and self.quote_store is not None:
+            from .quotes import BridgeStart
             from .sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
 
+            now_init = _utc(self.clock())
             self._quote_tail = DirectoryTail(self.quote_bridge_dir)
             self._quote_collector = DemoQuoteCollector(
                 self.quote_store,
-                _utc(self.clock()),
+                now_init,
                 allow_multiple_sessions=True,
             )
+            self._attach_active_bridge_session(now_init, BridgeStart)
         self.ledger.stop_reason_provider = self._active_stop_reason
+
+    def _attach_active_bridge_session(self, now: datetime, start_cls: Any) -> None:
+        if (
+            self.quote_bridge_dir is None
+            or self.quote_store is None
+            or self._quote_tail is None
+            or self._quote_collector is None
+        ):
+            return
+        candidates = sorted(
+            self.quote_bridge_dir.resolve().glob("quotes-*.jsonl"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not candidates:
+            return
+        newest = candidates[0]
+        try:
+            stat = newest.stat()
+            raw_bytes = newest.read_bytes()
+            lines = raw_bytes.split(b"\n")
+            remainder = lines.pop()
+            if not lines:
+                return
+            first_obj = json.loads(lines[0].decode("utf-8"))
+            if first_obj.get("kind") != "start":
+                return
+            if any(json.loads(ln.decode("utf-8")).get("kind") == "stop" for ln in lines if ln):
+                return
+            start_item = start_cls.model_validate(first_obj)
+            if now > start_item.started_at + timedelta(seconds=start_item.duration_seconds):
+                return
+            self._quote_tail.ignored.discard(newest)
+            consumed_offset = len(raw_bytes) - len(remainder)
+            self._quote_tail.files[newest] = (stat.st_ino, consumed_offset, remainder)
+            self.quote_store.start(start_item, now, basis="live_poll")
+            self._quote_collector.session = start_item
+            self._quote_collector.stopped = False
+            self._quote_bridge_counts["start"] += 1
+        except Exception as exc:
+            logger.warning("attach_active_bridge_session_skipped: %s", exc)
 
     def _active_stop_reason(self, now: datetime | None = None) -> str | None:
         check_now = _utc(now or self.clock())
