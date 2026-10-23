@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.3 · Hard risk, shadow ledger & runtime foundation.** News/calendar capture, EUR/USD observation filtering, bounded Demo quote sampling, single-pass DeepSeek reasoning, deterministic target validation (`DeterministicTargetValidator`), hard risk policy (`DeterministicHardRiskEngine`), causal SQLite shadow accounting (`SQLiteShadowLedger`) with LLM-independent protective exits, and `IntradayEventRuntime` are implemented. Representative live quote quality and forward shadow validation remain pending; cTrader Demo order execution is not yet connected. No profitability has been established.
+> **v0.15.3 · Shadow loop reliability fixes & partial forward observation.** Automated single-process `ShadowRunner` (`eventlens shadow`), unified quote provenance/quality checks (`allow_zero_spread=False`, no synthetic spread floor), post-LLM market/portfolio state refresh, explicit action semantics (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), pre-fill order re-verification, DST-aware session daily loss limits (`17:00 America/New_York` rollover, `16:55 America/New_York` daily close), deferred protective exits on bad/missing quotes, and persistent event state/crash recovery are implemented and verified across 306 offline regression tests. Bounded live forward observation verified automated WallStreetCN capture, filtering, and protection loops, but **live forward Shadow fill acceptance is not yet complete** (no active positive-spread Demo quote feed or `DEEPSEEK_API_KEY` in the forward observation environment). Stage 5 cTrader Demo order execution remains blocked. No profitability has been established.
 
 <table>
   <tr>
@@ -75,7 +75,7 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 | **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure agent with verbatim quote recovery, immutable SQLite history | Live observation evaluation and role comparison |
 | **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture, raw-tick/clock diagnostics and as-of alignment | Representative live quote quality and authoritative positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | Single-pass `TradingAgent`, `DeterministicTargetValidator`, `DeterministicHardRiskEngine`, `SQLiteShadowLedger` (protective exits) and `IntradayEventRuntime` | Forward shadow validation and cTrader Demo execution |
+| **Trading** | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`), `SQLiteShadowLedger`, `IntradayEventRuntime`, and `ShadowRunner` (`eventlens shadow`) | Live positive-spread quote feed + forward shadow fill acceptance before cTrader Demo |
 
 [Read the architecture and module map →](docs/architecture.md)
 
@@ -104,6 +104,7 @@ eventlens research series plan examples/synthetic-series-plan.json
 | Command group | Purpose |
 |---|---|
 | `eventlens observe …` | Bounded source/quote capture, offline demo and read-only timing audits |
+| `eventlens shadow …` | Bounded single-process automated Shadow loop (`start`, `stop`, `status`, `report`, `recover`) |
 | `eventlens memory …` | Memory inspection, synthetic demo and explicit memory reasoning |
 | `eventlens source fed …` | Existing Fed polling collector; use `--help` to inspect options |
 | `eventlens research …` | Historical data, accounting, proposal validation and opt-in inference |
@@ -154,8 +155,8 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
 - [ ] **Realtime observer** — source/quote capture and timing audits are implemented; quote quality, important-release coverage and integrated LLM observation remain pending.
-- [x] **Evaluation & protection** — deterministic target validation, independent hard risk limits, causal SQLite shadow ledger and LLM-independent protective exits (`v0.15.3`).
-- [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after earlier gates pass.
+- [ ] **Evaluation & protection (Shadow loop)** — `v0.15.3` reliability fixes, DST-aware intraday risk, causal shadow ledger, crash recovery and single-process `ShadowRunner` pass offline regression tests; live forward Shadow fill acceptance remains pending positive-spread real-time Demo quotes and live LLM observation.
+- [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after live Shadow acceptance passes.
 
 The next milestone is observation, not automatic orders. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
 
@@ -175,7 +176,8 @@ eventlens/
 │   ├── deepseek.py      Replaceable JSON model boundary and adapter
 │   ├── reasoning.py     Existing memory-only LLM path
 │   ├── sqlite_memory.py Durable evidence and thesis history
-│   ├── runtime.py       Future realtime coordinator interface
+│   ├── runtime.py       Intraday event runtime, persistent state and ShadowRunner
+│   ├── shadow_cli.py    Bounded Shadow loop CLI (start/stop/status/report/recover)
 │   └── cli.py           Grouped access to existing commands
 ├── tests/               Shared, source and research checks
 ├── configs/             Pinned research configurations
@@ -209,8 +211,9 @@ CI runs offline/synthetic checks on Python 3.11 and 3.12, without paid model or 
 | [Roadmap](docs/roadmap.md) | [Historical input boundaries](docs/research/historical-context.md) |
 | [Observer capture](docs/observer.md) | [Source-capture acceptance](docs/observer-acceptance.md) |
 | [Demo quote observation](docs/live-quotes.md) | [Quote/alignment acceptance](docs/live-quotes-acceptance.md) |
-| [Thesis memory](docs/memory.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
-| [Fed intake](docs/fed-intake.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
+| [Shadow loop & acceptance](docs/shadow-acceptance.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
+| [Thesis memory](docs/memory.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
+| [Fed intake](docs/fed-intake.md) | |
 
 ---
 

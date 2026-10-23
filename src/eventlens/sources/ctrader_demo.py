@@ -49,8 +49,15 @@ class DirectoryTail:
 class DemoQuoteCollector:
     """Validate a fresh Demo handshake; old/backtest/live/unknown sessions never emit quotes."""
 
-    def __init__(self, store: QuoteStore, watch_started_at: datetime) -> None:
+    def __init__(
+        self,
+        store: QuoteStore,
+        watch_started_at: datetime,
+        *,
+        allow_multiple_sessions: bool = False,
+    ) -> None:
         self.store, self.started = store, utc(watch_started_at)
+        self.allow_multiple_sessions = allow_multiple_sessions
         self.session: BridgeStart | None = None
         self.stopped = False
 
@@ -72,7 +79,9 @@ class DemoQuoteCollector:
                     if obj.get(field) is not None and not isinstance(obj.get(field), str):
                         raise ValueError("Bridge symbol metadata decimals must be strings")
                 start = BridgeStart.model_validate(obj)
-                if self.session is not None:
+                if self.session is not None and (
+                    not self.allow_multiple_sessions or not self.stopped
+                ):
                     raise ValueError("Only one fresh bridge session per watch is allowed")
                 if (
                     not self.started <= start.started_at <= received
@@ -81,6 +90,7 @@ class DemoQuoteCollector:
                     raise ValueError("Bridge must start after the watcher, with a fresh handshake")
                 self.store.start(start, received, basis="live_poll")
                 self.session = start
+                self.stopped = False
                 return "start"
             if (
                 self.session is None

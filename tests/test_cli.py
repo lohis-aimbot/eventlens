@@ -22,6 +22,7 @@ from eventlens.cli import main
         (["research", "infer"], "inference_cli"),
         (["research", "series"], "series_cli"),
         (["observe"], "observer_cli"),
+        (["shadow"], "shadow_cli"),
     ],
 )
 def test_existing_help_is_unchanged_and_dispatch_restores_argv(prefix, module, monkeypatch, capsys):
@@ -29,6 +30,7 @@ def test_existing_help_is_unchanged_and_dispatch_restores_argv(prefix, module, m
         "research_cli": "eventlens-research",
         "inference_cli": "eventlens-infer",
         "observer_cli": "eventlens-observe",
+        "shadow_cli": "eventlens-shadow",
     }.get(module, f"eventlens-{module.removesuffix('_cli')}")
     monkeypatch.setattr(sys, "argv", [legacy_name, "--help"])
     with pytest.raises(SystemExit) as legacy:
@@ -88,6 +90,7 @@ except SystemExit as exc:
 assert 'eventlens.fed_cli' not in sys.modules
 assert 'eventlens.inference_cli' not in sys.modules
 assert 'eventlens.series_cli' not in sys.modules
+assert 'eventlens.shadow_cli' not in sys.modules
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

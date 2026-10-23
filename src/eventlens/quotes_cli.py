@@ -76,7 +76,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                                 log("demo_quote_bridge outcome=%s", outcome)
                         if collector.stopped:
                             break
-                        time.sleep(0.2)
+                        time.sleep(0.05)
                     print(
                         json.dumps(
                             {
