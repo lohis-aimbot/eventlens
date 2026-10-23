@@ -8,18 +8,20 @@ bounded live forward Shadow observation.
 > **Honest acceptance status**: All reliability defect categories in `v0.15.3` (including
 > non-blocking startup recovery, hung-LLM event injection tests, cross-day unconfirmed daily
 > loss baseline protection, blocking new risk & cancelling pending opens on stop/duration
-> expiry, and cTrader Demo quote bridge throttling/flush + Pepperstone Razor ECN commission-bearing
-> zero-spread verification) are implemented and verified by **311 offline/synthetic regression tests**.
+> expiry, cTrader Demo quote bridge throttling/flush + Pepperstone Razor ECN commission-bearing
+> zero-spread verification, and the `pepperstone_razor_200` `$200 USD / 200x` leverage / `0.01..100`
+> lot standard) are implemented and verified by **313 offline/synthetic regression tests**.
 > In addition, bounded single-process live forward Shadow acceptance runs on `2026-10-22` and
 > `2026-10-23` exercised the **complete real-time closed loop (`Real Event -> DeepSeek -> Hard Risk
 > -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`)** during the live
 > October Flash PMI releases for France (`07:15 UTC`) and Germany (`07:30 UTC`), ingesting `1,786`
 > real-time Pepperstone Razor EUR/USD quotes (`sessions e98ba345-f77c-4492-89f3-71c3d3dca1b3` and
 > `ca74f379-51b5-4b58-b7cb-245a2241069e`), executing `6` live DeepSeek decisions (`memory_v=1..5`),
-> filling `2` target short entries (`-892 EUR` at `1.120102` and `-446 EUR` at `1.119292`) and `1`
-> automatic timed protective exit (`+892 EUR` at `1.119448`, `protective_max_holding_horizon`,
-> locking in `+$0.58` realized PnL / `+$0.52` net after commission), with all raw SQLite, JSONL, and
-> JSON evidence persisted in `data/shadow-observation-20261022/` and `data/shadow-observation-20261023/`.
+> and locking in `+6.54 pips` on the France PMI short (`+$0.58` realized PnL on 1x unleveraged
+> `-892 EUR`, or **`+$2.62` realized PnL / `+$2.36` net after commission (`+1.18%` account return in
+> 15 minutes) on `-0.04 lots` (`-4,000 EUR`) under the `pepperstone_razor_200` `$200 USD / 200x`
+> standard**), with all raw SQLite, JSONL, and JSON evidence persisted in
+> `data/shadow-observation-20261022/` and `data/shadow-observation-20261023/`.
 
 ---
 
@@ -211,9 +213,41 @@ to GitHub):
      - `wallstreetcn:calendar:1596056@1792740600:r2` (Germany Services PMI miss): DeepSeek updated thesis (`memory_v = 4`) and remained flat (`HOLD`).
      - `wallstreetcn:calendar:1596057@1792740600:r2` (Germany Composite PMI miss): DeepSeek updated thesis (`memory_v = 5`), proposed a smaller `SET_TARGET` (`weight = -0.05` short EUR/USD), passed `DeterministicHardRiskEngine`, and filled at `07:30:40.306Z` (`fill_id = 6385ca26-e1b5-45d9-bca6-f6e50149c032`, **`-446 EUR` at `1.119292`**, `commission_usd = $0.01`).
 - **Ending ledger & accounting state (`2026-10-23T07:37:10Z`)**:
-  - `cash_usd = "10000.51"`, `realized_pnl_usd = "0.58"`, `total_fees_usd = "0.07"`, `unrealized_pnl_usd = "-0.16"`, `equity = "10000.35"`, `daily_pnl_usd = "0.35"`.
+  - **1x Unleveraged (`pmi-live-report.json`, `$10,000` initial cash)**:
+    `cash_usd = "10000.51"`, `realized_pnl_usd = "0.58"`, `total_fees_usd = "0.07"`, `unrealized_pnl_usd = "-0.16"`, `equity = "10000.35"`, `daily_pnl_usd = "0.35"`.
+  - **Pepperstone Razor `$200 USD / 200x` Standard (`pmi-live-pepperstone-200-report.json`, `--account-profile pepperstone_razor_200`)**:
+    - Fill #1 (`07:15:23.706Z`, France Manufacturing PMI `weight = -0.10`): **`-0.04 lots` (`-4,000 EUR`)** at `1.120102`, `commission_usd = $0.13`, `margin_used_usd = $22.40` (`11.2%` of `$200`).
+    - Fill #2 (`07:30:23.722Z`, 15m `protective_max_holding_horizon`): **`+0.04 lots` (`+4,000 EUR`)** at `1.119448`, `commission_usd = $0.13`, **`realized_pnl_usd = +$2.62`**, **`equity_after_usd = $202.36`** (**`+1.18%` net return on `$200` in 15 minutes**).
+    - Fill #3 (`07:30:40.306Z`, Germany Composite PMI `weight = -0.05`): **`-0.02 lots` (`-2,000 EUR`)** at `1.119292`, `commission_usd = $0.07`, `margin_used_usd = $11.20`, `free_margin_usd = $190.43`.
 
-### 4.3 Earlier live news & DeepSeek observations (`live-poll-*`, `real-llm-*`, `deepseek-api-probe.json`)
+### 4.3 Pepperstone Razor `$200 USD / 200x` Testing Workflow & Risk-Controlled Profit Standard (`--account-profile pepperstone_razor_200`)
+
+`eventlens shadow` defaults to `--account-profile pepperstone_razor_200` (`RiskPolicy.pepperstone_razor_200()` + `ProtectiveExitPolicy.pepperstone_razor_200()`), aligning Shadow execution and accounting directly with the Pepperstone Razor Demo account (`5298703`):
+
+| Parameter | Standard Value | Purpose (Profit Maximization + Risk Control) |
+|---|---|---|
+| `initial_cash_usd` | **`$200.00 USD`** | Exact initial Demo account equity |
+| `leverage` | **`200` (`200:1`)** | `$40,000 USD` nominal purchasing power at `$200` equity |
+| `min_volume_eur` / `volume_step_eur` | **`1,000 EUR` (`0.01 lot`)** | Minimum trade size & lot increment (`ROUND_HALF_UP` on valid signals; non-zero signals clamp to `>= 0.01 lot`) |
+| `max_volume_eur` | **`10,000,000 EUR` (`100 lots`)** | Broker maximum trade size |
+| `max_position_weight` / `max_gross_weight` | **`0.25` (`25%` margin cap)** | Hard risk cap at `0.08 lots` (`8,000 EUR`, `~$44.80` margin), preserving **`>= 75%` free margin** |
+| `max_position_loss_usd` | **`$4.00 USD` (`2%` equity)** | Single-trade deterministic stop-loss (`protective_stop_loss`, ~`10 pips` on `0.04 lots`) |
+| `take_profit_usd` | **`$8.00 USD` (`4%` equity)** | Single-trade deterministic take-profit (`protective_take_profit`, `2:1` reward-to-risk, ~`20 pips` on `0.04 lots`) |
+| `max_holding_seconds` | **`900 s` (`15 minutes`)** | Captures the primary post-release macro impulse and exits before subsequent data releases |
+| `max_daily_loss_usd` | **`$8.00 USD` (`4%` equity)** | Daily circuit breaker (`protective_daily_loss_limit`, halts new risk after 2 full stop-outs) |
+| `min_equity_usd` | **`$180.00 USD` (`10%` max DD)** | Hard account equity floor (`equity_below_minimum_floor`) |
+
+Standard live test command around scheduled tier-1 EUR/USD or USD releases:
+```bash
+.venv/bin/eventlens shadow start \
+  --account-profile pepperstone_razor_200 \
+  --duration 600 \
+  --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge" \
+  --poll-news --news-interval 10 --event-interval 0.5 \
+  --quote-interval 0.05 --protection-interval 0.2 --call-model
+```
+
+### 4.4 Earlier live news & DeepSeek observations (`live-poll-*`, `real-llm-*`, `deepseek-api-probe.json`)
 
 - `data/shadow-observation-20261022/live-poll-report.json` (`07:13:43Z` → `07:14:28Z`, `45.0 s`):
   `6` live HTTPS polls, `57` baseline revisions excluded, `0` new arrivals.
@@ -226,8 +260,8 @@ to GitHub):
 
 ## 5. Acceptance summary: passed items and operational characteristics
 
-1. **Passed (Offline / synthetic regression verification — 311 tests)**:
-   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, stop/duration-expiry risk freeze & concurrent stop+fill cancellation, and Pepperstone Razor commission-bearing ECN `0.0 pip` quote verification are verified by **311 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
+1. **Passed (Offline / synthetic regression verification — 313 tests)**:
+   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, stop/duration-expiry risk freeze & concurrent stop+fill cancellation, Pepperstone Razor commission-bearing ECN `0.0 pip` quote verification, and the `pepperstone_razor_200` (`$200 USD / 200x / 0.01..100 lot / $4 SL / $8 TP / 900s`) sizing & protection standard are verified by **313 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
 2. **Passed (cTrader Demo EUR/USD quote bridge root-cause diagnosis & fix)**:
    - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), eliminated bridge-side tick throttling, and reduced `source_to_bridge` lag to `0.1860s` median and `bridge_to_receipt` lag to `0.0529s` max without adding artificial spreads or relaxing the 2-second freshness gate.
 3. **Passed (Bounded single-process live forward Shadow closed-loop acceptance)**:

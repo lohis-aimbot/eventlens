@@ -1,10 +1,12 @@
 """Observed account state is separate from memory and desired exposure."""
 
 from datetime import datetime
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal, Protocol
 
 from ..contracts import PortfolioSnapshot, TargetPortfolio, Thesis
+
+LOT_UNITS_EUR = Decimal("100000")
 
 ExposureChangeKind = Literal[
     "no_change",
@@ -14,11 +16,72 @@ ExposureChangeKind = Literal[
 ]
 
 
+def quantize_target_quantity_eur(
+    current_equity: Decimal,
+    mid_price: Decimal,
+    target_weight: Decimal,
+    *,
+    leverage: Decimal = Decimal("1"),
+    volume_step_eur: Decimal = Decimal("1"),
+    min_volume_eur: Decimal = Decimal("1"),
+    max_volume_eur: Decimal = Decimal("10000000"),
+    max_position_weight: Decimal = Decimal("1"),
+) -> Decimal:
+    """Convert target portfolio weight into EUR units respecting account leverage and lot step/bounds.
+
+    - In legacy unleveraged 1-EUR unit mode (`leverage == 1` and `volume_step_eur == 1` and `min_volume_eur == 1`),
+      uses `ROUND_DOWN` to the nearest 1 EUR unit.
+    - In leveraged broker lot mode (e.g. Pepperstone Razor `200x` leverage, `0.01 lot = 1,000 EUR` step,
+      `min = 1,000 EUR`, `max = 10,000,000 EUR`), scales notional by `current_equity * leverage * target_weight`,
+      quantizes to the nearest `volume_step_eur` (`ROUND_HALF_UP`) to maximize capital efficiency on valid
+      signals, clamps non-zero signals to at least `min_volume_eur` when permitted by `max_position_weight`,
+      and strictly caps size at `min(max_volume_eur, floor(buying_power * max_position_weight / mid_price))`
+      so lot rounding never breaches hard risk limits.
+    """
+    if target_weight == Decimal("0") or mid_price <= Decimal("0") or current_equity <= Decimal("0"):
+        return Decimal("0")
+    if (
+        leverage == Decimal("1")
+        and volume_step_eur == Decimal("1")
+        and min_volume_eur == Decimal("1")
+    ):
+        raw = ((current_equity * target_weight) / mid_price).quantize(
+            Decimal("1"), rounding=ROUND_DOWN
+        )
+        if abs(raw) > max_volume_eur:
+            return max_volume_eur if raw > Decimal("0") else -max_volume_eur
+        return raw
+
+    buying_power_usd = current_equity * leverage
+    raw_abs_eur = (buying_power_usd * abs(target_weight)) / mid_price
+    max_risk_steps = (
+        (buying_power_usd * max_position_weight) / mid_price / volume_step_eur
+    ).to_integral_value(rounding=ROUND_DOWN)
+    hard_cap_eur = min(max_volume_eur, max_risk_steps * volume_step_eur)
+    if hard_cap_eur < min_volume_eur:
+        return Decimal("0")
+
+    steps = (raw_abs_eur / volume_step_eur).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    sized_eur = steps * volume_step_eur
+    if sized_eur < min_volume_eur:
+        sized_eur = min_volume_eur
+    sized_eur = min(sized_eur, hard_cap_eur)
+    if sized_eur < min_volume_eur:
+        return Decimal("0")
+    return sized_eur if target_weight > Decimal("0") else -sized_eur
+
+
 def classify_exposure_change(
     current_qty: Decimal,
     current_equity: Decimal,
     mid_price: Decimal | None,
     target_weight: Decimal,
+    *,
+    leverage: Decimal = Decimal("1"),
+    volume_step_eur: Decimal = Decimal("1"),
+    min_volume_eur: Decimal = Decimal("1"),
+    max_volume_eur: Decimal = Decimal("10000000"),
+    max_position_weight: Decimal = Decimal("1"),
 ) -> ExposureChangeKind:
     """Classify whether a target weight reduces risk, increases risk, or reverses exposure."""
     if target_weight == Decimal("0"):
@@ -31,8 +94,15 @@ def classify_exposure_change(
         return "reversal_risk_increasing"
     if mid_price is None or mid_price <= Decimal("0") or current_equity <= Decimal("0"):
         return "risk_increasing"
-    desired_qty = ((current_equity * target_weight) / mid_price).quantize(
-        Decimal("1"), rounding=ROUND_DOWN
+    desired_qty = quantize_target_quantity_eur(
+        current_equity,
+        mid_price,
+        target_weight,
+        leverage=leverage,
+        volume_step_eur=volume_step_eur,
+        min_volume_eur=min_volume_eur,
+        max_volume_eur=max_volume_eur,
+        max_position_weight=max_position_weight,
     )
     if abs(desired_qty) < abs(current_qty):
         return "risk_reducing"

@@ -98,6 +98,8 @@ def make_quote(
     bridge_at: datetime | None = None,
     available_at: datetime | None = None,
     basis: str = "live_poll",
+    commission: str | None = None,
+    commission_type: str | None = None,
 ) -> Quote:
     src = source_at or (received_at - timedelta(milliseconds=30))
     brg = bridge_at or (received_at - timedelta(milliseconds=15))
@@ -112,6 +114,8 @@ def make_quote(
         basis=basis,  # type: ignore[arg-type]
         bid=Decimal(bid),
         ask=Decimal(ask),
+        commission=Decimal(commission) if commission is not None else None,
+        commission_type=commission_type,
     )
 
 
@@ -2181,3 +2185,219 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
     finally:
         ledger.close()
         qstore.close()
+
+
+def test_pepperstone_razor_200_leverage_lot_quantization_and_pmi_profit(tmp_path):
+    """Pepperstone Razor $200 USD / 200x leverage / 0.01..100 lot profile maximizes profit on valid PMI signals with controlled risk."""
+    now = datetime(2026, 10, 23, 7, 15, 23, tzinfo=UTC)
+    risk = RiskPolicy.pepperstone_razor_200()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
+
+    # Check lot quantization across conviction levels at EUR/USD = 1.12013
+    mid = Decimal("1.12013")
+    eq = Decimal("200.00")
+    assert risk.quantize_target_quantity_eur(eq, mid, Decimal("-0.02")) == Decimal(
+        "-1000"
+    )  # -0.01 lot min clamp
+    assert risk.quantize_target_quantity_eur(eq, mid, Decimal("-0.05")) == Decimal(
+        "-2000"
+    )  # -0.02 lots
+    assert risk.quantize_target_quantity_eur(eq, mid, Decimal("-0.10")) == Decimal(
+        "-4000"
+    )  # -0.04 lots (3,571 EUR rounded)
+    assert risk.quantize_target_quantity_eur(eq, mid, Decimal("-0.25")) == Decimal(
+        "-8000"
+    )  # -0.08 lots hard risk cap
+
+    ledger = SQLiteShadowLedger(
+        tmp_path / "razor200.sqlite",
+        initial_cash_usd=Decimal("200.00"),
+        risk_policy=risk,
+        exit_policy=exit_pol,
+        clock=lambda: now,
+    )
+    risk_engine = DeterministicHardRiskEngine(policy=risk, clock=lambda: now)
+    try:
+        # 1. France PMI at 07:15:23Z: weight = -0.10 at Razor 0.0-pip quote 1.12013
+        snap0 = ledger.snapshot_sync()
+        assert snap0.equity == Decimal("200.00")
+        dec_fr = make_decision(
+            snapshot_id=snap0.snapshot_id,
+            weight="-0.10",
+            started_at=now - timedelta(seconds=4),
+            completed_at=now,
+            valid_until=now + timedelta(seconds=120),
+        )
+        q_fr = make_quote(
+            bid="1.12013",
+            ask="1.12013",
+            received_at=now,
+            source_at=now - timedelta(milliseconds=100),
+            bridge_at=now - timedelta(milliseconds=50),
+            commission="3",
+            commission_type="UsdPerMillionUsdVolume",
+        )
+        mkt_fr = make_market(quote=q_fr, as_of=now)
+        assess_fr = asyncio.run(risk_engine.assess(dec_fr, snap0, mkt_fr))
+        assert assess_fr.outcome == "approve"
+        ledger.record_sync(dec_fr, assess_fr)
+
+        now = now + timedelta(milliseconds=312)
+        q_fr_fill = make_quote(
+            bid="1.12013",
+            ask="1.12013",
+            received_at=now,
+            source_at=now - timedelta(milliseconds=100),
+            bridge_at=now - timedelta(milliseconds=50),
+            commission="3",
+            commission_type="UsdPerMillionUsdVolume",
+        )
+        mkt_fr_fill = make_market(quote=q_fr_fill, as_of=now)
+        fills_fr = ledger.fill_pending(mkt_fr_fill)
+        assert len(fills_fr) == 1
+        assert fills_fr[0].delta_quantity == Decimal("-4000")
+        assert fills_fr[0].new_quantity == Decimal("-4000")
+        assert fills_fr[0].fill_price == Decimal("1.120102")
+        assert fills_fr[0].commission_usd == Decimal("0.13")
+
+        rep_open = ledger.report(market=mkt_fr_fill)
+        assert rep_open["quantity_eur"] == "-4000"
+        assert rep_open["quantity_lots"] == "-0.04"
+        assert rep_open["leverage"] == "200"
+        assert rep_open["margin_used_usd"] == "22.40"
+
+        # 2. 15-minute (900s) protective exit at 07:30:23Z on Razor quote 1.11942
+        now = now + timedelta(seconds=900)
+        q_exit = make_quote(
+            bid="1.11942",
+            ask="1.11942",
+            received_at=now,
+            source_at=now - timedelta(milliseconds=100),
+            bridge_at=now - timedelta(milliseconds=50),
+            commission="3",
+            commission_type="UsdPerMillionUsdVolume",
+        )
+        mkt_exit = make_market(quote=q_exit, as_of=now)
+        exits = ledger.evaluate_protective_exits(mkt_exit)
+        assert len(exits) == 1
+        assert exits[0].reason == "protective_max_holding_horizon"
+        assert exits[0].delta_quantity == Decimal("4000")
+        assert exits[0].new_quantity == Decimal("0")
+        assert exits[0].fill_price == Decimal("1.119448")
+        assert exits[0].realized_pnl_usd == Decimal("2.62")
+        assert exits[0].commission_usd == Decimal("0.13")
+        assert exits[0].equity_after_usd == Decimal("202.36")
+
+        # 3. Germany Composite PMI at 07:30:40Z: weight = -0.05 at Razor quote 1.11932
+        now = now + timedelta(seconds=17)
+        q_de = make_quote(
+            bid="1.11932",
+            ask="1.11932",
+            received_at=now,
+            source_at=now - timedelta(milliseconds=100),
+            bridge_at=now - timedelta(milliseconds=50),
+            commission="3",
+            commission_type="UsdPerMillionUsdVolume",
+        )
+        mkt_de = make_market(quote=q_de, as_of=now)
+        snap1 = ledger.snapshot_sync(market=mkt_de)
+        dec_de = make_decision(
+            decision_id="decision-de",
+            snapshot_id=snap1.snapshot_id,
+            weight="-0.05",
+            started_at=now - timedelta(seconds=3),
+            completed_at=now,
+            valid_until=now + timedelta(seconds=120),
+        )
+        assess_de = asyncio.run(risk_engine.assess(dec_de, snap1, mkt_de))
+        assert assess_de.outcome == "approve"
+        ledger.record_sync(dec_de, assess_de)
+        now = now + timedelta(milliseconds=250)
+        mkt_de_fill = make_market(
+            quote=make_quote(
+                bid="1.11932",
+                ask="1.11932",
+                received_at=now,
+                source_at=now - timedelta(milliseconds=80),
+                bridge_at=now - timedelta(milliseconds=40),
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        fills_de = ledger.fill_pending(mkt_de_fill)
+        assert len(fills_de) == 1
+        assert fills_de[0].delta_quantity == Decimal("-2000")
+        assert fills_de[0].new_quantity == Decimal("-2000")
+        assert ledger.report(market=mkt_de_fill)["quantity_lots"] == "-0.02"
+    finally:
+        ledger.close()
+
+
+def test_pepperstone_razor_200_protective_take_profit_and_stop_loss(tmp_path):
+    """Pepperstone Razor $200 profile enforces 2:1 reward-to-risk ($8 TP / $4 SL) deterministically."""
+    now = T0
+    risk = RiskPolicy.pepperstone_razor_200()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
+    ledger = SQLiteShadowLedger(
+        tmp_path / "razor200_tp_sl.sqlite",
+        initial_cash_usd=Decimal("200.00"),
+        risk_policy=risk,
+        exit_policy=exit_pol,
+        clock=lambda: now,
+    )
+    risk_engine = DeterministicHardRiskEngine(policy=risk, clock=lambda: now)
+    try:
+        # Open -0.04 lots (-4,000 EUR) short at 1.12000
+        snap0 = ledger.snapshot_sync()
+        dec = make_decision(
+            snapshot_id=snap0.snapshot_id,
+            weight="-0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        mkt_open = make_market(
+            quote=make_quote(
+                bid="1.12000",
+                ask="1.12000",
+                received_at=now,
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        assess = asyncio.run(risk_engine.assess(dec, snap0, mkt_open))
+        ledger.record_sync(dec, assess)
+        now = now + timedelta(seconds=1)
+        mkt_fill = make_market(
+            quote=make_quote(
+                bid="1.12000",
+                ask="1.12000",
+                received_at=now,
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        assert len(ledger.fill_pending(mkt_fill)) == 1
+
+        # Fast 21-pip drop to 1.11790 (> $8.00 unrealized profit on 4,000 EUR) triggers protective_take_profit immediately
+        now = now + timedelta(seconds=60)
+        mkt_tp = make_market(
+            quote=make_quote(
+                bid="1.11790",
+                ask="1.11790",
+                received_at=now,
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        tp_fills = ledger.evaluate_protective_exits(mkt_tp)
+        assert len(tp_fills) == 1
+        assert tp_fills[0].reason == "protective_take_profit"
+        assert tp_fills[0].realized_pnl_usd >= Decimal("8.00")
+        assert tp_fills[0].new_quantity == Decimal("0")
+    finally:
+        ledger.close()

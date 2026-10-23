@@ -6,7 +6,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol, Self
 from uuid import uuid4
@@ -27,7 +27,7 @@ from ..contracts import (
     Timestamp,
 )
 from ..quotes import QuoteQualityPolicy, validate_market_quote
-from .portfolio import classify_exposure_change
+from .portfolio import LOT_UNITS_EUR
 from .risk import RiskPolicy, is_in_daily_close_window, trading_day_window
 
 BPS = Decimal("10000")
@@ -119,6 +119,7 @@ class ProtectiveExitPolicy(Contract):
 
     max_holding_seconds: int = Field(default=1800, gt=0)
     max_position_loss_usd: Decimal = Field(default=Decimal("150"), gt=0)
+    take_profit_usd: Decimal | None = Field(default=None, gt=0)
     max_daily_loss_usd: Decimal = Field(default=Decimal("200"), gt=0)
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
@@ -130,6 +131,26 @@ class ProtectiveExitPolicy(Contract):
     rollover_hour: int = Field(default=17, ge=0, le=23)
     rollover_minute: int = Field(default=0, ge=0, le=59)
     daily_close_utc_hour: int | None = Field(default=None, ge=0, le=23)
+
+    @classmethod
+    def pepperstone_razor_200(
+        cls,
+        *,
+        max_holding_seconds: int = 900,
+        max_quote_age_ms: int = 2000,
+        max_position_loss_usd: Decimal = Decimal("4.00"),
+        take_profit_usd: Decimal | None = Decimal("8.00"),
+        max_daily_loss_usd: Decimal = Decimal("8.00"),
+    ) -> "ProtectiveExitPolicy":
+        """Pepperstone Razor $200 USD Demo protection standard: 15m horizon, $4 SL, $8 TP (2:1 R:R), $8 daily loss."""
+        return cls(
+            max_holding_seconds=max_holding_seconds,
+            max_position_loss_usd=max_position_loss_usd,
+            take_profit_usd=take_profit_usd,
+            max_daily_loss_usd=max_daily_loss_usd,
+            max_quote_age_ms=max_quote_age_ms,
+            max_spread_pips=Decimal("2.0"),
+        )
 
     def quote_quality_policy(self, instrument: str = "EUR/USD") -> QuoteQualityPolicy:
         return QuoteQualityPolicy(
@@ -457,7 +478,7 @@ class SQLiteShadowLedger:
         else:
             mid = entry if entry > Decimal("0") else Decimal("1.0")
             equity = Decimal(account["last_valid_equity_usd"] or account["cash_usd"])
-        change_kind = classify_exposure_change(current_qty, equity, mid, weight)
+        change_kind = self.risk_policy.classify_exposure_change(current_qty, equity, mid, weight)
         return change_kind in ("risk_increasing", "reversal_risk_increasing")
 
     def _cancel_risk_increasing_pending_locked(
@@ -981,7 +1002,7 @@ class SQLiteShadowLedger:
                 daily_row = self._ensure_daily_state_locked(now, equity, valid_valuation=True)
                 daily_pnl = equity - Decimal(daily_row["baseline_equity_usd"])
 
-                change_kind = classify_exposure_change(current_qty, equity, mid, weight)
+                change_kind = active_risk.classify_exposure_change(current_qty, equity, mid, weight)
                 increases_risk = change_kind in ("risk_increasing", "reversal_risk_increasing")
 
                 loop_stop = self._active_stop_reason_locked(
@@ -1002,6 +1023,8 @@ class SQLiteShadowLedger:
                         f"execution_id={row['execution_id']} decision_id={decision.decision_id}",
                     )
                     continue
+
+                desired_qty = active_risk.quantize_target_quantity_eur(equity, mid, weight)
 
                 reject_at_fill: str | None = None
                 if increases_risk:
@@ -1027,6 +1050,11 @@ class SQLiteShadowLedger:
                         or abs(weight) > active_risk.max_gross_weight
                     ):
                         reject_at_fill = "weight_limit_exceeded_at_fill"
+                    elif weight != Decimal("0") and (
+                        abs(desired_qty) < active_risk.min_volume_eur
+                        or abs(desired_qty) > active_risk.max_volume_eur
+                    ):
+                        reject_at_fill = "volume_limit_exceeded_at_fill"
                     elif is_in_daily_close_window(
                         now,
                         tz_name=active_risk.trading_timezone,
@@ -1052,11 +1080,6 @@ class SQLiteShadowLedger:
                     )
                     continue
 
-                desired_qty = (
-                    Decimal("0")
-                    if weight == Decimal("0")
-                    else ((equity * weight) / mid).quantize(Decimal("1"), rounding=ROUND_DOWN)
-                )
                 delta = desired_qty - current_qty
                 if delta == Decimal("0"):
                     self.db.execute(
@@ -1154,6 +1177,11 @@ class SQLiteShadowLedger:
                 daily_pnl = equity - Decimal(daily_row["baseline_equity_usd"])
                 if unrealized <= -self.exit_policy.max_position_loss_usd:
                     exit_reason = exit_reason or "protective_stop_loss"
+                elif (
+                    self.exit_policy.take_profit_usd is not None
+                    and unrealized >= self.exit_policy.take_profit_usd
+                ):
+                    exit_reason = exit_reason or "protective_take_profit"
                 elif (
                     bool(daily_row["loss_limit_triggered"])
                     or daily_pnl <= -self.exit_policy.max_daily_loss_usd
@@ -1368,6 +1396,27 @@ class SQLiteShadowLedger:
                 dict(row)
                 for row in self.db.execute("SELECT * FROM shadow_daily_state ORDER BY trading_day")
             ]
+            qty_eur = Decimal(account["quantity_eur"])
+            qty_lots = (qty_eur / LOT_UNITS_EUR).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            ref_price = (
+                Decimal(account["avg_entry_price"])
+                if account["avg_entry_price"]
+                else Decimal("1.0")
+            )
+            if market is not None:
+                q_eur = next((q for q in market.quotes if q.instrument == "EUR/USD"), None)
+                if q_eur is not None:
+                    ref_price = (q_eur.bid + q_eur.ask) / Decimal("2")
+            margin_used = (
+                ((abs(qty_eur) * ref_price) / self.risk_policy.leverage).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                if qty_eur != Decimal("0")
+                else Decimal("0.00")
+            )
+            free_margin = (snap.equity - margin_used).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
             return {
                 "scope": "shadow_ledger_only",
                 "execution_authorized": False,
@@ -1379,6 +1428,10 @@ class SQLiteShadowLedger:
                 "realized_pnl_usd": account["realized_pnl_usd"],
                 "total_fees_usd": account["total_fees_usd"],
                 "quantity_eur": account["quantity_eur"],
+                "quantity_lots": str(qty_lots),
+                "leverage": str(self.risk_policy.leverage),
+                "margin_used_usd": str(margin_used),
+                "free_margin_usd": str(free_margin),
                 "avg_entry_price": account["avg_entry_price"],
                 "opened_at": account["opened_at"],
                 "pending_exit_reason": account["pending_exit_reason"],

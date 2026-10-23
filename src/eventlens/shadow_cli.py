@@ -6,6 +6,7 @@ import json
 import logging
 import math
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,7 +19,7 @@ from .sources.wallstreetcn import WallStreetCNFilter, WallStreetCNSource
 from .sqlite_memory import SQLiteThesisMemory
 from .trading.agent import SinglePassTradingAgent
 from .trading.execution import ProtectiveExitPolicy, ShadowCostModel, SQLiteShadowLedger
-from .trading.portfolio import DeterministicTargetValidator
+from .trading.portfolio import LOT_UNITS_EUR, DeterministicTargetValidator
 from .trading.risk import DeterministicHardRiskEngine, RiskPolicy
 
 
@@ -45,20 +46,80 @@ def _load_latest_market(quotes_path: Path, basis: str) -> MarketSnapshot | None:
         qstore.close()
 
 
+def _build_policies(
+    args: argparse.Namespace,
+) -> tuple[Decimal, RiskPolicy, ProtectiveExitPolicy]:
+    profile = getattr(args, "account_profile", "pepperstone_razor_200")
+    kill_switch = bool(getattr(args, "kill_switch", False))
+    max_quote_age_ms = int(getattr(args, "max_quote_age", 2.0) * 1000)
+    raw_holding = getattr(args, "max_holding_seconds", None)
+
+    if profile == "pepperstone_razor_200":
+        initial_cash = Decimal("200.00")
+        risk = RiskPolicy.pepperstone_razor_200(
+            kill_switch_active=kill_switch,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        exit_pol = ProtectiveExitPolicy.pepperstone_razor_200(
+            max_holding_seconds=int(raw_holding) if raw_holding is not None else 900,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+    else:
+        initial_cash = Decimal("10000.00")
+        risk = RiskPolicy(
+            kill_switch_active=kill_switch,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+        exit_pol = ProtectiveExitPolicy(
+            max_holding_seconds=int(raw_holding) if raw_holding is not None else 1800,
+            max_quote_age_ms=max_quote_age_ms,
+        )
+
+    if getattr(args, "initial_cash", None) is not None:
+        initial_cash = Decimal(str(args.initial_cash))
+    risk_updates: dict[str, Any] = {}
+    exit_updates: dict[str, Any] = {}
+    if getattr(args, "leverage", None) is not None:
+        risk_updates["leverage"] = Decimal(str(args.leverage))
+    if getattr(args, "min_lot", None) is not None:
+        risk_updates["min_volume_eur"] = (Decimal(str(args.min_lot)) * LOT_UNITS_EUR).quantize(
+            Decimal("1")
+        )
+    if getattr(args, "max_lot", None) is not None:
+        risk_updates["max_volume_eur"] = (Decimal(str(args.max_lot)) * LOT_UNITS_EUR).quantize(
+            Decimal("1")
+        )
+    if getattr(args, "lot_step", None) is not None:
+        risk_updates["volume_step_eur"] = (Decimal(str(args.lot_step)) * LOT_UNITS_EUR).quantize(
+            Decimal("1")
+        )
+    if getattr(args, "min_equity", None) is not None:
+        risk_updates["min_equity_usd"] = Decimal(str(args.min_equity))
+    if getattr(args, "max_daily_loss", None) is not None:
+        daily_loss = Decimal(str(args.max_daily_loss))
+        risk_updates["max_daily_loss_usd"] = daily_loss
+        exit_updates["max_daily_loss_usd"] = daily_loss
+    if getattr(args, "max_position_loss", None) is not None:
+        exit_updates["max_position_loss_usd"] = Decimal(str(args.max_position_loss))
+    if getattr(args, "take_profit", None) is not None:
+        tp = Decimal(str(args.take_profit))
+        exit_updates["take_profit_usd"] = tp if tp > Decimal("0") else None
+
+    if risk_updates:
+        risk = risk.model_copy(update=risk_updates)
+    if exit_updates:
+        exit_pol = exit_pol.model_copy(update=exit_updates)
+    return initial_cash, risk, exit_pol
+
+
 async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     now = datetime.now(UTC)
-    risk_policy = RiskPolicy(
-        kill_switch_active=getattr(args, "kill_switch", False),
-        max_quote_age_ms=int(getattr(args, "max_quote_age", 2.0) * 1000),
-    )
-    exit_policy = ProtectiveExitPolicy(
-        max_holding_seconds=getattr(args, "max_holding_seconds", 1800),
-        max_quote_age_ms=int(getattr(args, "max_quote_age", 2.0) * 1000),
-    )
+    initial_cash_usd, risk_policy, exit_policy = _build_policies(args)
     args.shadow_db.parent.mkdir(parents=True, exist_ok=True)
     state_store = SQLiteRuntimeStore(args.shadow_db)
     ledger = SQLiteShadowLedger(
         args.shadow_db,
+        initial_cash_usd=initial_cash_usd,
         cost_model=ShadowCostModel(),
         exit_policy=exit_policy,
         risk_policy=risk_policy,
@@ -224,6 +285,66 @@ def _add_common_db_args(p: argparse.ArgumentParser, *, suppress_defaults: bool =
         help="SQLite database for Demo EUR/USD quote observations",
     )
     p.add_argument(
+        "--account-profile",
+        choices=("pepperstone_razor_200", "institutional_10k"),
+        default=default_flag if suppress_defaults else "pepperstone_razor_200",
+        help="Account sizing and risk profile (default: pepperstone_razor_200 = $200 USD, 200x leverage, 0.01..100 lots)",
+    )
+    p.add_argument(
+        "--initial-cash",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override initial cash in USD",
+    )
+    p.add_argument(
+        "--leverage",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override account leverage multiplier (e.g. 200)",
+    )
+    p.add_argument(
+        "--min-lot",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override minimum trade size in standard lots (e.g. 0.01)",
+    )
+    p.add_argument(
+        "--max-lot",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override maximum trade size in standard lots (e.g. 100)",
+    )
+    p.add_argument(
+        "--lot-step",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override lot step increment in standard lots (e.g. 0.01)",
+    )
+    p.add_argument(
+        "--max-position-loss",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override single-position protective stop-loss in USD",
+    )
+    p.add_argument(
+        "--take-profit",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override single-position protective take-profit in USD (0 to disable)",
+    )
+    p.add_argument(
+        "--max-daily-loss",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override daily loss limit in USD",
+    )
+    p.add_argument(
+        "--min-equity",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override hard minimum equity floor in USD",
+    )
+    p.add_argument(
         "--verbose",
         action="store_true",
         default=default_flag if suppress_defaults else False,
@@ -271,7 +392,7 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("--quote-interval", type=float, default=0.5)
     start_p.add_argument("--protection-interval", type=float, default=0.5)
     start_p.add_argument("--max-quote-age", type=float, default=2.0)
-    start_p.add_argument("--max-holding-seconds", type=int, default=1800)
+    start_p.add_argument("--max-holding-seconds", type=int, default=None)
     start_p.add_argument("--kill-switch", action="store_true")
 
     stop_p = sub.add_parser("stop", help="Signal a running Shadow loop to stop cleanly")

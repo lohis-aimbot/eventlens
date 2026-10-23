@@ -1049,9 +1049,13 @@ class IntradayEventRuntime:
                 mid = (
                     (q_eur.bid + q_eur.ask) / Decimal("2") if q_eur is not None else Decimal("1.0")
                 )
-                increases_risk = classify_exposure_change(
-                    curr_qty, post_portfolio.equity, mid, weight
-                ) in ("risk_increasing", "reversal_risk_increasing")
+                policy = getattr(self.risk_engine, "policy", None)
+                change_kind = (
+                    policy.classify_exposure_change(curr_qty, post_portfolio.equity, mid, weight)
+                    if policy is not None and hasattr(policy, "classify_exposure_change")
+                    else classify_exposure_change(curr_qty, post_portfolio.equity, mid, weight)
+                )
+                increases_risk = change_kind in ("risk_increasing", "reversal_risk_increasing")
 
             if increases_risk:
                 stop_block_reason = f"blocked_by_{active_stop}"
@@ -2000,6 +2004,7 @@ class ShadowRunner:
             "stopped_at": stopped_at.isoformat(),
             "duration_seconds": duration_seconds,
             "open_quantity_eur": ledger_rep["quantity_eur"],
+            "open_quantity_lots": ledger_rep["quantity_lots"],
             "pending_exit_reason": ledger_rep["pending_exit_reason"],
             "pending_order_ids": ledger_rep["snapshot"]["pending_order_ids"],
             "observer": (
