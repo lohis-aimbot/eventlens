@@ -122,6 +122,10 @@ class PortfolioSnapshot(Contract):
     valuation_reason: str = "flat_no_quote_needed"
 
 
+TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS: frozenset[str] = frozenset({"ctrader_algo"})
+TRUSTED_COMMISSION_TYPES: frozenset[str] = frozenset({"UsdPerMillionUsdVolume"})
+
+
 class Quote(Contract):
     instrument: Identifier
     source_at: Timestamp | None = None
@@ -177,9 +181,10 @@ class Quote(Contract):
     def has_verified_commission(self) -> bool:
         return (
             self.has_verified_provenance
+            and self.source_provider in TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS
             and self.commission is not None
             and self.commission > Decimal("0")
-            and self.commission_type == "UsdPerMillionUsdVolume"
+            and self.commission_type in TRUSTED_COMMISSION_TYPES
         )
 
 

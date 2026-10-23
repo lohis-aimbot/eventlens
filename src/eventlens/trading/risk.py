@@ -115,6 +115,7 @@ class RiskPolicy(Contract):
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
+    allow_commission_bearing_zero_spread: bool = False
     require_verified_quote_provenance: bool = False
     assessment_ttl_seconds: int = Field(default=30, gt=0)
     trading_timezone: str = "America/New_York"
@@ -130,6 +131,7 @@ class RiskPolicy(Contract):
         *,
         kill_switch_active: bool = False,
         max_quote_age_ms: int = 2000,
+        allow_commission_bearing_zero_spread: bool = True,
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo account standard: 200x leverage, 0.01..100 lots, controlled risk."""
         return cls(
@@ -144,6 +146,7 @@ class RiskPolicy(Contract):
             max_daily_loss_usd=Decimal("8.00"),
             max_quote_age_ms=max_quote_age_ms,
             max_spread_pips=Decimal("2.0"),
+            allow_commission_bearing_zero_spread=allow_commission_bearing_zero_spread,
             kill_switch_active=kill_switch_active,
         )
 
@@ -189,6 +192,7 @@ class RiskPolicy(Contract):
             max_quote_age_ms=self.max_quote_age_ms,
             max_spread_pips=self.max_spread_pips,
             allow_zero_spread=self.allow_zero_spread,
+            allow_commission_bearing_zero_spread=self.allow_commission_bearing_zero_spread,
             require_verified_provenance=self.require_verified_quote_provenance,
         )
 

@@ -29,7 +29,7 @@ from .contracts import (
 )
 from .memory import ThesisMemory
 from .observer import Basis, ObserverStore
-from .quotes import QuoteStore, build_market_snapshot
+from .quotes import QuoteStore, build_market_snapshot, validate_market_quote
 from .sources.events import EventFilter
 from .sources.wallstreetcn import CaptureError, WallStreetCNFilter, WallStreetCNSource
 from .trading.agent import SinglePassTradingAgent, TradingAgent
@@ -1491,6 +1491,11 @@ class ShadowRunner:
         llm_timeout_seconds: float = 20.0,
         max_reasoning_attempts: int = 3,
         max_recovery_event_age_seconds: float = 60.0,
+        exit_buffer_seconds: float = 0.0,
+        exit_drain_timeout_seconds: float = 0.0,
+        strict_window_coverage: bool = False,
+        close_on_stop: bool = False,
+        confirm_handoff: bool = False,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.runtime = runtime
@@ -1509,11 +1514,24 @@ class ShadowRunner:
         self.llm_timeout_seconds = llm_timeout_seconds
         self.max_reasoning_attempts = max_reasoning_attempts
         self.max_recovery_event_age_seconds = max_recovery_event_age_seconds
+        self.exit_buffer_seconds = exit_buffer_seconds
+        self.exit_drain_timeout_seconds = exit_drain_timeout_seconds
+        self.strict_window_coverage = strict_window_coverage
+        self.close_on_stop = close_on_stop
+        self.confirm_handoff = confirm_handoff
         self.clock = clock
         self._stop_event = asyncio.Event()
+        self._drain_stop_event = asyncio.Event()
         self._stop_reason: str | None = None
         self._run_started_at: datetime | None = None
         self._run_duration_seconds: float | None = None
+        self._protection_lock = threading.Lock()
+        self._protection_checks_total = 0
+        self._protection_checks_valid_quote = 0
+        self._protection_checks_unavailable_quote = 0
+        self._protection_checks_unavailable_while_open = 0
+        self._active_outage: dict[str, Any] | None = None
+        self._outage_intervals: list[dict[str, Any]] = []
         self._quote_tail: Any = None
         self._quote_collector: Any = None
         self._quote_bridge_lock = threading.Lock()
@@ -1584,16 +1602,38 @@ class ShadowRunner:
             return self._stop_reason
         if self._stop_event.is_set():
             return "runner_stop_requested"
-        if (
-            self._run_started_at is not None
-            and self._run_duration_seconds is not None
-            and check_now >= self._run_started_at + timedelta(seconds=self._run_duration_seconds)
-        ):
-            return "runner_duration_expired"
+        required_window = float(self.ledger.exit_policy.max_holding_seconds) + float(
+            self.exit_buffer_seconds
+        )
+        enforce_window = self.strict_window_coverage or self.exit_buffer_seconds > 0.0
+        if self._run_started_at is not None and self._run_duration_seconds is not None:
+            run_end = self._run_started_at + timedelta(seconds=self._run_duration_seconds)
+            if check_now >= run_end:
+                return "runner_duration_expired"
+            if enforce_window:
+                remaining_run = (run_end - check_now).total_seconds()
+                if remaining_run < required_window:
+                    return "insufficient_remaining_run_window_for_new_risk"
+        if enforce_window and self.quote_store is not None:
+            bridge_rem = self.quote_store.active_session_remaining_seconds(
+                check_now, basis=self.basis
+            )
+            if bridge_rem is not None and bridge_rem < required_window:
+                return "insufficient_quote_bridge_window_for_new_risk"
         return None
 
-    def stop(self, *, reason: str = "runner_stop_requested") -> None:
+    def stop(
+        self,
+        *,
+        reason: str = "runner_stop_requested",
+        close_on_stop: bool | None = None,
+        confirm_handoff: bool | None = None,
+    ) -> None:
         now = _utc(self.clock())
+        if close_on_stop is not None:
+            self.close_on_stop = close_on_stop
+        if confirm_handoff is not None:
+            self.confirm_handoff = confirm_handoff
         self._stop_reason = reason
         self._stop_event.set()
         if self.runtime.state_store is not None:
@@ -1601,6 +1641,10 @@ class ShadowRunner:
         cancelled = self.ledger.cancel_risk_increasing_pending_orders(
             now=now, reason=f"cancelled_on_{reason}"
         )
+        if self.close_on_stop:
+            self.ledger.request_protective_exit_on_stop(
+                now=now, reason=f"protective_exit_on_{reason}"
+            )
         if self.runtime.state_store is not None:
             for item in cancelled:
                 ev_id = self.runtime.state_store.mark_order_cancelled(
@@ -1668,11 +1712,88 @@ class ShadowRunner:
                 await self.runtime.audit_sink.append(rec)
         return exit_fills, target_fills
 
+    def _record_protection_check(
+        self, now: datetime, market: MarketSnapshot | None, *, position_open: bool
+    ) -> None:
+        quote_check = validate_market_quote(
+            market,
+            as_of=now,
+            policy=self.ledger.exit_policy.quote_quality_policy("EUR/USD"),
+        )
+        with self._protection_lock:
+            self._protection_checks_total += 1
+            if quote_check.valid:
+                self._protection_checks_valid_quote += 1
+                if self._active_outage is not None:
+                    start_dt: datetime = self._active_outage["started_dt"]
+                    self._outage_intervals.append(
+                        {
+                            "started_at": self._active_outage["started_at"],
+                            "ended_at": now.isoformat(),
+                            "duration_seconds": round(
+                                max(0.0, (now - start_dt).total_seconds()), 4
+                            ),
+                            "reason": self._active_outage["reason"],
+                            "position_open": self._active_outage["position_open"],
+                        }
+                    )
+                    self._active_outage = None
+            else:
+                self._protection_checks_unavailable_quote += 1
+                if position_open:
+                    self._protection_checks_unavailable_while_open += 1
+                if self._active_outage is None:
+                    self._active_outage = {
+                        "started_at": now.isoformat(),
+                        "started_dt": now,
+                        "reason": quote_check.reason,
+                        "position_open": position_open,
+                    }
+                elif position_open:
+                    self._active_outage["position_open"] = True
+
+    def _finalize_protection_coverage(self, stopped_at: datetime) -> dict[str, Any]:
+        with self._protection_lock:
+            if self._active_outage is not None:
+                start_dt: datetime = self._active_outage["started_dt"]
+                self._outage_intervals.append(
+                    {
+                        "started_at": self._active_outage["started_at"],
+                        "ended_at": stopped_at.isoformat(),
+                        "duration_seconds": round(
+                            max(0.0, (stopped_at - start_dt).total_seconds()), 4
+                        ),
+                        "reason": self._active_outage["reason"],
+                        "position_open": self._active_outage["position_open"],
+                    }
+                )
+                self._active_outage = None
+            max_outage = max(
+                (float(item["duration_seconds"]) for item in self._outage_intervals),
+                default=0.0,
+            )
+            return {
+                "total_protection_checks": self._protection_checks_total,
+                "valid_quote_checks": self._protection_checks_valid_quote,
+                "unavailable_quote_checks": self._protection_checks_unavailable_quote,
+                "unavailable_checks_while_position_open": self._protection_checks_unavailable_while_open,
+                "outage_interval_count": len(self._outage_intervals),
+                "max_outage_seconds": max_outage,
+                "outage_intervals": list(self._outage_intervals),
+            }
+
     async def step_protection(self) -> tuple[int, tuple[ShadowFill, ...]]:
         """Execute one timer-driven order expiry and protective exit check without acquiring the LLM lock."""
         now = _utc(self.clock())
         expired = await asyncio.to_thread(self.ledger.expire_pending_orders, now=now)
         market = await asyncio.to_thread(self._current_market)
+        acct = await asyncio.to_thread(
+            lambda: self.ledger.db.execute(
+                "SELECT quantity_eur FROM shadow_account WHERE id=1"
+            ).fetchone()
+        )
+        pos_open = acct is not None and Decimal(acct["quantity_eur"]) != Decimal("0")
+        self._record_protection_check(now, market, position_open=pos_open)
         exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
         if self.runtime.state_store is not None:
             for fill in exit_fills:
@@ -1799,14 +1920,22 @@ class ShadowRunner:
         return tuple(results)
 
     async def run(self, *, duration_seconds: float) -> dict[str, Any]:
-        """Run all three loops concurrently with a hard duration limit and clean shutdown."""
+        """Run all three loops concurrently with a hard duration limit and two-phase protective drain shutdown."""
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
         self._stop_event = asyncio.Event()
+        self._drain_stop_event = asyncio.Event()
         self._stop_reason = None
         started_at = _utc(self.clock())
         self._run_started_at = started_at
         self._run_duration_seconds = duration_seconds
+        with self._protection_lock:
+            self._protection_checks_total = 0
+            self._protection_checks_valid_quote = 0
+            self._protection_checks_unavailable_quote = 0
+            self._protection_checks_unavailable_while_open = 0
+            self._active_outage = None
+            self._outage_intervals = []
         if self.runtime.state_store is not None:
             self.runtime.state_store.update_runner_state(
                 status="running",
@@ -1817,35 +1946,35 @@ class ShadowRunner:
             )
 
         async def _quote_worker() -> None:
-            while not self._stop_event.is_set():
+            while not self._drain_stop_event.is_set():
                 if (
-                    self.runtime.state_store is not None
+                    not self._stop_event.is_set()
+                    and self.runtime.state_store is not None
                     and self.runtime.state_store.is_stop_requested()
                 ):
                     self._stop_event.set()
-                    break
                 try:
-                    await self.step_quotes_and_fills()
+                    await self.step_quotes_and_fills(stop_reason=self._stop_reason)
                 except Exception as exc:
                     logger.warning("quote_worker_error: %s", exc)
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=self.quote_interval_seconds
+                        self._drain_stop_event.wait(), timeout=self.quote_interval_seconds
                     )
                 except TimeoutError:
                     pass
 
         async def _protection_worker() -> None:
-            while not self._stop_event.is_set():
+            while not self._drain_stop_event.is_set():
                 if (
-                    self.runtime.state_store is not None
+                    not self._stop_event.is_set()
+                    and self.runtime.state_store is not None
                     and self.runtime.state_store.is_stop_requested()
                 ):
                     self._stop_event.set()
-                    break
                 try:
                     await self.step_protection()
-                    if self.runtime.state_store is not None:
+                    if self.runtime.state_store is not None and not self._stop_event.is_set():
                         self.runtime.state_store.update_runner_state(
                             status="running", now=_utc(self.clock())
                         )
@@ -1853,7 +1982,7 @@ class ShadowRunner:
                     logger.warning("protection_worker_error: %s", exc)
                 try:
                     await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=self.protection_interval_seconds
+                        self._drain_stop_event.wait(), timeout=self.protection_interval_seconds
                     )
                 except TimeoutError:
                     pass
@@ -1912,12 +2041,23 @@ class ShadowRunner:
                 except TimeoutError:
                     pass
 
-        tasks = [
-            asyncio.create_task(_protection_worker(), name="shadow-protection"),
-            asyncio.create_task(_quote_worker(), name="shadow-quotes"),
-            asyncio.create_task(_news_and_event_worker(), name="shadow-events"),
-        ]
+        def _open_position_state() -> tuple[Decimal, str | None]:
+            row = self.ledger.db.execute(
+                "SELECT quantity_eur, pending_exit_reason FROM shadow_account WHERE id=1"
+            ).fetchone()
+            if row is None:
+                return Decimal("0"), None
+            return Decimal(row["quantity_eur"]), row["pending_exit_reason"]
+
+        protection_task = asyncio.create_task(_protection_worker(), name="shadow-protection")
+        quote_task = asyncio.create_task(_quote_worker(), name="shadow-quotes")
+        event_task = asyncio.create_task(_news_and_event_worker(), name="shadow-events")
         timed_out = False
+        shutdown_reason = "runner_stop_requested"
+        event_worker_stopped_before_drain = False
+        quote_worker_alive_during_drain = False
+        protection_worker_alive_during_drain = False
+        drain_elapsed_seconds = 0.0
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=duration_seconds)
         except TimeoutError:
@@ -1947,15 +2087,25 @@ class ShadowRunner:
                     now=shutdown_now,
                     stop_reason=shutdown_reason,
                 )
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Phase 1: Stop new event/LLM worker first while keeping quote & protection workers running
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+            event_worker_stopped_before_drain = event_task.done()
+            quote_worker_alive_during_drain = not quote_task.done()
+            protection_worker_alive_during_drain = not protection_task.done()
 
             cancelled_orders = await asyncio.to_thread(
                 self.ledger.cancel_risk_increasing_pending_orders,
                 now=_utc(self.clock()),
                 reason=f"cancelled_on_{shutdown_reason}",
             )
+            if self.close_on_stop:
+                await asyncio.to_thread(
+                    self.ledger.request_protective_exit_on_stop,
+                    now=_utc(self.clock()),
+                    reason=f"protective_exit_on_{shutdown_reason}",
+                )
             if self.runtime.state_store is not None:
                 for item in cancelled_orders:
                     ev_id = self.runtime.state_store.mark_order_cancelled(
@@ -1977,12 +2127,65 @@ class ShadowRunner:
                     self.runtime.state_store.append_audit(rec)
                     await self.runtime.audit_sink.append(rec)
 
-        # Final protection & quote pass before stopping:
-        # risk-increasing orders are blocked/cancelled, while protective exits and risk reductions still execute.
-        await self.step_quotes_and_fills(stop_reason=shutdown_reason)
-        await self.step_protection()
+            # Immediate quote & protection evaluation pass
+            await self.step_quotes_and_fills(stop_reason=shutdown_reason)
+            await self.step_protection()
+
+            # Phase 2: If an open position remains and handoff is not confirmed, drain with protection/quotes active
+            open_qty, _ = await asyncio.to_thread(_open_position_state)
+            if (
+                open_qty != Decimal("0")
+                and not self.confirm_handoff
+                and self.exit_drain_timeout_seconds > 0.0
+            ):
+                if self.runtime.state_store is not None:
+                    self.runtime.state_store.update_runner_state(
+                        status="draining",
+                        now=_utc(self.clock()),
+                        stop_reason=shutdown_reason,
+                    )
+                loop = asyncio.get_running_loop()
+                drain_start_mono = loop.time()
+                drain_deadline_mono = drain_start_mono + float(self.exit_drain_timeout_seconds)
+                poll_step = min(
+                    self.quote_interval_seconds,
+                    self.protection_interval_seconds,
+                    0.05,
+                )
+                while open_qty != Decimal("0") and loop.time() < drain_deadline_mono:
+                    await asyncio.sleep(max(0.01, poll_step))
+                    await self.step_quotes_and_fills(stop_reason=shutdown_reason)
+                    await self.step_protection()
+                    open_qty, _ = await asyncio.to_thread(_open_position_state)
+                drain_elapsed_seconds = round(max(0.0, loop.time() - drain_start_mono), 4)
+
+            # Phase 3: Stop quote & protection workers after flat exit, handoff confirmation, or drain timeout
+            self._drain_stop_event.set()
+            for t in (protection_task, quote_task):
+                t.cancel()
+            await asyncio.gather(protection_task, quote_task, return_exceptions=True)
+
+        open_qty, pending_exit = await asyncio.to_thread(_open_position_state)
+        if open_qty == Decimal("0"):
+            shutdown_status = "flat_completed"
+            unclosed_risk = False
+        elif self.confirm_handoff:
+            shutdown_status = "handoff_confirmed_open_position"
+            unclosed_risk = True
+        else:
+            shutdown_status = "unclosed_risk_requires_recovery"
+            unclosed_risk = True
+            await asyncio.to_thread(
+                self.ledger.mark_shutdown_unclosed_risk,
+                now=_utc(self.clock()),
+                reason=(
+                    f"exit_timeout_on_{shutdown_reason}_open_qty_{open_qty}"
+                    f"_pending_{pending_exit or 'none'}"
+                ),
+            )
 
         stopped_at = _utc(self.clock())
+        protection_coverage = self._finalize_protection_coverage(stopped_at)
         if self.runtime.state_store is not None:
             self.runtime.state_store.update_runner_state(
                 status="stopped",
@@ -2003,10 +2206,24 @@ class ShadowRunner:
             "started_at": started_at.isoformat(),
             "stopped_at": stopped_at.isoformat(),
             "duration_seconds": duration_seconds,
+            "stop_reason": shutdown_reason,
+            "shutdown_status": shutdown_status,
+            "unclosed_risk": unclosed_risk,
             "open_quantity_eur": ledger_rep["quantity_eur"],
             "open_quantity_lots": ledger_rep["quantity_lots"],
             "pending_exit_reason": ledger_rep["pending_exit_reason"],
             "pending_order_ids": ledger_rep["snapshot"]["pending_order_ids"],
+            "alerts": ledger_rep["alerts"],
+            "recovery_instructions": ledger_rep["recovery_instructions"],
+            "protection_coverage": protection_coverage,
+            "worker_shutdown_verification": {
+                "event_worker_stopped_before_drain": event_worker_stopped_before_drain,
+                "quote_worker_alive_during_drain": quote_worker_alive_during_drain,
+                "protection_worker_alive_during_drain": protection_worker_alive_during_drain,
+                "drain_elapsed_seconds": drain_elapsed_seconds,
+                "close_on_stop": self.close_on_stop,
+                "confirm_handoff": self.confirm_handoff,
+            },
             "observer": (
                 await asyncio.to_thread(self.observer_store.report)
                 if self.observer_store is not None

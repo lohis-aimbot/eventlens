@@ -10,7 +10,7 @@ bounded live forward Shadow observation.
 > loss baseline protection, blocking new risk & cancelling pending opens on stop/duration
 > expiry, cTrader Demo quote bridge throttling/flush + Pepperstone Razor ECN commission-bearing
 > zero-spread verification, and the `pepperstone_razor_200` `$200 USD / 200x` leverage / `0.01..100`
-> lot standard) are implemented and verified by **313 offline/synthetic regression tests**.
+> lot standard) are implemented and verified by **315 offline/synthetic regression tests**.
 > In addition, bounded single-process live forward Shadow acceptance runs on `2026-10-22` and
 > `2026-10-23` exercised the **complete real-time closed loop (`Real Event -> DeepSeek -> Hard Risk
 > -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`)** during the live
@@ -30,13 +30,13 @@ bounded live forward Shadow observation.
 | Area | Previous defect | Implemented fix |
 |---|---|---|
 | **1. Automated Shadow loop & non-blocking startup recovery** | `IntradayEventRuntime` stopped after recording a pending receipt; `ShadowRunner.run()` awaited `recover_incomplete()` before starting `_protection_worker`, `_quote_worker`, stop control, and `duration_seconds`. | Added `ShadowRunner` (`src/eventlens/runtime.py`) and `eventlens shadow {start,stop,status,report,recover}` (`src/eventlens/shadow_cli.py`). Startup recovery (`recover_incomplete()`) runs inside `_news_and_event_worker()` concurrently with `_protection_worker()`, `_quote_worker()`, stop control, and `duration_seconds`, and enforces event staleness (`max_recovery_event_age_seconds`), retry caps (`max_reasoning_attempts`), LLM timeout (`llm_timeout_seconds`), and cancellation (`stop_event` / `is_stop_requested`). |
-| **2. Unified quote quality, clocks & Razor ECN commission verification** | `Quote` dropped `source_at`, `bridge_at`, `available_at`, and session `commission` metadata; `ShadowCostModel` applied a `0.1 pip` synthetic spread floor by default, while `validate_market_quote()` rejected genuine `0.0 pip` Razor ECN quotes without checking the account's commission model. | Extended `Quote` and `QuoteObservation` with `source_at`, `bridge_at`, `received_at`, `available_at`, `source_provider`, `basis`, `commission`, `commission_type`, `effective_source_at`, `receipt_lag_ms`, `has_verified_provenance`, and `has_verified_commission`. `validate_market_quote()`, `align_news()`, and `ShadowCostModel` reject unverified zero-spread quotes (`allow_zero_spread=False` when `commission` is missing/zero) while accepting genuine `0.0 pip` quotes from verified commission-bearing ECN sessions (`commission > 0` and `commission_type == "UsdPerMillionUsdVolume"`, charging explicit commission + slippage with `synthetic_assumption=False`). |
+| **2. Unified quote quality, clocks & explicit Razor ECN zero-spread exception policy** | `Quote` dropped `source_at`, `bridge_at`, `available_at`, and session `commission` metadata; `ShadowCostModel` applied a `0.1 pip` synthetic spread floor by default, while `validate_market_quote()` rejected genuine `0.0 pip` Razor ECN quotes without checking the account's commission model. | Extended `Quote` and `QuoteObservation` with `source_at`, `bridge_at`, `received_at`, `available_at`, `source_provider`, `basis`, `commission`, `commission_type`, `effective_source_at`, `receipt_lag_ms`, `has_verified_provenance`, and `has_verified_commission`. Zero-spread quotes (`Bid == Ask`) are rejected by default (`allow_commission_bearing_zero_spread=False`) and accepted **only** when explicitly opted in by policy (`allow_commission_bearing_zero_spread=True`) **and** originating from an allowlisted verified source (`source_provider == "ctrader_algo"`, `basis == "live_poll"`, full clock provenance, `commission > 0`, `commission_type == "UsdPerMillionUsdVolume"`). Arbitrary sources are never trusted solely because `commission > 0`. Raw `Bid/Ask` (`raw_bid`, `raw_ask`) are preserved on every `ShadowFill` without artificial spread padding or relaxed freshness gates (`max_quote_age_ms = 2000`). |
 | **3. Post-LLM state refresh** | `IntradayEventRuntime` reused the pre-LLM `MarketSnapshot` and `PortfolioSnapshot` after multi-second LLM calls, causing valid proposals to fail the 2s quote freshness gate. | Preserved pre-LLM `AgentContext` in `runtime_events.context_json` for audit, refreshed `MarketSnapshot` and `PortfolioSnapshot` after `agent.decide()` returns, and rejected proposals with `portfolio_state_changed_during_inference` if open positions or pending orders changed during inference (never silently rewriting `based_on_snapshot_id`). |
 | **4. Pending order expiry & pre-fill re-verification** | `fill_pending()` did not re-check decision/risk expiry, kill switch, daily loss limit, or causal quote ordering, and used `filled=1` to mask cancelled orders. | Added `order_status` (`pending`, `filled`, `expired`, `cancelled`, `rejected`), `terminal_at`, and `terminal_reason` to `shadow_receipts`. `fill_pending()` expires stale orders first, enforces causal quote ordering (`quote.received_at >= max(decision.completed_at, recorded_at)` and `quote.effective_source_at >= decision.completed_at`), and re-verifies `based_on_snapshot_id`, `kill_switch_active`, `daily_loss_limit`, `daily_baseline_valid`, `min_equity_usd`, `max_position_weight`, and `daily_close_cutoff`. |
 | **5. Explicit action semantics** | `target_direction="flat"` generated a liquidation target even when uncertain or abstaining; fallback `next(iter(effective))` attached arbitrary thesis IDs to closes. | Added `portfolio_action` (`IGNORE_EVENT`, `HOLD`, `SET_TARGET`, `CLOSE`) to `SinglePassProposal` (`single-pass-agent-v2`) and `AgentDecision`. `IGNORE_EVENT` and `HOLD` always produce `target=None`. Removed arbitrary thesis fallback; `CLOSE` requires an open position, verbatim `evidence_quote`, and explicit EUR/USD `target_thesis_ids`. |
 | **6. Intraday risk, DST-aware daily close & conservative daily baseline confirmation** | Only a static `min_equity_usd` floor existed; daily close checked `hour == 21` in UTC without DST awareness; cross-day rollover with an open position and missing quotes wrote raw `cash_usd` as a confirmed baseline. | Added `shadow_daily_state` tracking `trading_day`, `session_start_utc`, `daily_close_utc` (`16:55 America/New_York`), `session_rollover_utc` (`17:00 America/New_York`), `baseline_equity_usd`, `min_equity_seen_usd`, `loss_limit_triggered`, `baseline_valid`, and `baseline_reason`, plus `last_valid_equity_usd` on `shadow_account`. When rolling over with an open position and no valid quote, `baseline_valid=0` (`unconfirmed_open_position_without_valid_quote`) blocks risk-increasing actions (`daily_baseline_unconfirmed`) and carries a provisional reference $\max(\text{last\_valid\_equity\_usd}, \text{prior\_baseline\_equity\_usd})$; when valid quotes recover, the baseline is confirmed conservatively via $\max(\text{provisional}, \text{carried\_ref}, \text{current\_equity})$ so losses during the outage are never masked. |
 | **7. Persistent deduplication, recovery & audit** | Event deduplication used only in-memory `_seen`; transient failures could not be retried; crash after `memory.commit()` left unrecorded shadow orders. | Added `SQLiteRuntimeStore` (`runtime_events`, `runtime_audit_log`, `shadow_runner_state`). Non-terminal `reasoning_failed` unmarks `WallStreetCNFilter` so transient failures retry up to `max_reasoning_attempts`. `recover_incomplete()` reconciles `memory_committed` decisions after a crash and enforces staleness (`recovery_event_stale`) and retry limits (`recovery_max_attempts_exceeded`) on pre-commit events. All SQLite stores use `RLock` + `check_same_thread=False`. |
-| **8. Stop / duration-expiry risk freeze** | After `runner.stop()` or `duration_seconds` expiry, pending risk-increasing orders could still fill during shutdown or subsequent `fill_pending()` calls. | `ShadowRunner.stop()`, shutdown `finally:`, `IntradayEventRuntime._evaluate_and_record_post_commit_locked()`, `SQLiteShadowLedger.record_sync()`, and `SQLiteShadowLedger.fill_pending()` immediately cancel pending risk-increasing orders (`order_status="cancelled"`, `terminal_reason="cancelled_on_runner_stop_requested"` / `"cancelled_on_runner_duration_expired"`) and reject new risk-increasing targets (`blocked_by_runner_*`), while preserving risk-reducing orders (`CLOSE` / partial reduction) and `evaluate_protective_exits()`. |
+| **8. Two-phase stop/drain, remaining window coverage & unclosed-risk reporting** | After `runner.stop()` or `duration_seconds` expiry, all workers cancelled simultaneously and new risk could be opened near cutoff when remaining runtime/quote-bridge duration was shorter than `max_holding_seconds + exit_buffer_seconds`. | Implemented two-phase stop (`running -> stopping -> draining -> stopped`): `_news_and_event_worker` stops first and risk-increasing pending orders are cancelled, while `_quote_worker` and `_protection_worker` continue running until the position exits (`flat_completed`), explicit handoff is confirmed (`handoff_confirmed_open_position`), or `exit_drain_timeout_seconds` expires (`unclosed_risk=true`, `shutdown_status="unclosed_risk_requires_recovery"`, emitting explicit `alerts` and `recovery_instructions`). Near run or quote-bridge cutoff (`remaining < max_holding_seconds + exit_buffer_seconds`), new risk-increasing entries are blocked (`insufficient_remaining_run_window_for_new_risk`, `insufficient_quote_bridge_window_for_new_risk`). |
 | **9. cTrader Demo quote bridge throttling & flush** | `1000ms` sampling throttle + `200ms` timer overwrote 68.4% (`13/19`) of fleeting positive-spread ticks on Pepperstone Razor Demo and inflated `source_to_bridge` lag from `0.18s` to `1.18s`. | `EventLensQuoteBridge.cs` flushes immediately in `OnTick` when a positive-spread tick arrives or when spread state changes (never masking a newer zero-spread tick), uses a `50ms` timer and `1.5s` pending staleness guard, and flushes pending ticks in `OnStop()`. Python watcher polls at `50ms` and `ShadowRunner` supports single-process `--quote-bridge-dir` tailing. |
 
 ---
@@ -96,11 +96,40 @@ bounded live forward Shadow observation.
      4. Blocks all new risk-increasing proposals (`protective_exit_pending`).
      5. Executes the protective exit fill only when a valid causal quote arrives.
 
+4. **Explicit zero-spread exception policy & cost provenance**:
+   - **Default rejection (`allow_commission_bearing_zero_spread = False`)**: By default across
+     `QuoteQualityPolicy`, `RiskPolicy`, `ProtectiveExitPolicy`, `SinglePassTradingAgent`,
+     `align_news()`, and `ShadowCostModel`, zero-spread quotes (`Bid == Ask`) are rejected
+     (`zero_spread_rejected`), even if `commission > 0`.
+   - **Allowlisted verified opt-in (`allow_commission_bearing_zero_spread = True`)**:
+     Zero-spread quotes are accepted **only** when explicitly enabled in policy **and** the quote
+     satisfies all verified provenance gates:
+     1. `source_provider in TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS` (`{"ctrader_algo"}`).
+     2. `basis == "live_poll"` with full causal clock provenance (`source_at <= bridge_at <= received_at`).
+     3. `commission > 0` and `commission_type in TRUSTED_COMMISSION_TYPES` (`{"UsdPerMillionUsdVolume"}`).
+     Arbitrary or untrusted data sources are **never** accepted solely because `commission > 0`.
+   - **Raw `Bid/Ask` preservation**: Raw `Bid` and `Ask` (`raw_bid`, `raw_ask`) are recorded on
+     every `ShadowFill` without adding artificial spreads or relaxing the `2.0s` freshness gate.
+   - **Distinction between platform metadata and unverified shadow assumptions**:
+     - **Verified platform metadata (`Symbol.Commission`, `Symbol.CommissionType`)**:
+       Reported by Pepperstone cTrader (`commission = 3`, `commission_type = "UsdPerMillionUsdVolume"`).
+       Literal API formula: $\text{broker\_fee} = |\text{units\_eur}| \times \text{fill\_price} \times \frac{\text{commission}}{1{,}000{,}000}$.
+     - **Conservative shadow commission floor (`commission_bps = 0.30`)**:
+       Matches Pepperstone Razor's published retail ECN schedule (`$3.00` per `100,000` lot per side,
+       or `0.30 bps`). Effective fee is $\max(\text{broker\_fee}, \text{bps\_fee}) + \text{fixed\_fee\_usd}$,
+       with `commission_source` explicitly tagged on every fill as
+       `"broker_metadata_usd_per_million"`, `"broker_metadata_verified_conservative_bps_floor"`, or
+       `"unverified_model_commission_bps"`.
+     - **Unverified shadow slippage assumption (`slippage_bps = 0.25`)**:
+       Applies `0.25 bps` (`0.025 pip`) adverse price slippage to every shadow fill and is explicitly
+       marked on every `ShadowFill` with `slippage_bps_applied = 0.25` and
+       `slippage_assumption_unverified = True`.
+
 ---
 
 ## 3. cTrader Demo EUR/USD quote root-cause analysis & bridge fix (`2026-10-22`)
 
-Read-only diagnostic sampling on Pepperstone cTrader **5.9.154** (`Demo • 5298703 • EURUSD`)
+Read-only diagnostic sampling on Pepperstone cTrader **5.9.154** (`Demo • ***8703 • EURUSD`)
 compared `Symbol.Bid/Ask`, `Ticks.LastTick.Bid/Ask`, `Server.TimeInUtc`, `Ticks.LastTick.Time`,
 raw JSONL (`quotes-*.jsonl`, `diag-*.jsonl`), and SQLite (`step2-quote-sample.sqlite`,
 `step3-live-quotes.sqlite`):
@@ -111,7 +140,7 @@ raw JSONL (`quotes-*.jsonl`, `diag-*.jsonl`), and SQLite (`step2-quote-sample.sq
      ticks), `Symbol.Bid == LastTick.Bid` and `Symbol.Ask == LastTick.Ask` on **100% of ticks**
      (`symbol_mismatch_ticks = 0`).
 2. **Root cause of zero-spread (`Bid == Ask`) ticks**:
-   - Account `5298703` is a Pepperstone **Razor (Raw ECN) commission-bearing Demo account**
+   - Account `***8703` is a Pepperstone **Razor (Raw ECN) commission-bearing Demo account**
      (`digits = 5`, `pip_size = 0.0001`, `tick_size = 0.00001`, `commission = 3`,
      `commission_type = UsdPerMillionUsdVolume` per side).
    - During London trading hours (`08:22–08:43 UTC`), `81%`–`91%` of raw top-of-book ticks
@@ -222,7 +251,7 @@ to GitHub):
 
 ### 4.3 Pepperstone Razor `$200 USD / 200x` Testing Workflow & Risk-Controlled Profit Standard (`--account-profile pepperstone_razor_200`)
 
-`eventlens shadow` defaults to `--account-profile pepperstone_razor_200` (`RiskPolicy.pepperstone_razor_200()` + `ProtectiveExitPolicy.pepperstone_razor_200()`), aligning Shadow execution and accounting directly with the Pepperstone Razor Demo account (`5298703`):
+`eventlens shadow` defaults to `--account-profile pepperstone_razor_200` (`RiskPolicy.pepperstone_razor_200()` + `ProtectiveExitPolicy.pepperstone_razor_200()`), aligning Shadow execution and accounting directly with the Pepperstone Razor Demo account (`***8703`):
 
 | Parameter | Standard Value | Purpose (Profit Maximization + Risk Control) |
 |---|---|---|
@@ -260,8 +289,8 @@ Standard live test command around scheduled tier-1 EUR/USD or USD releases:
 
 ## 5. Acceptance summary: passed items and operational characteristics
 
-1. **Passed (Offline / synthetic regression verification — 313 tests)**:
-   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, stop/duration-expiry risk freeze & concurrent stop+fill cancellation, Pepperstone Razor commission-bearing ECN `0.0 pip` quote verification, and the `pepperstone_razor_200` (`$200 USD / 200x / 0.01..100 lot / $4 SL / $8 TP / 900s`) sizing & protection standard are verified by **313 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
+1. **Passed (Offline / synthetic regression verification — 315 tests)**:
+   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, two-phase stop/drain shutdown (`running -> stopping -> draining -> stopped`), pre-cutoff remaining run & quote-bridge window blocking (`max_holding_seconds + exit_buffer_seconds`), quote outage alert & unclosed-risk reporting, explicit zero-spread exception policy (`allow_commission_bearing_zero_spread` opt-in + allowlisted `ctrader_algo` provenance), and the `pepperstone_razor_200` (`$200 USD / 200x / 0.01..100 lot / $4 SL / $8 TP / 900s`) sizing & protection standard are verified by **315 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
 2. **Passed (cTrader Demo EUR/USD quote bridge root-cause diagnosis & fix)**:
    - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), eliminated bridge-side tick throttling, and reduced `source_to_bridge` lag to `0.1860s` median and `bridge_to_receipt` lag to `0.0529s` max without adding artificial spreads or relaxing the 2-second freshness gate.
 3. **Passed (Bounded single-process live forward Shadow closed-loop acceptance)**:

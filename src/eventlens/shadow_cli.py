@@ -48,11 +48,12 @@ def _load_latest_market(quotes_path: Path, basis: str) -> MarketSnapshot | None:
 
 def _build_policies(
     args: argparse.Namespace,
-) -> tuple[Decimal, RiskPolicy, ProtectiveExitPolicy]:
+) -> tuple[Decimal, RiskPolicy, ProtectiveExitPolicy, ShadowCostModel]:
     profile = getattr(args, "account_profile", "pepperstone_razor_200")
     kill_switch = bool(getattr(args, "kill_switch", False))
     max_quote_age_ms = int(getattr(args, "max_quote_age", 2.0) * 1000)
     raw_holding = getattr(args, "max_holding_seconds", None)
+    explicit_zero_spread = getattr(args, "allow_commission_zero_spread", None)
 
     if profile == "pepperstone_razor_200":
         initial_cash = Decimal("200.00")
@@ -64,6 +65,7 @@ def _build_policies(
             max_holding_seconds=int(raw_holding) if raw_holding is not None else 900,
             max_quote_age_ms=max_quote_age_ms,
         )
+        cost_model = ShadowCostModel.pepperstone_razor()
     else:
         initial_cash = Decimal("10000.00")
         risk = RiskPolicy(
@@ -74,11 +76,22 @@ def _build_policies(
             max_holding_seconds=int(raw_holding) if raw_holding is not None else 1800,
             max_quote_age_ms=max_quote_age_ms,
         )
+        cost_model = ShadowCostModel()
 
     if getattr(args, "initial_cash", None) is not None:
         initial_cash = Decimal(str(args.initial_cash))
     risk_updates: dict[str, Any] = {}
     exit_updates: dict[str, Any] = {}
+    if explicit_zero_spread is not None:
+        allow_zs = bool(explicit_zero_spread)
+        risk_updates["allow_commission_bearing_zero_spread"] = allow_zs
+        exit_updates["allow_commission_bearing_zero_spread"] = allow_zs
+        cost_model = ShadowCostModel(
+            name=cost_model.name,
+            slippage_bps=cost_model.slippage_bps,
+            commission_bps=cost_model.commission_bps,
+            allow_commission_bearing_zero_spread=allow_zs,
+        )
     if getattr(args, "leverage", None) is not None:
         risk_updates["leverage"] = Decimal(str(args.leverage))
     if getattr(args, "min_lot", None) is not None:
@@ -109,18 +122,18 @@ def _build_policies(
         risk = risk.model_copy(update=risk_updates)
     if exit_updates:
         exit_pol = exit_pol.model_copy(update=exit_updates)
-    return initial_cash, risk, exit_pol
+    return initial_cash, risk, exit_pol, cost_model
 
 
 async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     now = datetime.now(UTC)
-    initial_cash_usd, risk_policy, exit_policy = _build_policies(args)
+    initial_cash_usd, risk_policy, exit_policy, cost_model = _build_policies(args)
     args.shadow_db.parent.mkdir(parents=True, exist_ok=True)
     state_store = SQLiteRuntimeStore(args.shadow_db)
     ledger = SQLiteShadowLedger(
         args.shadow_db,
         initial_cash_usd=initial_cash_usd,
-        cost_model=ShadowCostModel(),
+        cost_model=cost_model,
         exit_policy=exit_policy,
         risk_policy=risk_policy,
     )
@@ -142,19 +155,27 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
         if args.command == "status":
             market = _load_latest_market(args.quotes_db, basis)
             snap = ledger.snapshot_sync(market=market)
+            rep = ledger.report(market=market)
             return {
                 "scope": "shadow_only",
                 "execution_authorized": False,
+                "unclosed_risk": rep["unclosed_risk"],
+                "alerts": rep["alerts"],
+                "recovery_instructions": rep["recovery_instructions"],
                 "runner": state_store.runner_status(),
                 "portfolio": snap.model_dump(mode="json"),
             }
 
         if args.command == "report":
             market = _load_latest_market(args.quotes_db, basis)
+            rep = ledger.report(market=market)
             return {
                 "scope": "shadow_only",
                 "execution_authorized": False,
-                "ledger": ledger.report(market=market),
+                "unclosed_risk": rep["unclosed_risk"],
+                "alerts": rep["alerts"],
+                "recovery_instructions": rep["recovery_instructions"],
+                "ledger": rep,
                 "runtime": state_store.summary_report(),
             }
 
@@ -197,6 +218,9 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 SinglePassTradingAgent(
                     DeepSeekClient.from_environment(),
                     max_quote_age=timedelta(seconds=getattr(args, "max_quote_age", 2.0)),
+                    allow_commission_bearing_zero_spread=(
+                        risk_policy.allow_commission_bearing_zero_spread
+                    ),
                 )
                 if call_model
                 else _AbstainWithoutModelAgent()
@@ -215,13 +239,43 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             )
 
             if args.command == "recover":
+                if quote_bridge_dir is not None and qstore is not None:
+                    bridge_runner = ShadowRunner(
+                        runtime=runtime,
+                        ledger=ledger,
+                        quote_store=qstore,
+                        quote_bridge_dir=quote_bridge_dir,
+                        basis=basis,
+                        poll_news=False,
+                    )
+                    runner_ref.append(bridge_runner)
                 expired = ledger.expire_pending_orders()
                 recovered = await runtime.recover_incomplete()
+                if getattr(args, "close_on_recover", False):
+                    ledger.request_protective_exit_on_stop(
+                        now=datetime.now(UTC),
+                        reason="protective_exit_on_manual_recover",
+                    )
                 market = market_provider(datetime.now(UTC))
-                exits = ledger.evaluate_protective_exits(market)
+                exits = list(ledger.evaluate_protective_exits(market))
+                wait_seconds = float(getattr(args, "wait_for_quote_seconds", 0.0) or 0.0)
+                if wait_seconds > 0.0:
+                    deadline = asyncio.get_running_loop().time() + wait_seconds
+                    while (
+                        Decimal(ledger.report(market=market)["quantity_eur"]) != Decimal("0")
+                        and asyncio.get_running_loop().time() < deadline
+                    ):
+                        await asyncio.sleep(0.25)
+                        market = market_provider(datetime.now(UTC))
+                        new_exits = ledger.evaluate_protective_exits(market)
+                        exits.extend(new_exits)
+                rep = ledger.report(market=market)
                 return {
                     "scope": "shadow_only",
                     "execution_authorized": False,
+                    "unclosed_risk": rep["unclosed_risk"],
+                    "alerts": rep["alerts"],
+                    "recovery_instructions": rep["recovery_instructions"],
                     "expired_orders": expired,
                     "recovered_events": [r.model_dump(mode="json") for r in recovered],
                     "protective_exits": [f.model_dump(mode="json") for f in exits],
@@ -245,6 +299,11 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 event_scan_interval_seconds=args.event_interval,
                 quote_interval_seconds=args.quote_interval,
                 protection_interval_seconds=args.protection_interval,
+                exit_buffer_seconds=args.exit_buffer_seconds,
+                exit_drain_timeout_seconds=args.exit_drain_timeout,
+                strict_window_coverage=not getattr(args, "no_strict_window_coverage", False),
+                close_on_stop=getattr(args, "close_on_stop", False),
+                confirm_handoff=getattr(args, "confirm_handoff", False),
             )
             runner_ref.append(runner)
             return await runner.run(duration_seconds=args.duration)
@@ -345,6 +404,12 @@ def _add_common_db_args(p: argparse.ArgumentParser, *, suppress_defaults: bool =
         help="Override hard minimum equity floor in USD",
     )
     p.add_argument(
+        "--allow-commission-zero-spread",
+        action=argparse.BooleanOptionalAction,
+        default=default_flag if suppress_defaults else None,
+        help="Explicitly allow or forbid commission-bearing zero-spread quotes from verified ctrader_algo sessions",
+    )
+    p.add_argument(
         "--verbose",
         action="store_true",
         default=default_flag if suppress_defaults else False,
@@ -393,6 +458,33 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("--protection-interval", type=float, default=0.5)
     start_p.add_argument("--max-quote-age", type=float, default=2.0)
     start_p.add_argument("--max-holding-seconds", type=int, default=None)
+    start_p.add_argument(
+        "--exit-buffer-seconds",
+        type=float,
+        default=60.0,
+        help="Minimum remaining run/quote-bridge buffer after max_holding_seconds required for new risk entries",
+    )
+    start_p.add_argument(
+        "--exit-drain-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to keep quote and protection tasks running during shutdown to drain open positions",
+    )
+    start_p.add_argument(
+        "--no-strict-window-coverage",
+        action="store_true",
+        help="Disable strict remaining run/quote-bridge window check for new entries",
+    )
+    start_p.add_argument(
+        "--close-on-stop",
+        action="store_true",
+        help="Request protective exit on open shadow position when stop or duration cutoff occurs",
+    )
+    start_p.add_argument(
+        "--confirm-handoff",
+        action="store_true",
+        help="Explicitly confirm handoff of an open position at shutdown without draining to flat",
+    )
     start_p.add_argument("--kill-switch", action="store_true")
 
     stop_p = sub.add_parser("stop", help="Signal a running Shadow loop to stop cleanly")
@@ -422,6 +514,23 @@ def main(argv: list[str] | None = None) -> None:
         "--basis",
         choices=("live_poll", "synthetic_fixture"),
         default="live_poll",
+    )
+    recover_p.add_argument(
+        "--quote-bridge-dir",
+        type=Path,
+        default=None,
+        help="Optional EventLensQuoteBridge sandbox directory to poll fresh live quotes during recovery",
+    )
+    recover_p.add_argument(
+        "--wait-for-quote-seconds",
+        type=float,
+        default=0.0,
+        help="Seconds to wait for a fresh live quote to execute pending protective exits during recovery",
+    )
+    recover_p.add_argument(
+        "--close-on-recover",
+        action="store_true",
+        help="Request immediate protective exit on any open shadow position during recovery using a fresh quote",
     )
     recover_p.add_argument("--max-quote-age", type=float, default=2.0)
     recover_p.add_argument("--kill-switch", action="store_true")

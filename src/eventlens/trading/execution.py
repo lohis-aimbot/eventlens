@@ -54,6 +54,16 @@ class ShadowCostModel(Contract):
     Spread floor defaults to 0 (disabled) so bad/zero-spread quotes are never
     silently converted into valid real quotes. If spread_floor_pips > 0 is used
     for synthetic sensitivity analysis, allow_synthetic_spread_floor must be True.
+
+    Commission & Slippage Provenance:
+    - Platform Metadata (`broker_metadata_usd_per_million`): When a quote originates from an
+      allowlisted live cTrader bridge session (`source_provider == "ctrader_algo"`, `basis == "live_poll"`)
+      with verified `commission > 0` and `commission_type == "UsdPerMillionUsdVolume"`, the broker
+      commission is `abs(units_eur) * fill_price * (commission / 1,000,000)` USD per side
+      (e.g. `3 USD / $1M USD notional = 0.30 bps` per side, or `~$3.36` per standard lot per side at `1.1200`).
+    - Unverified Shadow Assumptions (`unverified_model_commission_bps` & `slippage_bps`):
+      `slippage_bps = 0.25` (`0.025 pip` adverse slippage per fill) and fallback `commission_bps = 0.30`
+      are conservative shadow modeling assumptions, not verified live broker fills.
     """
 
     name: Identifier = "pepperstone-razor-conservative-v2"
@@ -61,7 +71,13 @@ class ShadowCostModel(Contract):
     slippage_bps: Decimal = Field(default=Decimal("0.25"), ge=0, le=100)
     spread_floor_pips: Decimal = Field(default=Decimal("0"), ge=0, le=100)
     allow_synthetic_spread_floor: bool = False
+    allow_commission_bearing_zero_spread: bool = False
     fixed_fee_usd: Decimal = Field(default=Decimal("0"), ge=0)
+
+    @classmethod
+    def pepperstone_razor(cls) -> "ShadowCostModel":
+        """Explicitly opt in to verified Pepperstone Razor cTrader commission-bearing 0.0-pip quotes."""
+        return cls(allow_commission_bearing_zero_spread=True)
 
     @model_validator(mode="after")
     def validate_synthetic_floor(self) -> Self:
@@ -77,7 +93,7 @@ class ShadowCostModel(Contract):
         if (
             quote.ask == quote.bid
             and not self.allow_synthetic_spread_floor
-            and not quote.has_verified_commission
+            and not (self.allow_commission_bearing_zero_spread and quote.has_verified_commission)
         ):
             raise ValueError("Zero-spread quote cannot be filled without explicit synthetic opt-in")
         mid = (quote.bid + quote.ask) / Decimal("2")
@@ -99,19 +115,42 @@ class ShadowCostModel(Contract):
         )
         return raw.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP), synthetic_used
 
-    def fee_usd(self, units: Decimal, price: Decimal, *, quote: Quote | None = None) -> Decimal:
+    def fee_with_source(
+        self, units: Decimal, price: Decimal, *, quote: Quote | None = None
+    ) -> tuple[
+        Decimal,
+        Literal[
+            "broker_metadata_usd_per_million",
+            "broker_metadata_verified_conservative_bps_floor",
+            "unverified_model_commission_bps",
+        ],
+    ]:
         notional_usd = abs(units) * price
         bps_fee = notional_usd * self.commission_bps / BPS
         broker_fee = Decimal("0")
-        if (
-            quote is not None
-            and quote.commission is not None
-            and quote.commission > Decimal("0")
-            and quote.commission_type == "UsdPerMillionUsdVolume"
-        ):
+        has_broker_meta = (
+            quote is not None and quote.has_verified_commission and quote.commission is not None
+        )
+        if has_broker_meta and quote is not None and quote.commission is not None:
             broker_fee = notional_usd * quote.commission / Decimal("1000000")
-        fee = max(bps_fee, broker_fee) + self.fixed_fee_usd
-        return fee.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        fee = (max(bps_fee, broker_fee) + self.fixed_fee_usd).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        source: Literal[
+            "broker_metadata_usd_per_million",
+            "broker_metadata_verified_conservative_bps_floor",
+            "unverified_model_commission_bps",
+        ]
+        if not has_broker_meta:
+            source = "unverified_model_commission_bps"
+        elif broker_fee >= bps_fee:
+            source = "broker_metadata_usd_per_million"
+        else:
+            source = "broker_metadata_verified_conservative_bps_floor"
+        return fee, source
+
+    def fee_usd(self, units: Decimal, price: Decimal, *, quote: Quote | None = None) -> Decimal:
+        return self.fee_with_source(units, price, quote=quote)[0]
 
 
 class ProtectiveExitPolicy(Contract):
@@ -124,6 +163,7 @@ class ProtectiveExitPolicy(Contract):
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
+    allow_commission_bearing_zero_spread: bool = False
     require_verified_quote_provenance: bool = False
     trading_timezone: str = "America/New_York"
     daily_close_hour: int = Field(default=16, ge=0, le=23)
@@ -141,6 +181,7 @@ class ProtectiveExitPolicy(Contract):
         max_position_loss_usd: Decimal = Decimal("4.00"),
         take_profit_usd: Decimal | None = Decimal("8.00"),
         max_daily_loss_usd: Decimal = Decimal("8.00"),
+        allow_commission_bearing_zero_spread: bool = True,
     ) -> "ProtectiveExitPolicy":
         """Pepperstone Razor $200 USD Demo protection standard: 15m horizon, $4 SL, $8 TP (2:1 R:R), $8 daily loss."""
         return cls(
@@ -150,6 +191,7 @@ class ProtectiveExitPolicy(Contract):
             max_daily_loss_usd=max_daily_loss_usd,
             max_quote_age_ms=max_quote_age_ms,
             max_spread_pips=Decimal("2.0"),
+            allow_commission_bearing_zero_spread=allow_commission_bearing_zero_spread,
         )
 
     def quote_quality_policy(self, instrument: str = "EUR/USD") -> QuoteQualityPolicy:
@@ -158,6 +200,7 @@ class ProtectiveExitPolicy(Contract):
             max_quote_age_ms=self.max_quote_age_ms,
             max_spread_pips=self.max_spread_pips,
             allow_zero_spread=self.allow_zero_spread,
+            allow_commission_bearing_zero_spread=self.allow_commission_bearing_zero_spread,
             require_verified_provenance=self.require_verified_quote_provenance,
         )
 
@@ -197,8 +240,17 @@ class ShadowFill(Contract):
     prior_quantity: Decimal
     delta_quantity: Decimal
     new_quantity: Decimal
+    raw_bid: Decimal | None = None
+    raw_ask: Decimal | None = None
     fill_price: Decimal = Field(gt=0)
     commission_usd: Decimal = Field(ge=0)
+    commission_source: Literal[
+        "broker_metadata_usd_per_million",
+        "broker_metadata_verified_conservative_bps_floor",
+        "unverified_model_commission_bps",
+    ] = "unverified_model_commission_bps"
+    slippage_bps_applied: Decimal = Decimal("0")
+    slippage_assumption_unverified: bool = True
     realized_pnl_usd: Decimal
     equity_after_usd: Decimal = Field(gt=0)
     snapshot_id_after: Identifier
@@ -229,7 +281,7 @@ class SQLiteShadowLedger:
         path: Path,
         *,
         initial_cash_usd: Decimal = Decimal("10000"),
-        cost_model: ShadowCostModel = ShadowCostModel(),
+        cost_model: ShadowCostModel | None = None,
         exit_policy: ProtectiveExitPolicy = ProtectiveExitPolicy(),
         risk_policy: RiskPolicy = RiskPolicy(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -240,7 +292,15 @@ class SQLiteShadowLedger:
             raise ValueError("Initial cash must be positive")
         self.path = path.resolve()
         self.initial_cash_usd = initial_cash_usd
-        self.cost_model = cost_model
+        if cost_model is not None:
+            self.cost_model = cost_model
+        elif (
+            risk_policy.allow_commission_bearing_zero_spread
+            or exit_policy.allow_commission_bearing_zero_spread
+        ):
+            self.cost_model = ShadowCostModel.pepperstone_razor()
+        else:
+            self.cost_model = ShadowCostModel()
         self.exit_policy = exit_policy
         self.risk_policy = risk_policy
         self.clock = clock
@@ -543,6 +603,68 @@ class SQLiteShadowLedger:
         with self._lock, self.db:
             self.db.execute("BEGIN IMMEDIATE")
             return tuple(self._cancel_risk_increasing_pending_locked(check_now, reason=reason))
+
+    def request_protective_exit_on_stop(
+        self,
+        *,
+        now: datetime | None = None,
+        reason: str = "protective_runner_stop",
+    ) -> bool:
+        """Persist a protective exit request on an open position so drain loop closes it on the next fresh valid quote."""
+        check_now = _utc(now or self.clock())
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+            qty = Decimal(account["quantity_eur"])
+            if qty == Decimal("0"):
+                return False
+            if account["pending_exit_reason"] is None:
+                self.db.execute(
+                    """UPDATE shadow_account
+                    SET pending_exit_reason=?, pending_exit_since=?
+                    WHERE id=1""",
+                    (reason, check_now.isoformat()),
+                )
+            return True
+
+    def mark_shutdown_unclosed_risk(
+        self,
+        *,
+        now: datetime | None = None,
+        reason: str = "unclosed_on_runner_shutdown",
+    ) -> dict[str, Any] | None:
+        """Persist pending exit state and fault when shutdown/drain ends with an open position."""
+        check_now = _utc(now or self.clock())
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            account = self.db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+            qty = Decimal(account["quantity_eur"])
+            if qty == Decimal("0"):
+                return None
+            exit_reason = account["pending_exit_reason"] or reason
+            pending_since = account["pending_exit_since"] or check_now.isoformat()
+            self.db.execute(
+                """UPDATE shadow_account
+                SET pending_exit_reason=?, pending_exit_since=?
+                WHERE id=1""",
+                (exit_reason, pending_since),
+            )
+            detail = (
+                f"quantity_eur={qty} avg_entry_price={account['avg_entry_price']} "
+                f"pending_exit_reason={exit_reason} pending_exit_since={pending_since}"
+            )
+            self._record_fault_locked(
+                check_now,
+                "shutdown_drain",
+                "shutdown_exit_timeout_unclosed_risk",
+                detail,
+            )
+            return {
+                "quantity_eur": str(qty),
+                "pending_exit_reason": exit_reason,
+                "pending_exit_since": pending_since,
+                "recorded_at": check_now.isoformat(),
+            }
 
     def _ensure_daily_state_locked(
         self, now: datetime, current_equity: Decimal, *, valid_valuation: bool = True
@@ -1268,7 +1390,7 @@ class SQLiteShadowLedger:
 
         buy = delta > Decimal("0")
         fill_price, synthetic_used = self.cost_model.execution_price(quote, buy=buy)
-        commission = self.cost_model.fee_usd(delta, fill_price, quote=quote)
+        commission, comm_source = self.cost_model.fee_with_source(delta, fill_price, quote=quote)
         new_qty = prior_qty + delta
         realized_trade = Decimal("0.00")
 
@@ -1354,8 +1476,13 @@ class SQLiteShadowLedger:
             prior_quantity=prior_qty,
             delta_quantity=delta,
             new_quantity=new_qty,
+            raw_bid=quote.bid,
+            raw_ask=quote.ask,
             fill_price=fill_price,
             commission_usd=commission,
+            commission_source=comm_source,
+            slippage_bps_applied=self.cost_model.slippage_bps,
+            slippage_assumption_unverified=self.cost_model.slippage_bps > Decimal("0"),
             realized_pnl_usd=realized_trade,
             equity_after_usd=equity_after,
             snapshot_id_after=new_snapshot_id,
@@ -1417,9 +1544,31 @@ class SQLiteShadowLedger:
             free_margin = (snap.equity - margin_used).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
+            unclosed_risk = qty_eur != Decimal("0")
+            alerts: list[str] = []
+            recovery_instructions: str | None = None
+            if unclosed_risk:
+                alerts.append(
+                    f"UNCLOSED_SHADOW_POSITION: quantity_eur={account['quantity_eur']} "
+                    f"({qty_lots} lots), avg_entry_price={account['avg_entry_price']}, "
+                    f"pending_exit_reason={account['pending_exit_reason']}, "
+                    f"valuation_valid={snap.valuation_valid}"
+                )
+                recovery_instructions = (
+                    f"Start EventLensQuoteBridge in cTrader and run: "
+                    f".venv/bin/eventlens shadow recover --shadow-db {self.path} "
+                    f'--quotes-db <quotes.sqlite> --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge"'
+                )
+            elif account["pending_exit_reason"] is not None:
+                alerts.append(
+                    f"PENDING_EXIT_STATE: pending_exit_reason={account['pending_exit_reason']}"
+                )
             return {
                 "scope": "shadow_ledger_only",
                 "execution_authorized": False,
+                "unclosed_risk": unclosed_risk,
+                "alerts": alerts,
+                "recovery_instructions": recovery_instructions,
                 "cost_model": self.cost_model.model_dump(mode="json"),
                 "exit_policy": self.exit_policy.model_dump(mode="json"),
                 "risk_policy": self.risk_policy.model_dump(mode="json"),

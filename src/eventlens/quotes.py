@@ -306,6 +306,26 @@ class QuoteStore:
                 commission_type=start.commission_type,
             )
 
+    def active_session_remaining_seconds(
+        self, cutoff: datetime, *, symbol: str = "EURUSD", basis: Basis = "live_poll"
+    ) -> float | None:
+        """Return remaining duration in seconds of the latest open session, 0.0 if stopped, or None if no session exists."""
+        with self._lock:
+            cutoff_utc = utc(cutoff)
+            rows = self.db.execute(
+                "SELECT start, stop FROM quote_sessions WHERE basis=? ORDER BY rowid DESC",
+                (basis,),
+            ).fetchall()
+            for row in rows:
+                start = BridgeStart.model_validate_json(row["start"])
+                if start.symbol != symbol:
+                    continue
+                if row["stop"] is not None:
+                    return 0.0
+                session_end = start.started_at + timedelta(seconds=start.duration_seconds)
+                return max(0.0, (session_end - cutoff_utc).total_seconds())
+            return None
+
     def report(self) -> dict[str, Any]:
         with self._lock:
             return self._report_locked()
@@ -458,6 +478,7 @@ def align_news(
     max_quote_age: float = 2,
     max_event_age: float = 60,
     basis: Basis = "live_poll",
+    allow_commission_bearing_zero_spread: bool = False,
 ) -> dict[str, Any]:
     """Retrospective audit of observable inputs, never a signal or a simulated fill."""
     import math
@@ -477,8 +498,11 @@ def align_news(
     quote_bridge_to_receipt = (
         (quote.received_at - quote.quote.bridge_at).total_seconds() if quote else None
     )
-    has_commission = (
-        quote is not None
+    has_verified_commission = (
+        allow_commission_bearing_zero_spread
+        and quote is not None
+        and quote.basis == "live_poll"
+        and quote.provider == "ctrader_algo"
         and quote.commission is not None
         and quote.commission > Decimal("0")
         and quote.commission_type == "UsdPerMillionUsdVolume"
@@ -493,7 +517,7 @@ def align_news(
         else "stale_quote"
         if quote_age is not None and quote_age > max_quote_age
         else "zero_spread"
-        if quote.quote.ask == quote.quote.bid and not has_commission
+        if quote.quote.ask == quote.quote.bid and not has_verified_commission
         else "aligned_observation"
     )
     return {
@@ -556,13 +580,22 @@ EURUSD_PIP = Decimal("0.0001")
 
 
 class QuoteQualityPolicy(Contract):
-    """Unified quote quality and freshness rules across agent, risk, shadow fills, exits, and valuation."""
+    """Unified quote quality and freshness rules across agent, risk, shadow fills, exits, and valuation.
+
+    Zero-spread quotes (`Bid == Ask`) are rejected by default (`allow_zero_spread=False` and
+    `allow_commission_bearing_zero_spread=False`). Commission-bearing zero-spread quotes are
+    accepted ONLY when `allow_commission_bearing_zero_spread=True` is explicitly configured AND
+    the quote comes from an explicitly allowlisted live source (`trusted_commission_providers`)
+    with verified clock provenance and a verified commission type (`trusted_commission_types`).
+    """
 
     instrument: Identifier = "EUR/USD"
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
-    allow_commission_bearing_zero_spread: bool = True
+    allow_commission_bearing_zero_spread: bool = False
+    trusted_commission_providers: tuple[Identifier, ...] = ("ctrader_algo",)
+    trusted_commission_types: tuple[Identifier, ...] = ("UsdPerMillionUsdVolume",)
     require_verified_provenance: bool = False
 
 
@@ -654,7 +687,10 @@ def validate_market_quote(
         )
 
     zero_spread_allowed = policy.allow_zero_spread or (
-        policy.allow_commission_bearing_zero_spread and quote.has_verified_commission
+        policy.allow_commission_bearing_zero_spread
+        and quote.has_verified_commission
+        and quote.source_provider in policy.trusted_commission_providers
+        and quote.commission_type in policy.trusted_commission_types
     )
     if spread <= Decimal("0") and not zero_spread_allowed:
         return QuoteValidationResult(

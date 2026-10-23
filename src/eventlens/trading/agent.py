@@ -254,6 +254,7 @@ class SinglePassTradingAgent:
         max_quote_age: timedelta = timedelta(seconds=2),
         max_spread_pips: Decimal = Decimal("2.0"),
         allow_zero_spread: bool = False,
+        allow_commission_bearing_zero_spread: bool = False,
         require_verified_provenance: bool = False,
         decision_ttl: timedelta = timedelta(minutes=2),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -268,6 +269,7 @@ class SinglePassTradingAgent:
             max_quote_age_ms=int(max_quote_age.total_seconds() * 1000),
             max_spread_pips=max_spread_pips,
             allow_zero_spread=allow_zero_spread,
+            allow_commission_bearing_zero_spread=allow_commission_bearing_zero_spread,
             require_verified_provenance=require_verified_provenance,
         )
         self.decision_ttl = decision_ttl

@@ -2019,15 +2019,21 @@ def test_stop_request_duration_expiry_and_concurrent_stop_fill_block_new_risk_wh
 
 
 def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp_path):
-    """Verify commission-bearing Razor ECN 0.0-pip quotes pass validation, align, and fill with commission while unverified 0-pip quotes are still rejected."""
+    """Verify commission-bearing Razor ECN 0.0-pip quotes require explicit policy opt-in AND trusted ctrader_algo provenance, preserve raw Bid/Ask, and distinguish broker commission metadata from unverified slippage assumptions."""
     now = T0
     qstore = QuoteStore(tmp_path / "razor_quotes.sqlite", clock=lambda: now)
     memory = SQLiteThesisMemory(
         tmp_path / "razor_mem.sqlite", clock=lambda: now, allow_targets=True
     )
+    risk_pol = RiskPolicy(allow_commission_bearing_zero_spread=True)
+    exit_pol = ProtectiveExitPolicy(
+        max_holding_seconds=10,
+        allow_commission_bearing_zero_spread=True,
+    )
     ledger = SQLiteShadowLedger(
         tmp_path / "razor_shadow.sqlite",
-        exit_policy=ProtectiveExitPolicy(max_holding_seconds=10),
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
         clock=lambda: now,
     )
     try:
@@ -2073,26 +2079,45 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
         assert q.commission_type == "UsdPerMillionUsdVolume"
         assert q.has_verified_commission is True
 
-        # Default QuoteQualityPolicy accepts verified commission-bearing ECN 0.0-pip quote
-        res_valid = validate_market_quote(snap, as_of=now)
+        # Default QuoteQualityPolicy (allow_commission_bearing_zero_spread=False) rejects 0.0-pip quotes unless explicitly opted in
+        res_default = validate_market_quote(snap, as_of=now)
+        assert res_default.valid is False
+        assert res_default.reason == "zero_spread_rejected"
+
+        # Explicit opt-in QuoteQualityPolicy(allow_commission_bearing_zero_spread=True) accepts verified ctrader_algo 0.0-pip quote
+        res_valid = validate_market_quote(
+            snap,
+            as_of=now,
+            policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=True),
+        )
         assert res_valid.valid is True
         assert res_valid.reason == "quote_valid"
         assert res_valid.spread_pips == Decimal("0")
 
-        # Explicitly disabling allow_commission_bearing_zero_spread still rejects it
-        res_strict = validate_market_quote(
-            snap,
+        # Untrusted provider with commission > 0 MUST still be rejected even when allow_commission_bearing_zero_spread=True
+        untrusted_comm = make_quote(
+            bid="1.12403",
+            ask="1.12403",
+            received_at=now,
+            commission="3",
+            commission_type="UsdPerMillionUsdVolume",
+        ).model_copy(update={"source_provider": "arbitrary_broker_feed"})
+        assert untrusted_comm.has_verified_commission is False
+        res_untrusted = validate_market_quote(
+            make_market(quote=untrusted_comm, as_of=now),
             as_of=now,
-            policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=False),
+            policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=True),
         )
-        assert res_strict.valid is False
-        assert res_strict.reason == "zero_spread_rejected"
+        assert res_untrusted.valid is False
+        assert res_untrusted.reason == "zero_spread_rejected"
 
         # Unverified 0.0-pip quote (without commission metadata) is still rejected
         unverified_zero = make_quote(bid="1.12403", ask="1.12403", received_at=now)
         assert unverified_zero.has_verified_commission is False
         res_unverified = validate_market_quote(
-            make_market(quote=unverified_zero, as_of=now), as_of=now
+            make_market(quote=unverified_zero, as_of=now),
+            as_of=now,
+            policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=True),
         )
         assert res_unverified.valid is False
         assert res_unverified.reason == "zero_spread_rejected"
@@ -2115,13 +2140,17 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
             rationale="Open 20% long EUR/USD on Razor ECN feed.",
         )
         client = SequencedJSONClient(open_prop)
-        agent = SinglePassTradingAgent(client, clock=lambda: now)
+        agent = SinglePassTradingAgent(
+            client,
+            clock=lambda: now,
+            allow_commission_bearing_zero_spread=True,
+        )
         runtime = IntradayEventRuntime(
             memory=memory,
             portfolio_state=ledger,
             market_provider=lambda ts: build_market_snapshot(qstore, ts),
             agent=agent,
-            risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
+            risk_engine=DeterministicHardRiskEngine(policy=risk_pol, clock=lambda: now),
             shadow_executor=ledger,
             clock=lambda: now,
         )
@@ -2157,8 +2186,24 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
         fills = ledger.fill_pending(build_market_snapshot(qstore, now))
         assert len(fills) == 1
         assert fills[0].synthetic_assumption is False
+        assert fills[0].raw_bid == Decimal("1.12405")
+        assert fills[0].raw_ask == Decimal("1.12405")
+        assert fills[0].commission_source == "broker_metadata_verified_conservative_bps_floor"
+        assert fills[0].slippage_bps_applied == Decimal("0.25")
+        assert fills[0].slippage_assumption_unverified is True
         assert fills[0].commission_usd > Decimal("0")
         assert fills[0].new_quantity > Decimal("0")
+
+        # Also verify direct broker_metadata_usd_per_million when commission_bps=0 or commission=30
+        pure_meta_model = ShadowCostModel(
+            commission_bps=Decimal("0"),
+            allow_commission_bearing_zero_spread=True,
+        )
+        fee_meta, src_meta = pure_meta_model.fee_with_source(
+            Decimal("100000"), Decimal("1.12000"), quote=q
+        )
+        assert fee_meta == Decimal("0.34")
+        assert src_meta == "broker_metadata_usd_per_million"
 
         # Advance past max_holding_seconds (10s) and execute protective exit on a 0.0-pip Razor quote
         now = now + timedelta(seconds=15)
@@ -2180,6 +2225,9 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
         exit_fills = ledger.evaluate_protective_exits(build_market_snapshot(qstore, now))
         assert len(exit_fills) == 1
         assert exit_fills[0].kind == "protective_exit"
+        assert exit_fills[0].raw_bid == Decimal("1.12420")
+        assert exit_fills[0].raw_ask == Decimal("1.12420")
+        assert exit_fills[0].commission_source == "broker_metadata_verified_conservative_bps_floor"
         assert exit_fills[0].new_quantity == Decimal("0")
         assert exit_fills[0].realized_pnl_usd > Decimal("0")
     finally:
@@ -2401,3 +2449,359 @@ def test_pepperstone_razor_200_protective_take_profit_and_stop_loss(tmp_path):
         assert tp_fills[0].new_quantity == Decimal("0")
     finally:
         ledger.close()
+
+
+def test_pre_cutoff_run_window_and_quote_bridge_window_block_new_risk_while_allowing_exits(
+    tmp_path,
+):
+    """Near run end or quote bridge session end, block new risk that cannot be managed in the remaining window while allowing CLOSE and protective exits."""
+    now = T0
+    shd_db = tmp_path / "cutoff_shd.sqlite"
+    mem_db = tmp_path / "cutoff_mem.sqlite"
+    q_db = tmp_path / "cutoff_quotes.sqlite"
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: now, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    qstore = QuoteStore(q_db, clock=lambda: now)
+    risk = RiskPolicy.pepperstone_razor_200()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200(max_holding_seconds=100)
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        initial_cash_usd=Decimal("200.00"),
+        risk_policy=risk,
+        exit_policy=exit_pol,
+        clock=lambda: now,
+    )
+    engine = DeterministicHardRiskEngine(policy=risk, clock=lambda: now)
+
+    class StaticDecisionAgent:
+        def __init__(self, decision: AgentDecision) -> None:
+            self.decision = decision
+
+        async def decide(self, context):
+            return self.decision
+
+    try:
+        # Start quote bridge session with duration=200s (covers max_holding_seconds=100 + exit_buffer=20 at t=0)
+        qstore.start(
+            BridgeStart(
+                version=1,
+                kind="start",
+                session_id=SESSION,
+                account_mode="demo",
+                running_mode="realtime",
+                symbol="EURUSD",
+                started_at=now,
+                sample_interval_ms=200,
+                duration_seconds=200,
+                digits=5,
+                pip_size=Decimal("0.0001"),
+                commission=Decimal("3"),
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            now,
+            basis="live_poll",
+        )
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=1,
+                symbol="EURUSD",
+                source_at=now,
+                bridge_at=now,
+                bid=Decimal("1.12000"),
+                ask=Decimal("1.12000"),
+            ),
+            now,
+            '{"kind":"quote"}',
+        )
+        runtime = IntradayEventRuntime(
+            memory=memory,
+            portfolio_state=ledger,
+            market_provider=lambda ts: build_market_snapshot(qstore, ts),
+            agent=StaticDecisionAgent(make_decision()),
+            risk_engine=engine,
+            shadow_executor=ledger,
+            state_store=state_store,
+            clock=lambda: now,
+        )
+        runner = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            quote_store=qstore,
+            exit_buffer_seconds=20.0,
+            strict_window_coverage=True,
+            clock=lambda: now,
+        )
+        runner._run_started_at = now
+        runner._run_duration_seconds = (
+            180.0  # run ends at t=180s; required window = 100 + 20 = 120s
+        )
+
+        # 1. At t=55s (remaining_run=125s >= 120s, bridge_rem=145s >= 120s): new entry is permitted
+        now = T0 + timedelta(seconds=55)
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=2,
+                symbol="EURUSD",
+                source_at=now,
+                bridge_at=now,
+                bid=Decimal("1.12000"),
+                ask=Decimal("1.12000"),
+            ),
+            now,
+            '{"kind":"quote"}',
+        )
+        assert runner._active_stop_reason(now) is None
+        snap_ok = ledger.snapshot_sync(market=build_market_snapshot(qstore, now))
+        dec_ok = make_decision(
+            decision_id="dec-window-ok",
+            event_id="ev-window-ok",
+            snapshot_id=snap_ok.snapshot_id,
+            weight="-0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_ok = asyncio.run(engine.assess(dec_ok, snap_ok, build_market_snapshot(qstore, now)))
+        rcpt_ok = ledger.record_sync(dec_ok, assess_ok)
+        assert rcpt_ok.status == "recorded"
+
+        # 2. Advance to t=65s BEFORE fill (+10s < 30s approval TTL, remaining_run=115s < 120s required window):
+        # Pending risk-increasing order is cancelled and new risk-increasing proposals are blocked!
+        now = T0 + timedelta(seconds=65)
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=3,
+                symbol="EURUSD",
+                source_at=now,
+                bridge_at=now,
+                bid=Decimal("1.12000"),
+                ask=Decimal("1.12000"),
+            ),
+            now,
+            '{"kind":"quote"}',
+        )
+        assert runner._active_stop_reason(now) == "insufficient_remaining_run_window_for_new_risk"
+        assert ledger.fill_pending(build_market_snapshot(qstore, now), risk_policy=risk) == ()
+        rep_cancel = ledger.report(market=build_market_snapshot(qstore, now))
+        assert (
+            rep_cancel["receipts"][0]["terminal_reason"]
+            == "cancelled_on_insufficient_remaining_run_window_for_new_risk"
+        )
+
+        # 3. Extend run duration to 500s, but advance to t=90s where quote bridge has only 110s left (< 120s):
+        # Must block new risk with insufficient_quote_bridge_window_for_new_risk!
+        runner._run_duration_seconds = 500.0
+        now = T0 + timedelta(seconds=90)
+        qstore.record(
+            BridgeQuote(
+                version=1,
+                kind="quote",
+                session_id=SESSION,
+                sequence=4,
+                symbol="EURUSD",
+                source_at=now,
+                bridge_at=now,
+                bid=Decimal("1.12000"),
+                ask=Decimal("1.12000"),
+            ),
+            now,
+            '{"kind":"quote"}',
+        )
+        assert runner._active_stop_reason(now) == "insufficient_quote_bridge_window_for_new_risk"
+        snap_bridge_short = ledger.snapshot_sync(market=build_market_snapshot(qstore, now))
+        dec_blocked = make_decision(
+            decision_id="dec-bridge-short",
+            event_id="ev-bridge-short",
+            snapshot_id=snap_bridge_short.snapshot_id,
+            weight="-0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_blocked = asyncio.run(
+            engine.assess(dec_blocked, snap_bridge_short, build_market_snapshot(qstore, now))
+        )
+        rcpt_blocked = ledger.record_sync(dec_blocked, assess_blocked)
+        assert rcpt_blocked.status == "rejected"
+        assert rcpt_blocked.reason == "blocked_by_insufficient_quote_bridge_window_for_new_risk"
+    finally:
+        qstore.close()
+        ledger.close()
+        state_store.close()
+
+
+def test_two_phase_stop_drain_quote_outage_unclosed_risk_and_restart_handoff(tmp_path):
+    """Verify two-phase shutdown drain, quote outage alerts/unclosed_risk reporting, restart recovery on fresh quote, and explicit handoff."""
+    base_now = datetime.now(UTC)
+    now = base_now - timedelta(seconds=5)
+    shd_db = tmp_path / "drain_shd.sqlite"
+    mem_db = tmp_path / "drain_mem.sqlite"
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: now, allow_targets=True)
+    state_store = SQLiteRuntimeStore(shd_db)
+    risk = RiskPolicy.pepperstone_razor_200()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200(max_holding_seconds=1)
+    ledger = SQLiteShadowLedger(
+        shd_db,
+        initial_cash_usd=Decimal("200.00"),
+        risk_policy=risk,
+        exit_policy=exit_pol,
+        clock=lambda: now,
+    )
+    engine = DeterministicHardRiskEngine(policy=risk, clock=lambda: now)
+
+    class IdleAgent:
+        async def decide(self, context):
+            raise RuntimeError("unused")
+
+    quote_feed_enabled = False
+
+    def market_provider(ts: datetime) -> MarketSnapshot:
+        if not quote_feed_enabled:
+            return MarketSnapshot(snapshot_id=f"outage:{ts.isoformat()}", as_of=ts, quotes=())
+        return make_market(
+            quote=make_quote(
+                bid="1.11900",
+                ask="1.11900",
+                received_at=ts,
+                source_at=ts - timedelta(milliseconds=50),
+                bridge_at=ts - timedelta(milliseconds=20),
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=ts,
+        )
+
+    try:
+        # 1. Open -4,000 EUR (-0.04 lots) position at t = base_now - 5s (so max_holding_seconds=1s is already due)
+        mkt_open = make_market(
+            quote=make_quote(
+                bid="1.12000",
+                ask="1.12000",
+                received_at=now,
+                source_at=now - timedelta(milliseconds=50),
+                bridge_at=now - timedelta(milliseconds=20),
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        snap0 = ledger.snapshot_sync(market=mkt_open)
+        dec_open = make_decision(
+            snapshot_id=snap0.snapshot_id,
+            weight="-0.10",
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=60),
+        )
+        assess_open = asyncio.run(engine.assess(dec_open, snap0, mkt_open))
+        ledger.record_sync(dec_open, assess_open)
+        now = now + timedelta(milliseconds=200)
+        mkt_fill = make_market(
+            quote=make_quote(
+                bid="1.12000",
+                ask="1.12000",
+                received_at=now,
+                source_at=now - timedelta(milliseconds=50),
+                bridge_at=now - timedelta(milliseconds=20),
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=now,
+        )
+        assert len(ledger.fill_pending(mkt_fill)) == 1
+        ledger.clock = lambda: datetime.now(UTC)
+
+        # 2. Run with quote outage (quote_feed_enabled=False) and exit_drain_timeout_seconds=0.15:
+        # Must NOT fabricate a fill; must mark unclosed_risk=True, shutdown_status="unclosed_risk_requires_recovery",
+        # emit alerts + recovery_instructions, and record protection outage intervals!
+        runtime = IntradayEventRuntime(
+            memory=memory,
+            portfolio_state=ledger,
+            market_provider=market_provider,
+            agent=IdleAgent(),
+            risk_engine=engine,
+            shadow_executor=ledger,
+            state_store=state_store,
+        )
+        runner_outage = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            quote_interval_seconds=0.04,
+            protection_interval_seconds=0.04,
+            event_scan_interval_seconds=0.04,
+            exit_drain_timeout_seconds=0.12,
+            close_on_stop=True,
+        )
+        summary_outage = asyncio.run(runner_outage.run(duration_seconds=0.10))
+        assert summary_outage["shutdown_status"] == "unclosed_risk_requires_recovery"
+        assert summary_outage["unclosed_risk"] is True
+        assert summary_outage["open_quantity_eur"] == "-4000"
+        assert summary_outage["pending_exit_reason"] == "protective_max_holding_horizon"
+        assert len(summary_outage["alerts"]) >= 1
+        assert len(summary_outage["recovery_instructions"]) >= 1
+        assert summary_outage["protection_coverage"]["unavailable_checks_while_position_open"] >= 1
+        assert summary_outage["protection_coverage"]["outage_interval_count"] >= 1
+        assert (
+            summary_outage["worker_shutdown_verification"]["event_worker_stopped_before_drain"]
+            is True
+        )
+        assert (
+            summary_outage["worker_shutdown_verification"]["quote_worker_alive_during_drain"]
+            is True
+        )
+        assert (
+            summary_outage["worker_shutdown_verification"]["protection_worker_alive_during_drain"]
+            is True
+        )
+
+        # 3. Explicit handoff confirmation (confirm_handoff=True) reports handoff_confirmed_open_position
+        runner_handoff = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            quote_interval_seconds=0.04,
+            protection_interval_seconds=0.04,
+            event_scan_interval_seconds=0.04,
+            confirm_handoff=True,
+        )
+        summary_handoff = asyncio.run(runner_handoff.run(duration_seconds=0.08))
+        assert summary_handoff["shutdown_status"] == "handoff_confirmed_open_position"
+        assert summary_handoff["unclosed_risk"] is True
+        assert summary_handoff["open_quantity_eur"] == "-4000"
+
+        # 4. Restart / drain recovery when fresh quotes resume during the drain window:
+        # Keep quotes offline during the main run (0.08s), then re-enable fresh quotes during the drain window!
+        async def _run_and_resume_quotes_during_drain() -> dict:
+            nonlocal quote_feed_enabled
+            quote_feed_enabled = False
+            runner_recover = ShadowRunner(
+                runtime=runtime,
+                ledger=ledger,
+                quote_interval_seconds=0.04,
+                protection_interval_seconds=0.04,
+                event_scan_interval_seconds=0.04,
+                exit_drain_timeout_seconds=0.50,
+                close_on_stop=True,
+            )
+            task = asyncio.create_task(runner_recover.run(duration_seconds=0.08))
+            await asyncio.sleep(0.12)  # now inside drain phase after duration_seconds=0.08 expired
+            quote_feed_enabled = True
+            return await asyncio.wait_for(task, timeout=1.0)
+
+        summary_recovered = asyncio.run(_run_and_resume_quotes_during_drain())
+        assert summary_recovered["shutdown_status"] == "flat_completed"
+        assert summary_recovered["unclosed_risk"] is False
+        assert summary_recovered["open_quantity_eur"] == "0"
+        assert summary_recovered["pending_exit_reason"] is None
+        assert summary_recovered["ledger"]["fills"][-1]["kind"] == "protective_exit"
+    finally:
+        ledger.close()
+        state_store.close()

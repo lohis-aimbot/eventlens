@@ -598,7 +598,17 @@ def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
         tmp_path / "razor_events.sqlite", clock=lambda: NOW + timedelta(seconds=3)
     )
     add_event(events, received=NOW + timedelta(seconds=3))
-    aligned = align_news(events, store, "test-news", NOW + timedelta(seconds=3, milliseconds=500))
+    aligned_default = align_news(
+        events, store, "test-news", NOW + timedelta(seconds=3, milliseconds=500)
+    )
+    assert aligned_default["status"] == "zero_spread"
+    aligned = align_news(
+        events,
+        store,
+        "test-news",
+        NOW + timedelta(seconds=3, milliseconds=500),
+        allow_commission_bearing_zero_spread=True,
+    )
     assert aligned["status"] == "aligned_observation"
     assert aligned["spread"] == "0.00000"
     events.close()
