@@ -2,6 +2,7 @@
 
 import fcntl
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -24,8 +25,8 @@ class BridgeStart(Contract):
     running_mode: Literal["realtime"]
     symbol: Literal["EURUSD"]
     started_at: Timestamp
-    sample_interval_ms: int = Field(strict=True, ge=1000, le=10000)
-    duration_seconds: int = Field(strict=True, ge=10, le=600)
+    sample_interval_ms: int = Field(strict=True, ge=100, le=10000)
+    duration_seconds: int = Field(strict=True, ge=10, le=86400)
     digits: int | None = Field(default=None, strict=True, ge=0, le=10)
     pip_size: Decimal | None = Field(default=None, gt=0)
     commission: Decimal | None = Field(default=None, ge=0)
@@ -87,6 +88,8 @@ class QuoteObservation(Contract):
     received_at: Timestamp
     recorded_at: Timestamp
     available_at: Timestamp
+    commission: Decimal | None = Field(default=None, ge=0)
+    commission_type: Identifier | None = None
 
     @model_validator(mode="after")
     def ordered(self) -> Self:
@@ -114,12 +117,16 @@ class QuoteStore:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.path, self.clock = path.resolve(), clock
+        self._lock = threading.RLock()
         if readonly and not self.path.exists():
             raise FileNotFoundError(self.path)
         if not readonly:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(
-            self.path.as_uri() + ("?mode=ro" if readonly else "?mode=rwc"), uri=True
+            self.path.as_uri() + ("?mode=ro" if readonly else "?mode=rwc"),
+            uri=True,
+            timeout=10,
+            check_same_thread=False,
         )
         self.db.row_factory = sqlite3.Row
         try:
@@ -160,7 +167,8 @@ class QuoteStore:
             raise
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -175,95 +183,98 @@ class QuoteStore:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def start(self, item: BridgeStart, received: datetime, *, basis: Basis) -> None:
-        item = BridgeStart.model_validate(item.model_dump())
-        received = utc(received)
-        if item.started_at > received:
-            raise ValueError("Future bridge start")
-        with self.db:
-            self.db.execute(
-                "INSERT INTO quote_sessions VALUES (?, ?, ?, ?, NULL)",
-                (str(item.session_id), basis, item.model_dump_json(), received.isoformat()),
-            )
+        with self._lock:
+            item = BridgeStart.model_validate(item.model_dump())
+            received = utc(received)
+            if item.started_at > received:
+                raise ValueError("Future bridge start")
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO quote_sessions VALUES (?, ?, ?, ?, NULL)",
+                    (str(item.session_id), basis, item.model_dump_json(), received.isoformat()),
+                )
 
     def record(self, item: BridgeQuote, received: datetime, raw_line: str) -> None:
-        item = BridgeQuote.model_validate(item.model_dump())
-        received, now = utc(received), utc(self.clock())
-        if item.bridge_at > received or now < received:
-            raise ValueError("Future bridge receipt or storage clock rollback")
-        session = self.db.execute(
-            "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
-        ).fetchone()
-        if session is None or session["stop"] is not None:
-            raise ValueError("Quote requires an open Demo session")
-        start = BridgeStart.model_validate_json(session["start"])
-        if item.symbol != start.symbol or not start.started_at <= item.bridge_at:
-            raise ValueError("Quote does not match session identity/time")
-        if item.bridge_at > start.started_at + timedelta(seconds=start.duration_seconds + 2):
-            raise ValueError("Quote is outside the bounded session")
-        previous = self.db.execute(
-            "SELECT * FROM quote_observations WHERE session_id=? ORDER BY sequence DESC LIMIT 1",
-            (str(item.session_id),),
-        ).fetchone()
-        if previous and (
-            item.sequence <= previous["sequence"]
-            or item.source_at < datetime.fromisoformat(previous["source_at"])
-            or item.bridge_at < datetime.fromisoformat(previous["bridge_at"])
-            or received < datetime.fromisoformat(previous["received_at"])
-        ):
-            raise ValueError("Duplicate, reordered or backward-clock quote")
-        if len(raw_line.encode()) > 16384:
-            raise ValueError("Quote evidence exceeds size limit")
-        with self.db:
-            self.db.execute(
-                "INSERT INTO quote_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
-                (
-                    str(item.session_id),
-                    item.sequence,
-                    item.symbol,
-                    session["basis"],
-                    item.source_at.isoformat(),
-                    item.bridge_at.isoformat(),
-                    received.isoformat(),
-                    now.isoformat(),
-                    raw_line,
-                    item.model_dump_json(),
-                ),
-            )
-        available = utc(self.clock())
-        if available < now:
-            raise ValueError("Storage clock rollback; quote remains unpublished")
-        with self.db:
-            self.db.execute(
-                "UPDATE quote_observations SET available_at=? WHERE session_id=? AND sequence=?",
-                (available.isoformat(), str(item.session_id), item.sequence),
-            )
+        with self._lock:
+            item = BridgeQuote.model_validate(item.model_dump())
+            received, now = utc(received), utc(self.clock())
+            if item.bridge_at > received or now < received:
+                raise ValueError("Future bridge receipt or storage clock rollback")
+            session = self.db.execute(
+                "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
+            ).fetchone()
+            if session is None or session["stop"] is not None:
+                raise ValueError("Quote requires an open Demo session")
+            start = BridgeStart.model_validate_json(session["start"])
+            if item.symbol != start.symbol or not start.started_at <= item.bridge_at:
+                raise ValueError("Quote does not match session identity/time")
+            if item.bridge_at > start.started_at + timedelta(seconds=start.duration_seconds + 2):
+                raise ValueError("Quote is outside the bounded session")
+            previous = self.db.execute(
+                "SELECT * FROM quote_observations WHERE session_id=? ORDER BY sequence DESC LIMIT 1",
+                (str(item.session_id),),
+            ).fetchone()
+            if previous and (
+                item.sequence <= previous["sequence"]
+                or item.source_at < datetime.fromisoformat(previous["source_at"])
+                or item.bridge_at < datetime.fromisoformat(previous["bridge_at"])
+                or received < datetime.fromisoformat(previous["received_at"])
+            ):
+                raise ValueError("Duplicate, reordered or backward-clock quote")
+            if len(raw_line.encode()) > 16384:
+                raise ValueError("Quote evidence exceeds size limit")
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO quote_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    (
+                        str(item.session_id),
+                        item.sequence,
+                        item.symbol,
+                        session["basis"],
+                        item.source_at.isoformat(),
+                        item.bridge_at.isoformat(),
+                        received.isoformat(),
+                        now.isoformat(),
+                        raw_line,
+                        item.model_dump_json(),
+                    ),
+                )
+            available = utc(self.clock())
+            if available < now:
+                raise ValueError("Storage clock rollback; quote remains unpublished")
+            with self.db:
+                self.db.execute(
+                    "UPDATE quote_observations SET available_at=? WHERE session_id=? AND sequence=?",
+                    (available.isoformat(), str(item.session_id), item.sequence),
+                )
 
     def stop(self, item: BridgeStop, received: datetime) -> None:
-        item = BridgeStop.model_validate(item.model_dump())
-        received = utc(received)
-        session = self.db.execute(
-            "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
-        ).fetchone()
-        if session is None or session["stop"] is not None:
-            raise ValueError("Stop requires an open session")
-        start = BridgeStart.model_validate_json(session["start"])
-        last = self.db.execute(
-            "SELECT MAX(sequence), MAX(bridge_at) FROM quote_observations WHERE session_id=?",
-            (str(item.session_id),),
-        ).fetchone()
-        if not start.started_at <= item.stopped_at <= received or (
-            last[0] is not None
-            and (item.quotes < last[0] or item.stopped_at < datetime.fromisoformat(last[1]))
-        ):
-            raise ValueError("Invalid bridge stop time/count")
-        with self.db:
-            self.db.execute(
-                "UPDATE quote_sessions SET stop=? WHERE session_id=?",
-                (item.model_dump_json(), str(item.session_id)),
-            )
+        with self._lock:
+            item = BridgeStop.model_validate(item.model_dump())
+            received = utc(received)
+            session = self.db.execute(
+                "SELECT * FROM quote_sessions WHERE session_id=?", (str(item.session_id),)
+            ).fetchone()
+            if session is None or session["stop"] is not None:
+                raise ValueError("Stop requires an open session")
+            start = BridgeStart.model_validate_json(session["start"])
+            last = self.db.execute(
+                "SELECT MAX(sequence), MAX(bridge_at) FROM quote_observations WHERE session_id=?",
+                (str(item.session_id),),
+            ).fetchone()
+            if not start.started_at <= item.stopped_at <= received or (
+                last[0] is not None
+                and (item.quotes < last[0] or item.stopped_at < datetime.fromisoformat(last[1]))
+            ):
+                raise ValueError("Invalid bridge stop time/count")
+            with self.db:
+                self.db.execute(
+                    "UPDATE quote_sessions SET stop=? WHERE session_id=?",
+                    (item.model_dump_json(), str(item.session_id)),
+                )
 
     def failure(self, received: datetime, reason: str, raw_line: str) -> None:
-        with self.db:
+        with self._lock, self.db:
             self.db.execute(
                 "INSERT INTO quote_failures VALUES (?, ?, ?)",
                 (utc(received).isoformat(), reason[:200], raw_line[:16384]),
@@ -272,24 +283,54 @@ class QuoteStore:
     def latest(
         self, symbol: str, cutoff: datetime, *, basis: Basis = "live_poll"
     ) -> QuoteObservation | None:
-        cutoff = utc(cutoff)
-        row = self.db.execute(
-            """SELECT * FROM quote_observations WHERE symbol=? AND basis=?
-            AND available_at IS NOT NULL AND available_at<=? ORDER BY received_at DESC,
-            source_at DESC, sequence DESC LIMIT 1""",
-            (symbol, basis, cutoff.isoformat()),
-        ).fetchone()
-        if row is None:
+        with self._lock:
+            cutoff = utc(cutoff)
+            row = self.db.execute(
+                """SELECT o.*, s.start AS session_start FROM quote_observations o
+                JOIN quote_sessions s ON s.session_id = o.session_id
+                WHERE o.symbol=? AND o.basis=?
+                AND o.available_at IS NOT NULL AND o.available_at<=? ORDER BY o.received_at DESC,
+                o.source_at DESC, o.sequence DESC LIMIT 1""",
+                (symbol, basis, cutoff.isoformat()),
+            ).fetchone()
+            if row is None:
+                return None
+            start = BridgeStart.model_validate_json(row["session_start"])
+            return QuoteObservation(
+                basis=row["basis"],
+                quote=BridgeQuote.model_validate_json(row["quote"]),
+                received_at=row["received_at"],
+                recorded_at=row["recorded_at"],
+                available_at=row["available_at"],
+                commission=start.commission,
+                commission_type=start.commission_type,
+            )
+
+    def active_session_remaining_seconds(
+        self, cutoff: datetime, *, symbol: str = "EURUSD", basis: Basis = "live_poll"
+    ) -> float | None:
+        """Return remaining duration in seconds of the latest open session, 0.0 if stopped, or None if no session exists."""
+        with self._lock:
+            cutoff_utc = utc(cutoff)
+            rows = self.db.execute(
+                "SELECT start, stop FROM quote_sessions WHERE basis=? ORDER BY rowid DESC",
+                (basis,),
+            ).fetchall()
+            for row in rows:
+                start = BridgeStart.model_validate_json(row["start"])
+                if start.symbol != symbol:
+                    continue
+                if row["stop"] is not None:
+                    return 0.0
+                session_end = start.started_at + timedelta(seconds=start.duration_seconds)
+                return max(0.0, (session_end - cutoff_utc).total_seconds())
             return None
-        return QuoteObservation(
-            basis=row["basis"],
-            quote=BridgeQuote.model_validate_json(row["quote"]),
-            received_at=row["received_at"],
-            recorded_at=row["recorded_at"],
-            available_at=row["available_at"],
-        )
 
     def report(self) -> dict[str, Any]:
+        with self._lock:
+            return self._report_locked()
+
+    def _report_locked(self) -> dict[str, Any]:
         sessions = []
         quality: dict[str, dict[str, Any]] = {}
         for session in self.db.execute("SELECT * FROM quote_sessions ORDER BY rowid"):
@@ -437,6 +478,7 @@ def align_news(
     max_quote_age: float = 2,
     max_event_age: float = 60,
     basis: Basis = "live_poll",
+    allow_commission_bearing_zero_spread: bool = False,
 ) -> dict[str, Any]:
     """Retrospective audit of observable inputs, never a signal or a simulated fill."""
     import math
@@ -456,6 +498,15 @@ def align_news(
     quote_bridge_to_receipt = (
         (quote.received_at - quote.quote.bridge_at).total_seconds() if quote else None
     )
+    has_verified_commission = (
+        allow_commission_bearing_zero_spread
+        and quote is not None
+        and quote.basis == "live_poll"
+        and quote.provider == "ctrader_algo"
+        and quote.commission is not None
+        and quote.commission > Decimal("0")
+        and quote.commission_type == "UsdPerMillionUsdVolume"
+    )
     status = (
         "missing_event"
         if event is None
@@ -466,7 +517,7 @@ def align_news(
         else "stale_quote"
         if quote_age is not None and quote_age > max_quote_age
         else "zero_spread"
-        if quote.quote.ask == quote.quote.bid
+        if quote.quote.ask == quote.quote.bid and not has_verified_commission
         else "aligned_observation"
     )
     return {
@@ -510,9 +561,168 @@ def build_market_snapshot(
         quotes=(
             Quote(
                 instrument=instrument,
+                source_at=obs.quote.source_at,
+                bridge_at=obs.quote.bridge_at,
                 received_at=obs.received_at,
+                available_at=obs.available_at,
+                source_provider=obs.provider,
+                basis=obs.basis,
                 bid=obs.quote.bid,
                 ask=obs.quote.ask,
+                commission=obs.commission,
+                commission_type=obs.commission_type,
             ),
         ),
+    )
+
+
+EURUSD_PIP = Decimal("0.0001")
+
+
+class QuoteQualityPolicy(Contract):
+    """Unified quote quality and freshness rules across agent, risk, shadow fills, exits, and valuation.
+
+    Zero-spread quotes (`Bid == Ask`) are rejected by default (`allow_zero_spread=False` and
+    `allow_commission_bearing_zero_spread=False`). Commission-bearing zero-spread quotes are
+    accepted ONLY when `allow_commission_bearing_zero_spread=True` is explicitly configured AND
+    the quote comes from an explicitly allowlisted live source (`trusted_commission_providers`)
+    with verified clock provenance and a verified commission type (`trusted_commission_types`).
+    """
+
+    instrument: Identifier = "EUR/USD"
+    max_quote_age_ms: int = Field(default=2000, gt=0)
+    max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
+    allow_zero_spread: bool = False
+    allow_commission_bearing_zero_spread: bool = False
+    trusted_commission_providers: tuple[Identifier, ...] = ("ctrader_algo",)
+    trusted_commission_types: tuple[Identifier, ...] = ("UsdPerMillionUsdVolume",)
+    require_verified_provenance: bool = False
+
+
+class QuoteValidationResult(Contract):
+    valid: bool
+    reason: str
+    quote: Quote | None = None
+    source_age_ms: float | None = None
+    receipt_age_ms: float | None = None
+    receipt_lag_ms: float | None = None
+    spread_pips: Decimal | None = None
+    has_verified_provenance: bool = False
+
+
+def validate_market_quote(
+    market: MarketSnapshot | None,
+    *,
+    as_of: datetime,
+    policy: QuoteQualityPolicy = QuoteQualityPolicy(),
+    min_causal_time: datetime | None = None,
+) -> QuoteValidationResult:
+    """Validate quote presence, provenance, causal ordering, source-time freshness, and spread."""
+    as_of_utc = utc(as_of)
+    if market is None:
+        return QuoteValidationResult(valid=False, reason="missing_market_snapshot")
+    if market.as_of > as_of_utc:
+        return QuoteValidationResult(valid=False, reason="future_market_snapshot")
+    quote = next((q for q in market.quotes if q.instrument == policy.instrument), None)
+    if quote is None:
+        return QuoteValidationResult(valid=False, reason="missing_market_quote")
+
+    source_ts = quote.effective_source_at
+    if (
+        quote.received_at > as_of_utc
+        or source_ts > as_of_utc
+        or (quote.bridge_at is not None and quote.bridge_at > as_of_utc)
+        or (quote.available_at is not None and quote.available_at > as_of_utc)
+    ):
+        return QuoteValidationResult(
+            valid=False,
+            reason="future_market_quote",
+            quote=quote,
+            has_verified_provenance=quote.has_verified_provenance,
+        )
+
+    if min_causal_time is not None:
+        causal_utc = utc(min_causal_time)
+        if (
+            source_ts < causal_utc
+            or quote.received_at < causal_utc
+            or (quote.available_at is not None and quote.available_at < causal_utc)
+        ):
+            return QuoteValidationResult(
+                valid=False,
+                reason="quote_precedes_causal_cutoff",
+                quote=quote,
+                has_verified_provenance=quote.has_verified_provenance,
+            )
+
+    if policy.require_verified_provenance and not quote.has_verified_provenance:
+        return QuoteValidationResult(
+            valid=False,
+            reason="unverified_quote_provenance",
+            quote=quote,
+            has_verified_provenance=False,
+        )
+
+    source_age_ms = (as_of_utc - source_ts).total_seconds() * 1000.0
+    receipt_age_ms = (as_of_utc - quote.received_at).total_seconds() * 1000.0
+    snapshot_source_age_ms = (market.as_of - source_ts).total_seconds() * 1000.0
+    receipt_lag_ms = quote.receipt_lag_ms
+    spread = quote.ask - quote.bid
+    spread_pips = spread / EURUSD_PIP
+
+    if (
+        source_age_ms > policy.max_quote_age_ms
+        or receipt_age_ms > policy.max_quote_age_ms
+        or snapshot_source_age_ms > policy.max_quote_age_ms
+    ):
+        return QuoteValidationResult(
+            valid=False,
+            reason="stale_market_quote",
+            quote=quote,
+            source_age_ms=source_age_ms,
+            receipt_age_ms=receipt_age_ms,
+            receipt_lag_ms=receipt_lag_ms,
+            spread_pips=spread_pips,
+            has_verified_provenance=quote.has_verified_provenance,
+        )
+
+    zero_spread_allowed = policy.allow_zero_spread or (
+        policy.allow_commission_bearing_zero_spread
+        and quote.has_verified_commission
+        and quote.source_provider in policy.trusted_commission_providers
+        and quote.commission_type in policy.trusted_commission_types
+    )
+    if spread <= Decimal("0") and not zero_spread_allowed:
+        return QuoteValidationResult(
+            valid=False,
+            reason="zero_spread_rejected",
+            quote=quote,
+            source_age_ms=source_age_ms,
+            receipt_age_ms=receipt_age_ms,
+            receipt_lag_ms=receipt_lag_ms,
+            spread_pips=spread_pips,
+            has_verified_provenance=quote.has_verified_provenance,
+        )
+
+    if spread_pips > policy.max_spread_pips:
+        return QuoteValidationResult(
+            valid=False,
+            reason="spread_limit_exceeded",
+            quote=quote,
+            source_age_ms=source_age_ms,
+            receipt_age_ms=receipt_age_ms,
+            receipt_lag_ms=receipt_lag_ms,
+            spread_pips=spread_pips,
+            has_verified_provenance=quote.has_verified_provenance,
+        )
+
+    return QuoteValidationResult(
+        valid=True,
+        reason="quote_valid",
+        quote=quote,
+        source_age_ms=source_age_ms,
+        receipt_age_ms=receipt_age_ms,
+        receipt_lag_ms=receipt_lag_ms,
+        spread_pips=spread_pips,
+        has_verified_provenance=quote.has_verified_provenance,
     )

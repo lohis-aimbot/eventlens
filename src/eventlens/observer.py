@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import json
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -127,12 +128,13 @@ class ObserverStore:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.path, self.clock = path.resolve(), clock
+        self._lock = threading.RLock()
         if readonly and not self.path.exists():
             raise FileNotFoundError(self.path)
         if not readonly:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         uri = self.path.as_uri() + ("?mode=ro" if readonly else "?mode=rwc")
-        self.db = sqlite3.connect(uri, uri=True, timeout=10)
+        self.db = sqlite3.connect(uri, uri=True, timeout=10, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         try:
             app_id = self.db.execute("PRAGMA application_id").fetchone()[0]
@@ -183,7 +185,8 @@ class ObserverStore:
             raise
 
     def close(self) -> None:
-        self.db.close()
+        with self._lock:
+            self.db.close()
 
     @contextmanager
     def exclusive(self) -> Iterator[None]:
@@ -198,149 +201,173 @@ class ObserverStore:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
     def record(self, batch: CaptureBatch) -> dict[str, Any]:
-        batch = CaptureBatch.model_validate(batch.model_dump())
-        now = self.clock()
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("Observer storage requires timezone-aware clocks")
-        now = now.astimezone(UTC)
-        if now < batch.received_at:
-            raise ValueError("Cannot persist a future receipt")
-        poll_id = str(uuid4())
-        payload_hash = hashlib.sha256(batch.payload).hexdigest()
-        key = (batch.provider, batch.basis, batch.stream)
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            previous = self.db.execute(
-                "SELECT anchors FROM observer_streams WHERE provider=? AND basis=? AND stream=?",
-                key,
-            ).fetchone()
-            ids = [item.source_id for item in batch.records]
-            if len(ids) != len(set(ids)):
-                raise ValueError("Duplicate source IDs within a capture")
-            coverage = "not_evaluated"
-            if batch.kind == "news" and not batch.parse_error:
-                coverage = (
-                    "baseline"
-                    if previous is None
-                    else "empty"
-                    if not ids
-                    else "overlap"
-                    if set(ids).intersection(json.loads(previous["anchors"]))
-                    else "gap_possible"
-                )
-            counts = {"baseline": 0, "new": 0, "revised": 0, "repeat": 0}
-            sightings = []
-            for item in batch.records:
-                encoded = item.model_dump_json()
-                digest = hashlib.sha256(encoded.encode()).hexdigest()
-                item_key = (batch.provider, batch.basis, item.kind, item.source_id)
-                latest = self.db.execute(
-                    """SELECT revision, content_hash FROM observer_revisions
-                    WHERE provider=? AND basis=? AND kind=? AND source_id=?
-                    ORDER BY revision DESC LIMIT 1""",
-                    item_key,
+        with self._lock:
+            batch = CaptureBatch.model_validate(batch.model_dump())
+            now = self.clock()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("Observer storage requires timezone-aware clocks")
+            now = now.astimezone(UTC)
+            if now < batch.received_at:
+                raise ValueError("Cannot persist a future receipt")
+            poll_id = str(uuid4())
+            payload_hash = hashlib.sha256(batch.payload).hexdigest()
+            key = (batch.provider, batch.basis, batch.stream)
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                previous = self.db.execute(
+                    "SELECT anchors FROM observer_streams WHERE provider=? AND basis=? AND stream=?",
+                    key,
                 ).fetchone()
-                if latest and latest["content_hash"] == digest:
-                    revision, state = latest["revision"], "repeat"
-                else:
-                    revision = latest["revision"] + 1 if latest else 1
-                    state = "revised" if latest else "baseline" if previous is None else "new"
-                    self.db.execute(
-                        "INSERT INTO observer_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            *item_key,
-                            revision,
-                            digest,
-                            batch.received_at.isoformat(),
-                            now.isoformat(),
-                            encoded,
-                        ),
+                ids = [item.source_id for item in batch.records]
+                if len(ids) != len(set(ids)):
+                    raise ValueError("Duplicate source IDs within a capture")
+                coverage = "not_evaluated"
+                if batch.kind == "news" and not batch.parse_error:
+                    coverage = (
+                        "baseline"
+                        if previous is None
+                        else "empty"
+                        if not ids
+                        else "overlap"
+                        if set(ids).intersection(json.loads(previous["anchors"]))
+                        else "gap_possible"
                     )
-                counts[state] += 1
-                sightings.append((poll_id, item.source_id, revision, state))
-            result = {
-                "poll_id": poll_id,
-                "provider": batch.provider,
-                "stream": batch.stream,
-                "kind": batch.kind,
-                "basis": batch.basis,
-                "status": "invalid_payload"
-                if batch.parse_error
-                else "partial"
-                if batch.rejected
-                else "ok",
-                "received_at": batch.received_at.isoformat(),
-                "recorded_at": now.isoformat(),
-                "available_at": None,
-                "counts": counts,
-                "rejected": len(batch.rejected),
-                "parse_error": batch.parse_error,
-                "coverage": coverage,
-                "sample_source_ids": ids[:3],
-                "execution_authorized": False,
-            }
-            self.db.execute(
-                "INSERT OR IGNORE INTO observer_payloads VALUES (?, ?)",
-                (payload_hash, gzip.compress(batch.payload, mtime=0)),
-            )
-            metadata = batch.model_dump(mode="json", exclude={"payload", "records"})
-            self.db.execute(
-                "INSERT INTO observer_polls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    poll_id,
-                    batch.provider,
-                    batch.stream,
-                    batch.kind,
-                    batch.basis,
-                    batch.request_started_at.isoformat(),
-                    batch.received_at.isoformat(),
-                    now.isoformat(),
-                    None,
-                    payload_hash,
-                    json.dumps(metadata),
-                    json.dumps(result),
-                ),
-            )
-            self.db.executemany("INSERT INTO observer_sightings VALUES (?, ?, ?, ?)", sightings)
-            if not batch.parse_error:
+                counts = {"baseline": 0, "new": 0, "revised": 0, "repeat": 0}
+                sightings = []
+                for item in batch.records:
+                    encoded = item.model_dump_json()
+                    digest = hashlib.sha256(encoded.encode()).hexdigest()
+                    item_key = (batch.provider, batch.basis, item.kind, item.source_id)
+                    latest = self.db.execute(
+                        """SELECT revision, content_hash FROM observer_revisions
+                        WHERE provider=? AND basis=? AND kind=? AND source_id=?
+                        ORDER BY revision DESC LIMIT 1""",
+                        item_key,
+                    ).fetchone()
+                    if latest and latest["content_hash"] == digest:
+                        revision, state = latest["revision"], "repeat"
+                    else:
+                        revision = latest["revision"] + 1 if latest else 1
+                        state = "revised" if latest else "baseline" if previous is None else "new"
+                        self.db.execute(
+                            "INSERT INTO observer_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                *item_key,
+                                revision,
+                                digest,
+                                batch.received_at.isoformat(),
+                                now.isoformat(),
+                                encoded,
+                            ),
+                        )
+                    counts[state] += 1
+                    sightings.append((poll_id, item.source_id, revision, state))
+                result = {
+                    "poll_id": poll_id,
+                    "provider": batch.provider,
+                    "stream": batch.stream,
+                    "kind": batch.kind,
+                    "basis": batch.basis,
+                    "status": "invalid_payload"
+                    if batch.parse_error
+                    else "partial"
+                    if batch.rejected
+                    else "ok",
+                    "received_at": batch.received_at.isoformat(),
+                    "recorded_at": now.isoformat(),
+                    "available_at": None,
+                    "counts": counts,
+                    "rejected": len(batch.rejected),
+                    "parse_error": batch.parse_error,
+                    "coverage": coverage,
+                    "sample_source_ids": ids[:3],
+                    "execution_authorized": False,
+                }
                 self.db.execute(
-                    """INSERT INTO observer_streams VALUES (?, ?, ?, ?)
-                    ON CONFLICT(provider, basis, stream) DO UPDATE SET anchors=excluded.anchors""",
-                    (*key, json.dumps(ids)),
+                    "INSERT OR IGNORE INTO observer_payloads VALUES (?, ?)",
+                    (payload_hash, gzip.compress(batch.payload, mtime=0)),
                 )
-        # The normalized records are durably committed before this clock is sampled.
-        # A second, small transaction publishes their conservative availability marker.
-        # A crash in this gap leaves auditable but ineligible observations, not backdated inputs.
-        available = self.clock()
-        if available.tzinfo is None or available.utcoffset() is None or available < now:
-            raise ValueError("Storage completion clock is invalid; capture remains unpublished")
-        result["available_at"] = available.astimezone(UTC).isoformat()
-        with self.db:
-            self.db.execute(
-                "UPDATE observer_polls SET available_at=?, result=? WHERE poll_id=?",
-                (result["available_at"], json.dumps(result), poll_id),
-            )
-        return result
+                metadata = batch.model_dump(mode="json", exclude={"payload", "records"})
+                self.db.execute(
+                    "INSERT INTO observer_polls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        poll_id,
+                        batch.provider,
+                        batch.stream,
+                        batch.kind,
+                        batch.basis,
+                        batch.request_started_at.isoformat(),
+                        batch.received_at.isoformat(),
+                        now.isoformat(),
+                        None,
+                        payload_hash,
+                        json.dumps(metadata),
+                        json.dumps(result),
+                    ),
+                )
+                self.db.executemany("INSERT INTO observer_sightings VALUES (?, ?, ?, ?)", sightings)
+                if not batch.parse_error:
+                    self.db.execute(
+                        """INSERT INTO observer_streams VALUES (?, ?, ?, ?)
+                        ON CONFLICT(provider, basis, stream) DO UPDATE SET anchors=excluded.anchors""",
+                        (*key, json.dumps(ids)),
+                    )
+            # The normalized records are durably committed before this clock is sampled.
+            # A second, small transaction publishes their conservative availability marker.
+            # A crash in this gap leaves auditable but ineligible observations, not backdated inputs.
+            available = self.clock()
+            if available.tzinfo is None or available.utcoffset() is None or available < now:
+                raise ValueError("Storage completion clock is invalid; capture remains unpublished")
+            result["available_at"] = available.astimezone(UTC).isoformat()
+            with self.db:
+                self.db.execute(
+                    "UPDATE observer_polls SET available_at=?, result=? WHERE poll_id=?",
+                    (result["available_at"], json.dumps(result), poll_id),
+                )
+            return result
 
     def failure(self, provider: str, stream: str, error: str) -> None:
-        now = self.clock()
-        if now.tzinfo is None or now.utcoffset() is None:
-            raise ValueError("Observer storage requires timezone-aware clocks")
-        with self.db:
-            self.db.execute(
-                "INSERT INTO observer_failures VALUES (?, ?, ?, ?, ?)",
-                (str(uuid4()), provider, stream, now.astimezone(UTC).isoformat(), error),
-            )
+        with self._lock:
+            now = self.clock()
+            if now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("Observer storage requires timezone-aware clocks")
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO observer_failures VALUES (?, ?, ?, ?, ?)",
+                    (str(uuid4()), provider, stream, now.astimezone(UTC).isoformat(), error),
+                )
 
     def payload(self, poll_id: str) -> bytes:
-        row = self.db.execute(
-            """SELECT body_gzip FROM observer_payloads JOIN observer_polls
-            ON observer_payloads.sha256=observer_polls.payload_hash WHERE poll_id=?""",
-            (poll_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(poll_id)
-        return gzip.decompress(row["body_gzip"])
+        with self._lock:
+            row = self.db.execute(
+                """SELECT body_gzip FROM observer_payloads JOIN observer_polls
+                ON observer_payloads.sha256=observer_polls.payload_hash WHERE poll_id=?""",
+                (poll_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(poll_id)
+            return gzip.decompress(row["body_gzip"])
+
+    def first_sighting_state(
+        self,
+        *,
+        provider: str,
+        basis: Basis,
+        kind: Kind,
+        source_id: str,
+        revision: int,
+    ) -> str | None:
+        with self._lock:
+            row = self.db.execute(
+                """SELECT s.state
+                FROM observer_sightings s
+                JOIN observer_polls p ON p.poll_id = s.poll_id
+                WHERE p.provider=? AND p.basis=? AND p.kind=?
+                  AND s.source_id=? AND s.revision=?
+                ORDER BY p.rowid ASC LIMIT 1""",
+                (provider, basis, kind, source_id, revision),
+            ).fetchone()
+            return str(row["state"]) if row is not None else None
 
     def history(
         self,
@@ -351,33 +378,34 @@ class ObserverStore:
         basis: Basis = "live_poll",
         as_of: datetime | None = None,
     ) -> tuple[StoredRevision, ...]:
-        if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
-            raise ValueError("History cutoff requires a timezone")
-        rows = self.db.execute(
-            """SELECT r.*, MIN(p.available_at) AS available_at
-            FROM observer_revisions r JOIN observer_sightings s
-                ON s.source_id=r.source_id AND s.revision=r.revision
-            JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
-                AND p.basis=r.basis AND p.kind=r.kind
-            WHERE r.provider=? AND r.basis=? AND r.kind=? AND r.source_id=?
-                AND p.available_at IS NOT NULL
-            GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
-            ORDER BY r.revision""",
-            (provider, basis, kind, source_id),
-        ).fetchall()
-        records = tuple(
-            StoredRevision(
-                provider=provider,
-                basis=basis,
-                revision=row["revision"],
-                received_at=row["received_at"],
-                recorded_at=row["recorded_at"],
-                available_at=row["available_at"],
-                record=SourceRecord.model_validate_json(row["record"]),
+        with self._lock:
+            if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+                raise ValueError("History cutoff requires a timezone")
+            rows = self.db.execute(
+                """SELECT r.*, MIN(p.available_at) AS available_at
+                FROM observer_revisions r JOIN observer_sightings s
+                    ON s.source_id=r.source_id AND s.revision=r.revision
+                JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
+                    AND p.basis=r.basis AND p.kind=r.kind
+                WHERE r.provider=? AND r.basis=? AND r.kind=? AND r.source_id=?
+                    AND p.available_at IS NOT NULL
+                GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
+                ORDER BY r.revision""",
+                (provider, basis, kind, source_id),
+            ).fetchall()
+            records = tuple(
+                StoredRevision(
+                    provider=provider,
+                    basis=basis,
+                    revision=row["revision"],
+                    received_at=row["received_at"],
+                    recorded_at=row["recorded_at"],
+                    available_at=row["available_at"],
+                    record=SourceRecord.model_validate_json(row["record"]),
+                )
+                for row in rows
             )
-            for row in rows
-        )
-        return tuple(item for item in records if as_of is None or item.available_at <= as_of)
+            return tuple(item for item in records if as_of is None or item.available_at <= as_of)
 
     def revisions(
         self,
@@ -388,58 +416,60 @@ class ObserverStore:
         as_of: datetime | None = None,
         limit: int = 100,
     ) -> tuple[StoredRevision, ...]:
-        if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
-            raise ValueError("Revision cutoff requires a timezone")
-        if not 1 <= limit <= 1000:
-            raise ValueError("Revision limit must be between 1 and 1000")
-        query = """
-            SELECT r.*, MIN(p.available_at) AS available_at
-            FROM observer_revisions r
-            JOIN observer_sightings s
-                ON s.source_id=r.source_id AND s.revision=r.revision
-            JOIN observer_polls p
-                ON p.poll_id=s.poll_id AND p.provider=r.provider
-                AND p.basis=r.basis AND p.kind=r.kind
-            WHERE r.provider=? AND r.basis=? AND p.available_at IS NOT NULL
-        """
-        params: list[Any] = [provider, basis]
-        if kind is not None:
-            query += " AND r.kind=?"
-            params.append(kind)
-        query += """
-            GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
-            ORDER BY available_at ASC, r.kind ASC, r.source_id ASC, r.revision ASC
-        """
-        rows = self.db.execute(query, params).fetchall()
-        items = tuple(
-            StoredRevision(
-                provider=provider,
-                basis=basis,
-                revision=row["revision"],
-                received_at=row["received_at"],
-                recorded_at=row["recorded_at"],
-                available_at=row["available_at"],
-                record=SourceRecord.model_validate_json(row["record"]),
+        with self._lock:
+            if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+                raise ValueError("Revision cutoff requires a timezone")
+            if not 1 <= limit <= 1000:
+                raise ValueError("Revision limit must be between 1 and 1000")
+            query = """
+                SELECT r.*, MIN(p.available_at) AS available_at
+                FROM observer_revisions r
+                JOIN observer_sightings s
+                    ON s.source_id=r.source_id AND s.revision=r.revision
+                JOIN observer_polls p
+                    ON p.poll_id=s.poll_id AND p.provider=r.provider
+                    AND p.basis=r.basis AND p.kind=r.kind
+                WHERE r.provider=? AND r.basis=? AND p.available_at IS NOT NULL
+            """
+            params: list[Any] = [provider, basis]
+            if kind is not None:
+                query += " AND r.kind=?"
+                params.append(kind)
+            query += """
+                GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
+                ORDER BY available_at ASC, r.kind ASC, r.source_id ASC, r.revision ASC
+            """
+            rows = self.db.execute(query, params).fetchall()
+            items = tuple(
+                StoredRevision(
+                    provider=provider,
+                    basis=basis,
+                    revision=row["revision"],
+                    received_at=row["received_at"],
+                    recorded_at=row["recorded_at"],
+                    available_at=row["available_at"],
+                    record=SourceRecord.model_validate_json(row["record"]),
+                )
+                for row in rows
             )
-            for row in rows
-        )
-        filtered = tuple(item for item in items if as_of is None or item.available_at <= as_of)
-        return filtered[-limit:]
+            filtered = tuple(item for item in items if as_of is None or item.available_at <= as_of)
+            return filtered[-limit:]
 
     def report(self) -> dict[str, Any]:
-        counts = {
-            name: self.db.execute(f"SELECT COUNT(*) FROM observer_{name}").fetchone()[0]
-            for name in ("polls", "revisions", "sightings", "failures", "payloads")
-        }
-        recent = self.db.execute(
-            "SELECT result FROM observer_polls ORDER BY rowid DESC LIMIT 10"
-        ).fetchall()
-        return {
-            "scope": "source_observation_only",
-            "execution_authorized": False,
-            "counts": counts,
-            "unpublished_polls": self.db.execute(
-                "SELECT COUNT(*) FROM observer_polls WHERE available_at IS NULL"
-            ).fetchone()[0],
-            "recent_polls": [json.loads(row["result"]) for row in recent],
-        }
+        with self._lock:
+            counts = {
+                name: self.db.execute(f"SELECT COUNT(*) FROM observer_{name}").fetchone()[0]
+                for name in ("polls", "revisions", "sightings", "failures", "payloads")
+            }
+            recent = self.db.execute(
+                "SELECT result FROM observer_polls ORDER BY rowid DESC LIMIT 10"
+            ).fetchall()
+            return {
+                "scope": "source_observation_only",
+                "execution_authorized": False,
+                "counts": counts,
+                "unpublished_polls": self.db.execute(
+                    "SELECT COUNT(*) FROM observer_polls WHERE available_at IS NULL"
+                ).fetchone()[0],
+                "recent_polls": [json.loads(row["result"]) for row in recent],
+            }

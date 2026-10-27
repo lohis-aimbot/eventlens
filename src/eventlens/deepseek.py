@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any, Protocol, Self
 
 import httpx
@@ -72,8 +73,19 @@ class DeepSeekClient:
         )
 
     @classmethod
-    def from_environment(cls) -> Self:
+    def from_environment(cls, *, dotenv_path: Path | None = None) -> Self:
         key = os.environ.get("DEEPSEEK_API_KEY")
+        if not key and "PYTEST_CURRENT_TEST" not in os.environ:
+            env_file = dotenv_path or Path(".env")
+            if env_file.is_file():
+                for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    if k.strip() == "DEEPSEEK_API_KEY":
+                        key = v.strip().strip("'\"")
+                        break
         if not key:
             raise ModelCallError("Set DEEPSEEK_API_KEY locally; never commit or paste the key")
         return cls(key)

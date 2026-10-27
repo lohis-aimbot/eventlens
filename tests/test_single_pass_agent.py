@@ -163,7 +163,7 @@ def test_single_pass_create_and_directional_target_links_current_thesis_and_comm
     assert client.calls == 1
 
 
-def test_single_pass_flat_abstention_allows_null_quote_and_closes_held_position(tmp_path):
+def test_single_pass_flat_abstention_never_liquidates_and_explicit_close_exits(tmp_path):
     clock_now = T + timedelta(milliseconds=500)
     memory = SQLiteThesisMemory(
         tmp_path / "memory.sqlite", clock=lambda: clock_now, allow_targets=True
@@ -179,10 +179,27 @@ def test_single_pass_flat_abstention_allows_null_quote_and_closes_held_position(
             "confidence": None,
             "evidence_role": None,
             "evidence_quote": None,
+            "portfolio_action": "IGNORE_EVENT",
             "target_direction": "flat",
             "target_weight": "0",
             "target_thesis_ids": [],
-            "rationale": "Euro-area stance is unstated in this release; stay flat.",
+            "rationale": "Euro-area stance is unstated in this release; ignore.",
+        },
+        {
+            "memory_action": "ignore",
+            "thesis_id": None,
+            "status": None,
+            "narrative": None,
+            "instruments": None,
+            "invalidation_conditions": None,
+            "confidence": None,
+            "evidence_role": None,
+            "evidence_quote": None,
+            "portfolio_action": "HOLD",
+            "target_direction": "flat",
+            "target_weight": "0",
+            "target_thesis_ids": [],
+            "rationale": "Low confidence headline; hold existing position unchanged.",
         },
         {
             "memory_action": "create",
@@ -194,27 +211,32 @@ def test_single_pass_flat_abstention_allows_null_quote_and_closes_held_position(
             "confidence": 0.2,
             "evidence_role": "contradict",
             "evidence_quote": "maintain the target range",
+            "portfolio_action": "CLOSE",
             "target_direction": "flat",
             "target_weight": "0",
             "target_thesis_ids": ["__current__"],
-            "rationale": "Exit existing position as thesis is invalidated.",
+            "rationale": "Explicitly close existing position as thesis is invalidated.",
         },
     )
     agent = SinglePassTradingAgent(client, clock=lambda: clock_now)
     reasoner = ObservationReasoner(agent, memory)
 
-    # 1. Flat portfolio + flat abstention -> target is None, no quote required.
+    # 1. Held position + IGNORE_EVENT -> target is None (does NOT liquidate open position!).
     abstain = run(
         reasoner.process(
-            sample_event("e1"), market=sample_market(), portfolio=sample_portfolio(), as_of=T
+            sample_event("e1"),
+            market=sample_market(),
+            portfolio=sample_portfolio(quantity=Decimal("1000")),
+            as_of=T,
         )
     )
+    assert abstain.decision.portfolio_action == "IGNORE_EVENT"
     assert abstain.decision.target is None
     assert abstain.decision.thesis_changes == ()
 
-    # 2. Held position + flat proposal -> produces a zero-weight exit target.
-    clock_now = T + timedelta(seconds=2)
-    exit_run = run(
+    # 2. Held position + HOLD -> target is None (keeps open position unchanged!).
+    clock_now = T + timedelta(seconds=1)
+    hold_run = run(
         reasoner.process(
             sample_event("e2"),
             market=sample_market(received_at=clock_now - timedelta(milliseconds=400)),
@@ -222,6 +244,20 @@ def test_single_pass_flat_abstention_allows_null_quote_and_closes_held_position(
             as_of=clock_now,
         )
     )
+    assert hold_run.decision.portfolio_action == "HOLD"
+    assert hold_run.decision.target is None
+
+    # 3. Held position + explicit CLOSE citing invalidated thesis -> produces zero-weight exit target.
+    clock_now = T + timedelta(seconds=2)
+    exit_run = run(
+        reasoner.process(
+            sample_event("e3"),
+            market=sample_market(received_at=clock_now - timedelta(milliseconds=400)),
+            portfolio=sample_portfolio(quantity=Decimal("1000")),
+            as_of=clock_now,
+        )
+    )
+    assert exit_run.decision.portfolio_action == "CLOSE"
     assert exit_run.decision.target is not None
     assert exit_run.decision.target.positions[0].weight == Decimal("0")
 

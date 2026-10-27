@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="Foundation checks" /></a>
+  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="Main branch foundation checks" /></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-3.11%2B-2563EB?style=flat&amp;logo=python&amp;logoColor=white" alt="Python 3.11 or newer" /></a>
-  <a href="docs/roadmap.md"><img src="https://img.shields.io/badge/Stage-Observation%20Foundation-0D9488?style=flat" alt="Stage: observation foundation" /></a>
+  <a href="#roadmap"><img src="https://img.shields.io/badge/Stage-Shadow%20Research-0D9488?style=flat" alt="Stage: Shadow research" /></a>
 </p>
 
 <p align="center">
@@ -25,10 +25,10 @@
 
 ## Overview
 
-EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
+EventLens is a Python research system built around **Event → Thesis Memory → Position**. Existing LLM APIs interpret financial events, maintain persistent trading theses and propose intraday exposure changes. Independent rules validate proposals, enforce risk limits and manage exits in a local Shadow ledger. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.3 · Hard risk, shadow ledger & runtime foundation.** News/calendar capture, EUR/USD observation filtering, bounded Demo quote sampling, single-pass DeepSeek reasoning, deterministic target validation (`DeterministicTargetValidator`), hard risk policy (`DeterministicHardRiskEngine`), causal SQLite shadow accounting (`SQLiteShadowLedger`) with LLM-independent protective exits, and `IntradayEventRuntime` are implemented. Representative live quote quality and forward shadow validation remain pending; cTrader Demo order execution is not yet connected. No profitability has been established.
+> **v0.15.3 · Shadow research foundation.** Event ingestion, single-pass LLM reasoning, thesis memory, deterministic risk checks, two-phase protective drain and cutoff guards are implemented. Live observations include two October 23 PMI runs (entries and timed exit), October 27 live-quote recovery/reconciliation of residual open positions, and an uninterrupted 2,240-second forward Shadow window across US macro releases. **No broker orders are connected, and profitability has not been established.**
 
 <table>
   <tr>
@@ -42,7 +42,7 @@ News categories remain open research questions: macro, policy, energy, geopoliti
 
 ## Architecture
 
-**Target workflow** — this is the intended design, not an implemented event-to-order loop.
+**Current Shadow workflow**, with broker execution shown as a planned extension. Shadow fills are local simulations using observed Demo quotes; they are not broker orders.
 
 ```mermaid
 flowchart TD
@@ -51,16 +51,17 @@ flowchart TD
     Memory[("Thesis memory")] <--> Agent
     Context["Current quotes and positions"] --> Agent
     Agent --> Risk["Independent hard risk"]
-    Risk --> Execute["Shadow / cTrader Demo"]
+    Risk --> Execute["Shadow fills and ledger"]
+    Risk -. "Planned adapter" .-> Broker["cTrader Demo orders"]
     Exit["Independent exit monitor and timer"] --> Execute
-    Execute -. "Observed execution feedback" .-> Context
+    Execute -. "Shadow position feedback" .-> Context
 
     classDef input fill:#EFF6FF,stroke:#2563EB,color:#0F172A;
     classDef reasoning fill:#EEF2FF,stroke:#4D6BFE,color:#1E1B4B;
     classDef control fill:#F0FDFA,stroke:#0D9488,color:#134E4A;
     class Events,Filter,Context input;
     class Agent,Memory reasoning;
-    class Risk,Exit,Execute control;
+    class Risk,Exit,Execute,Broker control;
 ```
 
 One Python process and SQLite are sufficient initially. Analysis and decision can use one call or two isolated LLM roles; their reliability, latency and cost still need comparison. LLMs have no broker credentials and cannot override operator limits. Protective exits must operate without the model. No model training, RL, microservices or multi-agent framework is required.
@@ -72,10 +73,10 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 | Layer | Implemented | Next capability |
 |---|---|---|
 | **Information** | Fed RSS plus WallStreetCN news/calendar capture, EUR/USD observation filter, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
-| **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure agent with verbatim quote recovery, immutable SQLite history | Live observation evaluation and role comparison |
-| **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture, raw-tick/clock diagnostics and as-of alignment | Representative live quote quality and authoritative positions |
+| **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure proposals, source-evidence validation and immutable SQLite history | Broader forward evaluation of decision quality, failures and cost |
+| **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote bridge (`10–86400s`), Razor commission metadata, raw-tick/clock diagnostics and as-of alignment | Continuous uninterrupted live coverage and authoritative broker positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | Single-pass `TradingAgent`, `DeterministicTargetValidator`, `DeterministicHardRiskEngine`, `SQLiteShadowLedger` (protective exits) and `IntradayEventRuntime` | Forward shadow validation and cTrader Demo execution |
+| **Trading** | Explicit `IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE` actions, account sizing profiles, independent hard risk, SQLite shadow fills/PnL, protective drain and cutoff guards | Uninterrupted Shadow protection and position reconciliation before cTrader Demo execution |
 
 [Read the architecture and module map →](docs/architecture.md)
 
@@ -104,11 +105,14 @@ eventlens research series plan examples/synthetic-series-plan.json
 | Command group | Purpose |
 |---|---|
 | `eventlens observe …` | Bounded source/quote capture, offline demo and read-only timing audits |
+| `eventlens shadow …` | Bounded single-process automated Shadow loop (`start`, `stop`, `status`, `report`, `recover`) |
 | `eventlens memory …` | Memory inspection, synthetic demo and explicit memory reasoning |
 | `eventlens source fed …` | Existing Fed polling collector; use `--help` to inspect options |
 | `eventlens research …` | Historical data, accounting, proposal validation and opt-in inference |
 
 The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Source capture accesses public website endpoints; paid research inference remains separate and opt-in. The optional quote watcher reads a separate, explicitly started Demo bridge; it does not invoke an LLM. All eight older `eventlens-*` commands remain available.
+
+Shadow sizing is configuration-driven: the CLI defaults to `pepperstone_razor_200` (modeled equity of $200 and 200x leverage); `--account-profile institutional_10k` selects the unleveraged $10,000 profile. These are local simulation settings, not balances read from a broker account.
 
 <details>
 <summary><strong>Capture financial news and calendar observations</strong></summary>
@@ -136,30 +140,76 @@ Relocated Python modules use `eventlens.sources.*`, `eventlens.trading.*` and `e
 
 ## Evidence
 
-The latest chronological study covers **eight historical FOMC episodes**. It tests integration, memory continuity and restart behavior, not trading performance.
+### Live Shadow observation · October 23, 2026
+
+Two bounded EUR/USD observation windows covered France and Germany Flash PMI releases. The original unleveraged Shadow records show:
+
+| Observation | Recorded result | What it establishes |
+|---|---|---|
+| Demo quote capture | **1,786 quotes** across two sessions | Recorded Bid/Ask and availability clocks; not executable liquidity |
+| LLM and memory | **6 structured model results**, 5 committed memory versions | Event interpretation, thesis updates and one rejected target are traceable |
+| Shadow lifecycle | **2 entries, 1 timed protective exit** | One complete entry/exit cycle; the second position remained open at the final report |
+| Event receipt → shadow fill | **4.974 s / 14.151 s** for the two entries | Two observations, not a latency distribution or verified public-release-to-fill timing |
+| Costs | Commission and assumed slippage recorded in the ledger | Inspectable simulated accounting, not broker-confirmed fills or profitability |
+
+**Coverage limit:** the October 23 runs were two separate sessions with an approximately five-minute runner gap while the first position was open, predating two-phase protective drain and cutoff guards.
+
+### Live recovery & uninterrupted Shadow window · October 27, 2026
+
+Following the two-phase drain, cutoff-window and cost-provenance updates, a follow-up live session verified residual position recovery and continuous operation:
+
+| Observation | Recorded result | What it establishes |
+|---|---|---|
+| Residual open-position recovery (`09:30 UTC`) | **Both Oct 23 open positions closed on fresh live quotes** (`unclosed_risk = false`, cent-level PnL/fee reconciliation) | Recovery without historical price backfilling; multi-day offline mark change is not strategy alpha |
+| Uninterrupted runtime (`12:25–13:02 UTC`) | **2,240.0 s continuous session** (`2.33×` `max_holding_seconds + exit_buffer_seconds`), `3,517` live quotes (`0` rejected) | Continuous operation across US Durable Goods and Home Price Index windows with clean `flat_completed` drain |
+| Protection coverage | **10,761 checks** (`9,653` fresh valid quotes, `0` unavailable checks while holding an open position) | Continuous protection monitoring; quiet `> 2.0 s` inter-tick pauses fail closed without synthetic quotes |
+| Full event accounting | **84 events persisted** (`77` filtered, `5` `IGNORE_EVENT` model decisions, `2` stale-quote fail-closed rejections) | Honest retention of ignored and rejected arrivals (`0` forced entries when prints lack actionable surprise) |
+
+Raw SQLite/JSONL evidence remains local under ignored `data/` paths. The [Shadow observation and acceptance report](docs/shadow-acceptance.md) describes the captures, account profiles and limitations. Results from different sizing profiles must not be combined or presented as additional live trades.
+
+The base quote policy rejects zero spread. The CLI's default `pepperstone_razor_200` profile enables the commission-bearing exception for allowlisted sources with clock provenance and commission metadata; `--no-allow-commission-zero-spread` disables it. Raw Bid/Ask are preserved. Platform metadata and modeled costs do not independently establish executable prices. See [Demo quote observation and policy](docs/live-quotes.md).
+
+### Earlier model and historical research checks
+
+The chronological FOMC study covers **eight historical episodes**. It checks integration, memory continuity and restart behavior, not trading performance.
 
 | Observation | Result | Interpretation |
 |---|---|---|
 | Evidence-valid position proposals | **3 / 8**, all flat | Five replies were rejected; this is not forecast accuracy |
 | Mean two-stage processing | **7.443 s** | Excludes realtime feed, order delivery and fills |
-| Single-pass live smoke check (`v0.15.2`) | **3.854 s** (1 call, valid) | Verified on filtered WallStreetCN event `3179089`; single-event smoke check, not a statistical sample |
+| Single-pass API smoke check (`v0.15.2`) | **3.854 s** (1 call, valid) | Adapter/schema connectivity using a stored event; not a realtime trading-chain measurement |
 | Pause and resume | Completed without duplicate requests | Recovery evidence, not execution readiness |
-| Market data and costs | Demo gaps, unresolved zero spreads, assumed fees/slippage | Insufficient for a validated profitability claim |
+| Historical market data and costs | Demo gaps and assumed execution costs | Preserved research limitations; insufficient for a profitability claim |
 
-[Full acceptance report →](docs/research/fomc-series-acceptance.md) · [Market-data limitations →](docs/research/fomc-2025-data-quality.md)
+[Historical FOMC acceptance →](docs/research/fomc-series-acceptance.md) · [Historical market-data limitations →](docs/research/fomc-2025-data-quality.md)
+
+### Verification boundary
+
+The current offline/synthetic suite contains **316 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and bounded live observations are separate evidence: live open-to-exit fills within a single uninterrupted post-drain window and broader multi-session after-cost evaluation remain ahead of Demo order execution.
 
 ## Roadmap
 
 - [x] **Foundation** — typed contracts, durable evidence and thesis memory, model adapter.
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
-- [ ] **Realtime observer** — source/quote capture and timing audits are implemented; quote quality, important-release coverage and integrated LLM observation remain pending.
-- [x] **Evaluation & protection** — deterministic target validation, independent hard risk limits, causal SQLite shadow ledger and LLM-independent protective exits (`v0.15.3`).
-- [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after earlier gates pass.
+- [ ] **Realtime observer** — source/quote capture, Razor ECN commission-metadata provenance and sub-second bridge flush are implemented; broader multi-session observation remains pending.
+- [ ] **Evaluation & protection (Shadow loop)** — risk, accounting, protective drain, cutoff guards, residual-position live recovery and a `2,240 s` uninterrupted Shadow window are recorded above, awaiting independent review and broader live trade-cycle coverage.
+- [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after live Shadow acceptance passes.
 
-The next milestone is observation, not automatic orders. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
+**Next acceptance gate:** keep quotes and independent protection running through the full position lifecycle, document every exit or explicit handoff, and retain all ignored, rejected and failed events alongside successful decisions. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
 
 [Stage objectives and acceptance criteria →](docs/roadmap.md)
+
+### Long-horizon research agenda
+
+Planned research extensions beyond the current Shadow and Demo milestones remain strictly subordinate to independent hard risk and must outperform simpler baselines before adoption:
+
+| Research pillar | Stage | Technical scope |
+|---|---|---|
+| **Neuro-Symbolic Execution Governance & Formal Safety Verification** | **Active architectural pillar** | Decouples stochastic LLM semantic interpretation (`SinglePassTradingAgent`) from deterministic symbolic state-transition guards (`DeterministicTargetValidator`, `DeterministicHardRiskEngine`), extending toward stateful property-based testing (`Hypothesis`) and SMT-backed formal invariant verification (`Z3`) across quote outages, session rollovers and protective drain. |
+| **Conditional Generative Market World Model** | **Medium-horizon research** | Mitigates macro-event sample scarcity via conditional trajectory generation—jointly modeling post-release price jumps, liquidity droughts and spread-widening dynamics—for offline counterfactual stress testing of sizing and exit policies, benchmarked against historical bootstrap baselines. |
+| **Self-Exciting Microstructure Regime Detection (Hawkes Point Processes)** | **Medium-horizon research** | Models clustered information arrivals and sub-second tick-intensity bursts with Hawkes point processes to detect informed order-flow and adverse-selection regimes for execution gating and adaptive exit calibration. |
+| **Regularized Programmatic Policy Search** | **Gated long-horizon research** | Restricts evolutionary program/parameter search (FunSearch / Eureka paradigm) to bounded execution and exit policies under walk-forward validation, Deflated Sharpe Ratio penalties and generative stress-test gates to control multiple-testing bias. |
 
 ## Repository
 
@@ -170,17 +220,18 @@ eventlens/
 │   ├── observer.py      Raw captures, revisions and availability history
 │   ├── quotes.py        Demo quote evidence and as-of input alignment
 │   ├── research/        Historical data, replay and experiments
-│   ├── trading/         Agent, portfolio, risk and execution interfaces
+│   ├── trading/         Agent, sizing, hard risk and Shadow execution/accounting
 │   ├── contracts.py     Shared typed records and UTC validation
 │   ├── deepseek.py      Replaceable JSON model boundary and adapter
 │   ├── reasoning.py     Existing memory-only LLM path
 │   ├── sqlite_memory.py Durable evidence and thesis history
-│   ├── runtime.py       Future realtime coordinator interface
+│   ├── runtime.py       Intraday event runtime, persistent state and ShadowRunner
+│   ├── shadow_cli.py    Bounded Shadow loop CLI (start/stop/status/report/recover)
 │   └── cli.py           Grouped access to existing commands
 ├── tests/               Shared, source and research checks
 ├── configs/             Pinned research configurations
 ├── docs/                Architecture, roadmap and research evidence
-├── ctrader/             Read-only Demo backtesting probe
+├── ctrader/             Read-only Demo quote bridge & backtesting probe
 ├── scripts/             Research utilities
 ├── notebooks/           Existing data-quality and cost diagnostics
 ├── examples/            Synthetic inputs and schema examples
@@ -209,8 +260,9 @@ CI runs offline/synthetic checks on Python 3.11 and 3.12, without paid model or 
 | [Roadmap](docs/roadmap.md) | [Historical input boundaries](docs/research/historical-context.md) |
 | [Observer capture](docs/observer.md) | [Source-capture acceptance](docs/observer-acceptance.md) |
 | [Demo quote observation](docs/live-quotes.md) | [Quote/alignment acceptance](docs/live-quotes-acceptance.md) |
-| [Thesis memory](docs/memory.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
-| [Fed intake](docs/fed-intake.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
+| [Shadow loop & acceptance](docs/shadow-acceptance.md) | [Chronological replay and recovery](docs/research/chronological-replay.md) |
+| [Thesis memory](docs/memory.md) | [Historical implementation snapshot](docs/research/implementation-history.md) |
+| [Fed intake](docs/fed-intake.md) | |
 
 ---
 

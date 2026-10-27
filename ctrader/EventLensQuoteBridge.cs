@@ -12,10 +12,10 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class EventLensQuoteBridge : Robot
     {
-        [Parameter("Duration seconds", DefaultValue = 120, MinValue = 10, MaxValue = 600)]
+        [Parameter("Duration seconds", DefaultValue = 1500, MinValue = 10, MaxValue = 86400)]
         public int DurationSeconds { get; set; }
 
-        [Parameter("Sample interval ms", DefaultValue = 1000, MinValue = 1000, MaxValue = 10000)]
+        [Parameter("Sample interval ms", DefaultValue = 200, MinValue = 100, MaxValue = 10000)]
         public int SampleIntervalMilliseconds { get; set; }
 
         private StreamWriter _writer;
@@ -27,6 +27,9 @@ namespace cAlgo.Robots
         private double _pendingBid;
         private double _pendingAsk;
         private bool _hasPending;
+        private bool _lastEmittedPositiveSpread;
+        private double _lastEmittedBid;
+        private double _lastEmittedAsk;
         private long _lastSample = -10000;
         private long _sequence;
         private long _rawTicks;
@@ -62,7 +65,7 @@ namespace cAlgo.Robots
                 commission_type = Symbol.CommissionType.ToString() });
             _enabled = true;
             _elapsed.Start();
-            Timer.Start(TimeSpan.FromMilliseconds(200));
+            Timer.Start(TimeSpan.FromMilliseconds(50));
             Print("EVENTLENS_QUOTES|started|session={0}|symbol={1}|orders=none|duration_seconds={2}",
                 _session, SymbolName, DurationSeconds);
         }
@@ -110,15 +113,26 @@ namespace cAlgo.Robots
             FlushPendingIfDue();
         }
 
-        private void FlushPendingIfDue()
+        private void FlushPendingIfDue(bool force = false)
         {
-            if (!_hasPending || _elapsed.ElapsedMilliseconds - _lastSample < SampleIntervalMilliseconds)
+            if (!_hasPending)
+                return;
+            var positiveSpread = _pendingAsk > _pendingBid;
+            var spreadStateChanged = positiveSpread != _lastEmittedPositiveSpread;
+            var priceChanged = Math.Abs(_pendingBid - _lastEmittedBid) > 1e-9 ||
+                               Math.Abs(_pendingAsk - _lastEmittedAsk) > 1e-9;
+            var effectiveInterval = Math.Min(SampleIntervalMilliseconds, 200);
+            if (!force && !priceChanged && !positiveSpread && !spreadStateChanged &&
+                _elapsed.ElapsedMilliseconds - _lastSample < effectiveInterval)
                 return;
             var now = DateTime.UtcNow;
             _hasPending = false;
-            if (_pendingTime > now || (now - _pendingTime).TotalSeconds > 4.0)
+            if (_pendingTime > now || (now - _pendingTime).TotalSeconds > 1.5)
                 return;
             _lastSample = _elapsed.ElapsedMilliseconds;
+            _lastEmittedPositiveSpread = positiveSpread;
+            _lastEmittedBid = _pendingBid;
+            _lastEmittedAsk = _pendingAsk;
             // Tick.Time follows the robot's UTC timezone; it is not a receipt clock.
             Write(new { version = 1, kind = "quote", session_id = _session, sequence = ++_sequence,
                 symbol = SymbolName, source_at = _pendingTime.ToString("o", CultureInfo.InvariantCulture),
@@ -133,6 +147,7 @@ namespace cAlgo.Robots
             if (_writer == null) return;
             try
             {
+                FlushPendingIfDue(true);
                 Write(new { version = 1, kind = "stop", session_id = _session,
                     stopped_at = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                     quotes = _sequence, raw_ticks = _rawTicks,
