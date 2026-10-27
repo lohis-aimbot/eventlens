@@ -549,8 +549,13 @@ def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
     assert "spreadStateChanged" in code and "_lastEmittedPositiveSpread" in code
     assert "priceChanged" in code and "_lastEmittedBid" in code
     assert "FlushPendingIfDue(true)" in code
+    assert "MaxValue = 86400" in code
     with pytest.raises(ValidationError):
         start(sample_interval_ms=50)
+    assert start(duration_seconds=1500).duration_seconds == 1500
+    assert start(duration_seconds=86400).duration_seconds == 86400
+    with pytest.raises(ValidationError):
+        start(duration_seconds=86401)
     s1 = start(
         sample_interval_ms=200,
         commission="3",

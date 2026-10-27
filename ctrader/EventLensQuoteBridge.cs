@@ -12,7 +12,7 @@ namespace cAlgo.Robots
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class EventLensQuoteBridge : Robot
     {
-        [Parameter("Duration seconds", DefaultValue = 300, MinValue = 10, MaxValue = 600)]
+        [Parameter("Duration seconds", DefaultValue = 1500, MinValue = 10, MaxValue = 86400)]
         public int DurationSeconds { get; set; }
 
         [Parameter("Sample interval ms", DefaultValue = 200, MinValue = 100, MaxValue = 10000)]

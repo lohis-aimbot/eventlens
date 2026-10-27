@@ -427,7 +427,7 @@ def main(argv: list[str] | None = None) -> None:
         "--duration",
         type=float,
         default=30.0,
-        help="Bounded runtime duration in seconds (0 < duration <= 3600)",
+        help="Bounded runtime duration in seconds (0 < duration <= 86400)",
     )
     start_p.add_argument(
         "--basis",
@@ -537,8 +537,8 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
     if args.command == "start":
-        if not math.isfinite(args.duration) or not 0 < args.duration <= 3600:
-            parser.error("--duration must be a finite number in (0, 3600] seconds")
+        if not math.isfinite(args.duration) or not 0 < args.duration <= 86400:
+            parser.error("--duration must be a finite number in (0, 86400] seconds")
         if args.poll_news and args.news_interval < 10.0:
             parser.error("--news-interval must be at least 10 seconds when polling live news")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
