@@ -28,7 +28,7 @@
 EventLens is a Python research system built around **Event → Thesis Memory → Position**. Existing LLM APIs interpret financial events, maintain persistent trading theses and propose intraday exposure changes. Independent rules validate proposals, enforce risk limits and manage exits in a local Shadow ledger. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.3 · Shadow research foundation.** Event ingestion, single-pass LLM reasoning, thesis memory, deterministic risk checks and Shadow accounting are implemented. Two bounded live PMI observation windows recorded model decisions, shadow entries and a timed exit. Protective drain shutdown and cutoff guards have since been added; uninterrupted operation and complete position reconciliation remain pending acceptance. **No broker orders are connected, and profitability has not been established.**
+> **v0.15.3 · Shadow research foundation.** Event ingestion, single-pass LLM reasoning, thesis memory, deterministic risk checks, two-phase protective drain and cutoff guards are implemented. Live observations include two October 23 PMI runs (entries and timed exit), October 27 live-quote recovery/reconciliation of residual open positions, and an uninterrupted 2,240-second forward Shadow window across US macro releases. **No broker orders are connected, and profitability has not been established.**
 
 <table>
   <tr>
@@ -152,7 +152,18 @@ Two bounded EUR/USD observation windows covered France and Germany Flash PMI rel
 | Event receipt → shadow fill | **4.974 s / 14.151 s** for the two entries | Two observations, not a latency distribution or verified public-release-to-fill timing |
 | Costs | Commission and assumed slippage recorded in the ledger | Inspectable simulated accounting, not broker-confirmed fills or profitability |
 
-**Coverage limit:** these were two separate runs, with an approximately five-minute runner gap while the first position was open. They demonstrate functional integration, not uninterrupted protection. The captures predate the latest protective drain and cutoff guards; those changes still need continuous forward acceptance.
+**Coverage limit:** the October 23 runs were two separate sessions with an approximately five-minute runner gap while the first position was open, predating two-phase protective drain and cutoff guards.
+
+### Live recovery & uninterrupted Shadow window · October 27, 2026
+
+Following the two-phase drain, cutoff-window and cost-provenance updates, a follow-up live session verified residual position recovery and continuous operation:
+
+| Observation | Recorded result | What it establishes |
+|---|---|---|
+| Residual open-position recovery (`09:30 UTC`) | **Both Oct 23 open positions closed on fresh live quotes** (`unclosed_risk = false`, cent-level PnL/fee reconciliation) | Recovery without historical price backfilling; multi-day offline mark change is not strategy alpha |
+| Uninterrupted runtime (`12:25–13:02 UTC`) | **2,240.0 s continuous session** (`2.33×` `max_holding_seconds + exit_buffer_seconds`), `3,517` live quotes (`0` rejected) | Continuous operation across US Durable Goods and Home Price Index windows with clean `flat_completed` drain |
+| Protection coverage | **10,761 checks** (`9,653` fresh valid quotes, `0` unavailable checks while holding an open position) | Continuous protection monitoring; quiet `> 2.0 s` inter-tick pauses fail closed without synthetic quotes |
+| Full event accounting | **84 events persisted** (`77` filtered, `5` `IGNORE_EVENT` model decisions, `2` stale-quote fail-closed rejections) | Honest retention of ignored and rejected arrivals (`0` forced entries when macro prints match consensus) |
 
 Raw SQLite/JSONL evidence remains local under ignored `data/` paths. The [Shadow observation and acceptance report](docs/shadow-acceptance.md) describes the captures, account profiles and limitations. Results from different sizing profiles must not be combined or presented as additional live trades.
 
@@ -174,15 +185,15 @@ The chronological FOMC study covers **eight historical episodes**. It checks int
 
 ### Verification boundary
 
-The current offline/synthetic suite contains **316 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and isolated live observations are separate evidence: continuous operation, complete exit reconciliation and broader after-cost evaluation remain outstanding.
+The current offline/synthetic suite contains **316 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and bounded live observations are separate evidence: live open-to-exit fills within a single uninterrupted post-drain window and broader multi-session after-cost evaluation remain ahead of Demo order execution.
 
 ## Roadmap
 
 - [x] **Foundation** — typed contracts, durable evidence and thesis memory, model adapter.
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
-- [ ] **Realtime observer** — source/quote capture, Razor ECN commission-metadata provenance and sub-second bridge flush are implemented; continuous uninterrupted multi-session observation remains pending.
-- [ ] **Evaluation & protection (Shadow loop)** — risk, accounting, protective drain and cutoff guards are implemented; the two-window PMI observation and offline suite are recorded above. Continuous protection and complete exit reconciliation remain pending.
+- [ ] **Realtime observer** — source/quote capture, Razor ECN commission-metadata provenance and sub-second bridge flush are implemented; broader multi-session observation remains pending.
+- [ ] **Evaluation & protection (Shadow loop)** — risk, accounting, protective drain, cutoff guards, residual-position live recovery and a `2,240 s` uninterrupted Shadow window are recorded above, awaiting independent review and broader live trade-cycle coverage.
 - [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after live Shadow acceptance passes.
 
 **Next acceptance gate:** keep quotes and independent protection running through the full position lifecycle, document every exit or explicit handoff, and retain all ignored, rejected and failed events alongside successful decisions. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.

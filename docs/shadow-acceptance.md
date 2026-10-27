@@ -266,11 +266,12 @@ to GitHub):
 | `max_daily_loss_usd` | **`$8.00 USD` (`4%` equity)** | Daily circuit breaker (`protective_daily_loss_limit`, halts new risk after 2 full stop-outs) |
 | `min_equity_usd` | **`$180.00 USD` (`10%` max DD)** | Hard account equity floor (`equity_below_minimum_floor`) |
 
-Standard live test command around scheduled tier-1 EUR/USD or USD releases:
+Standard live test command around scheduled tier-1 EUR/USD or USD releases (with `duration >= max_holding_seconds + exit_buffer_seconds`):
 ```bash
 .venv/bin/eventlens shadow start \
   --account-profile pepperstone_razor_200 \
-  --duration 600 \
+  --duration 1500 \
+  --close-on-stop \
   --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge" \
   --poll-news --news-interval 10 --event-interval 0.5 \
   --quote-interval 0.05 --protection-interval 0.2 --call-model
@@ -285,15 +286,47 @@ Standard live test command around scheduled tier-1 EUR/USD or USD releases:
 - `data/shadow-observation-20261022/deepseek-api-probe.json`:
   Live `DeepSeekClient` structured JSON call on `wallstreetcn:news:3183235:r1` (`elapsed_ms = 4835`, `model_id = "deepseek-flash"`, `input_tokens = 1582`, `output_tokens = 98`, `portfolio_action = "IGNORE_EVENT"`).
 
+### 4.5 Residual Position Live Recovery & Continuous Uninterrupted Shadow Acceptance (`2026-10-27`, `data/shadow-observation-20261027/`)
+
+All pre-recovery backups, recovery receipts, post-recovery ledger reports, raw cTrader JSONL quote files, and continuous Shadow SQLite/JSON artifacts are persisted under gitignored `data/shadow-observation-20261027/`.
+
+#### A. Live-quote recovery & complete reconciliation of `2026-10-23` residual open positions (`09:30:48 UTC`)
+
+Both residual short `EUR/USD` positions left open at the end of `2026-10-23` Window B (`07:37:10Z`) were recovered via `eventlens shadow ... recover --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge" --wait-for-quote-seconds 20` against fresh live quotes from cTrader Demo (`***8703`) session `a6b89e7e-0353-4cf0-b12e-484fe1283615` (`09:28:12Z` → `09:38:12Z`, `868` emitted quotes). No historical prices were backfilled.
+
+| Ledger & Profile | Trade # | Entry (`UTC`, qty, price, fee) | Exit (`UTC`, reason, raw `Bid/Ask`, fill price, fee) | Realized PnL | Ending Reconciliation |
+|---|---:|---|---|---:|---|
+| `pmi-live-shadow.sqlite` (`institutional_10k`, `$10,000`, `1x`) | #1 | `2026-10-23T07:15:23.706Z`, `-892 EUR` @ `1.120102`, `$0.03` | `2026-10-23T07:30:23.722Z` (`protective_max_holding_horizon`), `+892 EUR` @ `1.119448`, `$0.03` | `+$0.58` | `cash = equity = $10,002.85` (`$10,000.00 + $2.93 - $0.08`), `open_qty = 0`, `unclosed_risk = false` |
+| `pmi-live-shadow.sqlite` (`institutional_10k`, `$10,000`, `1x`) | #2 (recovered) | `2026-10-23T07:30:40.306Z`, `-446 EUR` @ `1.119292`, `$0.01` | `2026-10-27T09:30:48.419Z` (`protective_max_holding_horizon`), `1.114 / 1.114`, `+446 EUR` @ `1.114028`, `$0.01` (`broker_metadata_verified_conservative_bps_floor`, `0.25 bps` unverified slippage) | `+$2.35` | (see above) |
+| `pmi-live-pepperstone-200-shadow.sqlite` (`pepperstone_razor_200`, `$200`, `200x`) | #1 | `2026-10-23T07:15:23.706Z`, `-4,000 EUR` (`-0.04 lots`) @ `1.120102`, `$0.13` | `2026-10-23T07:30:23.722Z` (`protective_max_holding_horizon`), `+4,000 EUR` @ `1.119448`, `$0.13` | `+$2.62` | `cash = equity = $212.71` (`$200.00 + $13.11 - $0.40`), `open_qty = 0`, `unclosed_risk = false` |
+| `pmi-live-pepperstone-200-shadow.sqlite` (`pepperstone_razor_200`, `$200`, `200x`) | #2 (recovered) | `2026-10-23T07:30:40.306Z`, `-2,000 EUR` (`-0.02 lots`) @ `1.119292`, `$0.07` | `2026-10-27T09:30:48.632Z` (`protective_take_profit`), `1.11402 / 1.11402`, `+2,000 EUR` @ `1.114048`, `$0.07` (`broker_metadata_verified_conservative_bps_floor`, `0.25 bps` unverified slippage) | `+$10.49` | (see above) |
+
+> **Scope note:** Both ledgers represent the same two `2026-10-23` PMI decisions under two sizing profiles and must never be summed as four independent live trades. Trade #2's gain between `2026-10-23T07:30Z` and `2026-10-27T09:30Z` occurred across an offline multi-day gap while no runner was active; it validates restart/recovery accounting on fresh quotes rather than uninterrupted intraday protection or strategy alpha.
+
+#### B. Uninterrupted `2,240.0 s` (`37m 20s`) continuous live forward Shadow acceptance (`12:25:16Z` → `13:02:37Z`)
+
+- **Preliminary `355.0 s` live check (`09:31:54Z` → `09:37:49Z`, `continuous-600s-*`)**: surfaced a `1 ms` wall-clock ordering issue in `ShadowRunner.step_protection()` where `now` was sampled before `_current_market()`, causing `protection_coverage` to classify newly polled snapshots as `future_market_snapshot`. Fixed in commit `817e333` with regression test `test_step_protection_coverage_with_advancing_wall_clock_does_not_flag_future_snapshot`.
+- **Primary uninterrupted window (`continuous-*`)**:
+  - **Runtime window (UTC)**: `2026-10-27T12:25:16.985627+00:00` → `2026-10-27T13:02:37.015550+00:00` (`duration_seconds = 2240.0`, **`2.33×`** `max_holding_seconds (900s) + exit_buffer_seconds (60s) = 960s`), spanning both the `12:30 UTC` US September Durable Goods Orders and `13:00 UTC` US August FHFA / S&P Case-Shiller Home Price Index releases.
+  - **Quote bridge session (`874420b1-2c2a-4898-9b4f-ec81932d84b1`)**: `12:23:31.241Z` → `13:03:31.275Z` (`duration_seconds = 2400`, `3,804` quotes emitted from `3,849` raw ticks, `0` symbol mismatches; `3,517` live quotes ingested during the runner window: `2,670` verified commission-bearing zero-spread + `847` positive-spread `0.1–0.7 pips`, `0` rejected, `0` failures, `max_bridge_to_receipt_seconds = 0.0716s`).
+  - **Protection coverage (`protection_coverage`)**: `10,761` total checks (`200 ms` cadence), **`9,653` valid fresh-quote checks (`89.7%`)**, `1,108` quiet-market `stale_market_quote` / startup checks across `154` brief `>2.0 s` inter-tick pauses (`max_outage_seconds = 9.0208`), and **`unavailable_checks_while_position_open = 0`** (`0.0 s` unprotected open-position gap).
+  - **Observer & full event accounting (`84` events persisted)**:
+    - `411` live WallStreetCN polls (`84` revisions, `10,862` sightings, `1` transient `ConnectTimeout` auto-recovered on the next cycle).
+    - `77` `filtered_out`: `53` initial baseline records (`21` `baseline_below_news_importance_threshold`, `20` `baseline_unreleased_calendar_schedule`, `6` `baseline_unrelated_calendar_country`, `4` `baseline_no_eurusd_macro_relevance`, `1` `baseline_below_calendar_importance_threshold`, `1` `baseline_snapshot_not_live_arrival`) plus `24` live low-importance / non-EUR/USD arrivals (`17` `below_news_importance_threshold`, `7` `no_eurusd_macro_relevance`).
+    - `5` live `SinglePassTradingAgent` (`deepseek-flash@bc19ba97cbe016479903222bb1578db6`, `10,794` input / `595` output tokens, `receipt_to_decision_ms = [5337, 7225, 6217, 4441, 7868]`) evaluations committed across `memory_version 1..5`, all returning `IGNORE_EVENT` (`no_target`) because macro prints landed near consensus (`US Durable Goods 1.8% vs 1.9%`, `S&P/CS YoY 2.65% vs 2.6%`, `FHFA MoM 0.3% vs 0.3%`, `S&P/CS MoM 0.27% vs 0.3%`) and corporate news (`Corning capex guidance`) was unrelated to `EUR/USD`. No trades were forced.
+    - `2` companion `12:30 UTC` Durable Goods revisions (`1596090@1793104200:r2` ex-transport `0.5% vs 0.6%` and `1596091@1793104200:r2` core capital goods `0.5% vs 0.7%`) arrived right as a `>2.0 s` inter-tick pause occurred (`12:30:29.75Z–12:30:36.51Z`) and failed closed (`reasoning_failed`: `Missing or stale EUR/USD market quote for agent decision: stale_market_quote`, `attempts = 3`, `0` model tokens spent, `0` fabricated quotes).
+  - **Two-phase shutdown & ending state**: `stop_reason = "runner_duration_expired"`, `shutdown_status = "flat_completed"`, `event_worker_stopped_before_drain = true`, `quote_worker_alive_during_drain = true`, `protection_worker_alive_during_drain = true`, `open_quantity_eur = "0"`, `pending_order_ids = []`, `pending_exit_reason = null`, `unclosed_risk = false`, `equity = "$200.00"`, and `0` lingering background processes.
+
 ---
 
 ## 5. Acceptance summary: passed items and operational characteristics
 
-1. **Passed (Offline / synthetic regression verification — 315 tests)**:
-   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, two-phase stop/drain shutdown (`running -> stopping -> draining -> stopped`), pre-cutoff remaining run & quote-bridge window blocking (`max_holding_seconds + exit_buffer_seconds`), quote outage alert & unclosed-risk reporting, explicit zero-spread exception policy (`allow_commission_bearing_zero_spread` opt-in + allowlisted `ctrader_algo` provenance), and the `pepperstone_razor_200` (`$200 USD / 200x / 0.01..100 lot / $4 SL / $8 TP / 900s`) sizing & protection standard are verified by **315 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
+1. **Passed (Offline / synthetic regression verification — 316 tests)**:
+   - Full closed-loop pipeline (`Event -> Filter -> Agent -> Post-LLM Quote & Portfolio Refresh -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`), non-blocking startup recovery, hung-LLM protection independence, conservative cross-day daily loss baseline confirmation, two-phase stop/drain shutdown (`running -> stopping -> draining -> stopped`), pre-cutoff remaining run & quote-bridge window blocking (`max_holding_seconds + exit_buffer_seconds`), quote outage alert & unclosed-risk reporting, advancing wall-clock protection coverage tracking, explicit zero-spread exception policy (`allow_commission_bearing_zero_spread` opt-in + allowlisted `ctrader_algo` provenance), and the `pepperstone_razor_200` (`$200 USD / 200x / 0.01..100 lot / $4 SL / $8 TP / 900s`) sizing & protection standard are verified by **316 passing tests** (`pytest -q`), strict `mypy src scripts`, and `ruff`.
 2. **Passed (cTrader Demo EUR/USD quote bridge root-cause diagnosis & fix)**:
-   - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), eliminated bridge-side tick throttling, and reduced `source_to_bridge` lag to `0.1860s` median and `bridge_to_receipt` lag to `0.0529s` max without adding artificial spreads or relaxing the 2-second freshness gate.
-3. **Passed (Bounded single-process live forward Shadow closed-loop acceptance)**:
-   - Verified the complete real-time closed loop (`Real Event -> DeepSeek -> Hard Risk -> Shadow Fill -> Open Position -> Protective Exit -> Cost & PnL Accounting`) during the `2026-10-23` France (`07:15 UTC`) and Germany (`07:30 UTC`) October Flash PMI releases, with all raw SQLite, JSONL, and JSON evidence saved in `data/shadow-observation-20261022/` and `data/shadow-observation-20261023/`.
-4. **Operational characteristics observed in live runs**:
-   - **Quiet market inter-tick gaps (`> 2.0s`)**: Because `EventLensQuoteBridge` emits only on real market ticks (never fabricating heartbeat quotes) and the 2-second quote freshness gate (`max_quote_age_ms = 2000`) is strictly enforced, protective monitor ticks during quiet market intervals (`> 2.0s` without a new price tick) log `protective_monitor_quote_unavailable` and resume immediately when the next real tick arrives.
+   - Verified `0` mismatches between `Symbol.Bid/Ask` and `LastTick.Bid/Ask` across real-time ticks, confirmed Pepperstone Razor Demo commission metadata (`commission = 3`, `commission_type = UsdPerMillionUsdVolume` per side), propagated verified session commission metadata into `Quote` (`has_verified_commission`), extended bridge/CLI duration bounds up to `86,400 s`, eliminated bridge-side tick throttling, and reduced `source_to_bridge` lag to `0.1860s` median and `bridge_to_receipt` lag to `0.0529s–0.0716s` max without adding artificial spreads or relaxing the 2-second freshness gate.
+3. **Passed (Residual position live-quote recovery, complete PnL reconciliation, and uninterrupted `2,240 s` continuous Shadow acceptance)**:
+   - Closed both `2026-10-23` residual open positions on fresh `2026-10-27` live quotes with exact cent-level reconciliation (`unclosed_risk = false`), and completed an uninterrupted `2,240.0 s` (`2.33×` `max_holding_seconds + exit_buffer_seconds`) continuous live Shadow session across two US macro release windows (`3,517` live quotes, `9,653` valid protection checks, `0` unprotected open-position gaps, `84` persisted events, clean two-phase `flat_completed` shutdown).
+4. **Operational characteristics & remaining boundaries**:
+   - **Quiet market inter-tick gaps (`> 2.0s`)**: Because `EventLensQuoteBridge` emits only on real market ticks (never fabricating heartbeat quotes) and the 2-second quote freshness gate (`max_quote_age_ms = 2000`) is strictly enforced, quiet intervals (`> 2.0s` without a new tick) defer LLM evaluation (`stale_market_quote`) and log `unavailable_quote_checks` until the next real tick arrives.
+   - **No live fill occurred inside the `2026-10-27` `2,240 s` window because actual US macro prints were near consensus**: All `5` live model decisions returned `IGNORE_EVENT` (`0` forced entries). Continuous open-to-exit holding within a single uninterrupted window is verified deterministically in the offline regression suite, while live entry/exit fills were observed in the `2026-10-23` PMI sessions and `2026-10-27` live-quote recovery. Profitability and broker-order execution readiness remain separate future milestones.
