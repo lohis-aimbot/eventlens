@@ -190,17 +190,16 @@ The current offline/synthetic suite contains **316 passing tests**, with CI on P
 [Stage objectives and acceptance criteria →](docs/roadmap.md)
 
 <details>
-<summary><strong>Long-horizon research candidates and explicit non-goals</strong></summary>
+<summary><strong>Long-horizon research agenda</strong></summary>
 
-None of the unbuilt modeling extensions below is required for current Shadow or Demo milestones, and none may bypass independent hard risk or adoption baselines.
+Planned research extensions beyond the current Shadow and Demo milestones remain strictly subordinate to independent hard risk and must outperform simpler baselines before adoption:
 
-| Direction | Status | Assessment for intraday G10 FX |
+| Research pillar | Stage | Technical scope |
 |---|---|---|
-| **Neuro-symbolic risk gate & formal invariants** | **Active foundation** | EventLens already pairs probabilistic LLM proposals (`SinglePassTradingAgent`) with deterministic symbolic checks (`DeterministicTargetValidator`, `DeterministicHardRiskEngine`). Next step: property-based state-machine tests (`Hypothesis`) and lightweight formal invariant checks (`Z3`) across quote outages, rollover and shutdown transitions. |
-| **Conditional generative scenario simulation (Market World Model)** | **Medium-term candidate** | Historical macro releases are scarce. Candidate use is offline counterfactual stress testing—generating post-release price and spread-widening paths for risk/exit evaluation on GPU—not direct next-tick price prediction. Must outperform historical bootstrap baselines. |
-| **Hawkes arrival-intensity monitoring (vs. OTC liquidation IRL)** | **Split: retain Hawkes / drop IRL** | Classical self-exciting Hawkes processes are a practical candidate for detecting tick/headline clustering and spread-widening regimes. Inverse-RL "liquidation hunting" does not transfer from centralized crypto perpetuals to decentralized OTC spot FX, where market-wide open interest and liquidation feeds are unobservable. |
-| **Evolutionary code/parameter search (Eureka / FunSearch style)** | **Strictly gated candidate** | Unconstrained rule evolution on noisy financial series amplifies multiple-testing overfitting. Restricted to bounded exit/execution parameter search under walk-forward and deflated-Sharpe penalties after scenario stress-testing is established. |
-| **Epidemiological PINNs (SIR cognitive contagion PDEs)** | **Explicit non-goal** | Excluded for intraday `EUR/USD`. Institutional macro repricing occurs via sub-second step jumps rather than slow retail social-contagion differential equations. |
+| **Neuro-Symbolic Execution Governance & Formal Safety Verification** | **Active architectural pillar** | Decouples stochastic LLM semantic interpretation (`SinglePassTradingAgent`) from deterministic symbolic state-transition guards (`DeterministicTargetValidator`, `DeterministicHardRiskEngine`), extending toward stateful property-based testing (`Hypothesis`) and SMT-backed formal invariant verification (`Z3`) across quote outages, session rollovers and protective drain. |
+| **Conditional Generative Market World Model** | **Medium-horizon research** | Mitigates macro-event sample scarcity via conditional trajectory generation—jointly modeling post-release price jumps, liquidity droughts and spread-widening dynamics—for offline counterfactual stress testing of sizing and exit policies, benchmarked against historical bootstrap baselines. |
+| **Self-Exciting Microstructure Regime Detection (Hawkes Point Processes)** | **Medium-horizon research** | Models clustered information arrivals and sub-second tick-intensity bursts with Hawkes point processes to detect informed order-flow and adverse-selection regimes for execution gating and adaptive exit calibration. |
+| **Regularized Programmatic Policy Search** | **Gated long-horizon research** | Restricts evolutionary program/parameter search (FunSearch / Eureka paradigm) to bounded execution and exit policies under walk-forward validation, Deflated Sharpe Ratio penalties and generative stress-test gates to control multiple-testing bias. |
 
 </details>
 
