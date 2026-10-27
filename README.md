@@ -174,7 +174,7 @@ The chronological FOMC study covers **eight historical episodes**. It checks int
 
 ### Verification boundary
 
-The current offline/synthetic suite contains **315 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and isolated live observations are separate evidence: continuous operation, complete exit reconciliation and broader after-cost evaluation remain outstanding.
+The current offline/synthetic suite contains **316 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and isolated live observations are separate evidence: continuous operation, complete exit reconciliation and broader after-cost evaluation remain outstanding.
 
 ## Roadmap
 
@@ -188,6 +188,21 @@ The current offline/synthetic suite contains **315 passing tests**, with CI on P
 **Next acceptance gate:** keep quotes and independent protection running through the full position lifecycle, document every exit or explicit handoff, and retain all ignored, rejected and failed events alongside successful decisions. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
 
 [Stage objectives and acceptance criteria →](docs/roadmap.md)
+
+<details>
+<summary><strong>Long-horizon research candidates and explicit non-goals</strong></summary>
+
+None of the unbuilt modeling extensions below is required for current Shadow or Demo milestones, and none may bypass independent hard risk or adoption baselines.
+
+| Direction | Status | Assessment for intraday G10 FX |
+|---|---|---|
+| **Neuro-symbolic risk gate & formal invariants** | **Active foundation** | EventLens already pairs probabilistic LLM proposals (`SinglePassTradingAgent`) with deterministic symbolic checks (`DeterministicTargetValidator`, `DeterministicHardRiskEngine`). Next step: property-based state-machine tests (`Hypothesis`) and lightweight formal invariant checks (`Z3`) across quote outages, rollover and shutdown transitions. |
+| **Conditional generative scenario simulation (Market World Model)** | **Medium-term candidate** | Historical macro releases are scarce. Candidate use is offline counterfactual stress testing—generating post-release price and spread-widening paths for risk/exit evaluation on GPU—not direct next-tick price prediction. Must outperform historical bootstrap baselines. |
+| **Hawkes arrival-intensity monitoring (vs. OTC liquidation IRL)** | **Split: retain Hawkes / drop IRL** | Classical self-exciting Hawkes processes are a practical candidate for detecting tick/headline clustering and spread-widening regimes. Inverse-RL "liquidation hunting" does not transfer from centralized crypto perpetuals to decentralized OTC spot FX, where market-wide open interest and liquidation feeds are unobservable. |
+| **Evolutionary code/parameter search (Eureka / FunSearch style)** | **Strictly gated candidate** | Unconstrained rule evolution on noisy financial series amplifies multiple-testing overfitting. Restricted to bounded exit/execution parameter search under walk-forward and deflated-Sharpe penalties after scenario stress-testing is established. |
+| **Epidemiological PINNs (SIR cognitive contagion PDEs)** | **Explicit non-goal** | Excluded for intraday `EUR/USD`. Institutional macro repricing occurs via sub-second step jumps rather than slow retail social-contagion differential equations. |
+
+</details>
 
 ## Repository
 

@@ -1793,7 +1793,8 @@ class ShadowRunner:
             ).fetchone()
         )
         pos_open = acct is not None and Decimal(acct["quantity_eur"]) != Decimal("0")
-        self._record_protection_check(now, market, position_open=pos_open)
+        check_now = _utc(self.clock())
+        self._record_protection_check(check_now, market, position_open=pos_open)
         exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
         if self.runtime.state_store is not None:
             for fill in exit_fills:

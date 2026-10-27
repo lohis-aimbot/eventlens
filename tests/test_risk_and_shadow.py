@@ -2805,3 +2805,74 @@ def test_two_phase_stop_drain_quote_outage_unclosed_risk_and_restart_handoff(tmp
     finally:
         ledger.close()
         state_store.close()
+
+
+def test_step_protection_coverage_with_advancing_wall_clock_does_not_flag_future_snapshot(
+    tmp_path,
+) -> None:
+    """Advancing wall-clock between expire_pending_orders and _current_market must not trigger future_market_snapshot."""
+    tick_now = datetime(2026, 10, 27, 9, 32, 0, tzinfo=UTC)
+
+    def advancing_clock() -> datetime:
+        nonlocal tick_now
+        tick_now = tick_now + timedelta(milliseconds=1)
+        return tick_now
+
+    policy = RiskPolicy.pepperstone_razor_200()
+    exit_policy = ProtectiveExitPolicy.pepperstone_razor_200()
+    shadow_db = tmp_path / "advancing-clock-shadow.sqlite"
+    memory_db = tmp_path / "advancing-clock-memory.sqlite"
+    ledger = SQLiteShadowLedger(
+        shadow_db,
+        exit_policy=exit_policy,
+        risk_policy=policy,
+        clock=advancing_clock,
+    )
+    state_store = SQLiteRuntimeStore(shadow_db)
+    memory = SQLiteThesisMemory(memory_db, clock=advancing_clock)
+
+    def market_provider(ts: datetime) -> MarketSnapshot:
+        return make_market(
+            quote=make_quote(
+                bid="1.11398",
+                ask="1.11398",
+                received_at=ts,
+                source_at=ts - timedelta(milliseconds=50),
+                bridge_at=ts - timedelta(milliseconds=20),
+                commission="3",
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            as_of=ts,
+        )
+
+    class _NoopAgent:
+        async def decide(self, context: object) -> AgentDecision:
+            raise AssertionError("not called")
+
+    try:
+        runtime = IntradayEventRuntime(
+            memory=memory,
+            portfolio_state=ledger,
+            market_provider=market_provider,
+            agent=_NoopAgent(),  # type: ignore[arg-type]
+            target_validator=DeterministicTargetValidator(),
+            risk_engine=DeterministicHardRiskEngine(policy=policy),
+            shadow_executor=ledger,
+            state_store=state_store,
+            clock=advancing_clock,
+        )
+        runner = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            clock=advancing_clock,
+            strict_window_coverage=False,
+        )
+        asyncio.run(runner.step_protection())
+        coverage = runner._finalize_protection_coverage(advancing_clock())
+        assert coverage["total_protection_checks"] == 1
+        assert coverage["valid_quote_checks"] == 1
+        assert coverage["unavailable_quote_checks"] == 0
+        assert coverage["outage_intervals"] == []
+    finally:
+        ledger.close()
+        state_store.close()
