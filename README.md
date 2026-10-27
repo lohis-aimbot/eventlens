@@ -28,7 +28,7 @@
 EventLens explores how existing LLM APIs can interpret financial events, maintain a trading thesis and propose intraday position changes. Decisions would combine new information with market expectations, current prices, positions and relevant memory. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.3 · Shadow loop reliability fixes & partial forward observation.** Automated single-process `ShadowRunner` (`eventlens shadow`), unified quote provenance/quality checks (`allow_zero_spread=False`, no synthetic spread floor), post-LLM market/portfolio state refresh, explicit action semantics (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), pre-fill order re-verification, DST-aware session daily loss limits (`17:00 America/New_York` rollover, `16:55 America/New_York` daily close), deferred protective exits on bad/missing quotes, and persistent event state/crash recovery are implemented and verified across 306 offline regression tests. Bounded live forward observation verified automated WallStreetCN capture, filtering, and protection loops, but **live forward Shadow fill acceptance is not yet complete** (no active positive-spread Demo quote feed or `DEEPSEEK_API_KEY` in the forward observation environment). Stage 5 cTrader Demo order execution remains blocked. No profitability has been established.
+> **v0.15.3 · Shadow loop reliability, protective drain & live PMI closed-loop observation.** Automated single-process `ShadowRunner` (`eventlens shadow`), two-phase shutdown/drain (`running -> stopping -> draining -> stopped`) keeping quote/protection workers alive until flat exit or explicit handoff, pre-cutoff remaining run & quote-bridge window guards (`max_holding_seconds + exit_buffer_seconds`), explicit opt-in zero-spread exception policy for allowlisted `ctrader_algo` commission-bearing ECN sessions (preserving raw `Bid/Ask` and distinguishing platform commission metadata from unverified shadow slippage assumptions), post-LLM state refresh, DST-aware session daily loss limits (`17:00 America/New_York` rollover, `16:55 America/New_York` daily close), and the `pepperstone_razor_200` (`$200 USD`, `200x` leverage, `0.01..100` lots) sizing standard are implemented and verified across **315 offline regression tests**. Bounded live forward observation on `2026-10-23` exercised the full single-run Shadow closed loop during France & Germany Flash PMI releases; uninterrupted continuous Shadow acceptance and reconciliation remain in progress before independent review. Stage 5 cTrader Demo order execution remains blocked, and no statistical profitability has been established.
 
 <table>
   <tr>
@@ -73,9 +73,9 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 |---|---|---|
 | **Information** | Fed RSS plus WallStreetCN news/calendar capture, EUR/USD observation filter, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
 | **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure agent with verbatim quote recovery, immutable SQLite history | Live observation evaluation and role comparison |
-| **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote capture, raw-tick/clock diagnostics and as-of alignment | Representative live quote quality and authoritative positions |
+| **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote bridge (`10–86400s`), Razor commission metadata, raw-tick/clock diagnostics and as-of alignment | Continuous uninterrupted live coverage and authoritative broker positions |
 | **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`), `SQLiteShadowLedger`, `IntradayEventRuntime`, and `ShadowRunner` (`eventlens shadow`) | Live positive-spread quote feed + forward shadow fill acceptance before cTrader Demo |
+| **Trading** | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`, `pepperstone_razor_200`), `SQLiteShadowLedger`, `IntradayEventRuntime`, and two-phase protective `ShadowRunner` (`eventlens shadow`) | Continuous uninterrupted live Shadow acceptance & reconciliation before cTrader Demo |
 
 [Read the architecture and module map →](docs/architecture.md)
 
@@ -154,8 +154,8 @@ The latest chronological study covers **eight historical FOMC episodes**. It tes
 - [x] **Foundation** — typed contracts, durable evidence and thesis memory, model adapter.
 - [x] **Historical tools** — time-aware replay, cost accounting and restart-safe experiments; model reliability remains insufficient.
 - [x] **Repository organization** — separate source, research and trading modules; preserve existing commands and experiment identity.
-- [ ] **Realtime observer** — source/quote capture and timing audits are implemented; quote quality, important-release coverage and integrated LLM observation remain pending.
-- [ ] **Evaluation & protection (Shadow loop)** — `v0.15.3` reliability fixes, DST-aware intraday risk, causal shadow ledger, crash recovery and single-process `ShadowRunner` pass offline regression tests; live forward Shadow fill acceptance remains pending positive-spread real-time Demo quotes and live LLM observation.
+- [ ] **Realtime observer** — source/quote capture, Razor ECN commission-metadata provenance and sub-second bridge flush are implemented; continuous uninterrupted multi-session observation remains pending.
+- [ ] **Evaluation & protection (Shadow loop)** — `v0.15.3` reliability fixes, DST-aware intraday risk, causal shadow ledger, two-phase protective drain shutdown, cutoff window guards, and `pepperstone_razor_200` sizing pass 315 offline regression tests and single-run live PMI closed-loop observation; uninterrupted continuous Shadow acceptance & reconciliation remain pending before independent review.
 - [ ] **cTrader Demo** — isolated execution adapter and reconciled positions after live Shadow acceptance passes.
 
 The next milestone is observation, not automatic orders. News/provider selection remains open. Additional AI roles must demonstrate value against a simpler baseline.
@@ -182,7 +182,7 @@ eventlens/
 ├── tests/               Shared, source and research checks
 ├── configs/             Pinned research configurations
 ├── docs/                Architecture, roadmap and research evidence
-├── ctrader/             Read-only Demo backtesting probe
+├── ctrader/             Read-only Demo quote bridge & backtesting probe
 ├── scripts/             Research utilities
 ├── notebooks/           Existing data-quality and cost diagnostics
 ├── examples/            Synthetic inputs and schema examples

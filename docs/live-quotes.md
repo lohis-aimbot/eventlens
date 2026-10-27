@@ -55,14 +55,13 @@ cryptographically authenticated market evidence.
    eventlens observe quotes --database data/live-quotes.sqlite report
    ```
 
-Watch bounds are 10–600 seconds; bridge bounds are 10–600 seconds and 1000–10000 ms
-between emitted tick snapshots. Sampling happens **on actual ticks**, not every wall-clock
-second: quiet periods have gaps. There is no forward fill, invented heartbeat quote or
-backfill at watch startup. Cached historical ticks already present before `OnStart` are
-ignored, and a 200 ms timer flushes any new tick held back by the sample-interval throttle
-once that interval elapses (provided the tick is still fresh). This prevents trailing ticks
-before a quiet period from being dropped while remaining a sampled observation rather than
-a complete tick archive.
+Standalone diagnostic `observe quotes watch` bounds are 10–600 seconds; `EventLensQuoteBridge`
+and `eventlens shadow` bounds are 10–86400 seconds and 100–10000 ms between emitted tick
+snapshots. Sampling happens **on actual ticks**, not every wall-clock second: quiet periods
+have gaps. There is no forward fill, invented heartbeat quote or backfill at watch startup.
+Cached historical ticks already present before `OnStart` are ignored, positive-spread ticks
+or spread-state transitions flush immediately in `OnTick`, and a 50 ms timer flushes any new
+tick held back by the sample-interval throttle once due (with `OnStop` flushing trailing ticks).
 
 The `start` handshake optionally records read-only symbol metadata (`digits`, `pip_size`,
 `commission`, `commission_type`), and `stop` records raw `OnTick` diagnostics (`raw_ticks`,
@@ -98,9 +97,10 @@ reordered, future or already-stale (>5 seconds at receipt) quotes as failures. I
 linked, replaced, truncated and oversized new files rather than replaying their contents.
 A watcher failure never creates a trade. Raw local evidence stays under ignored data paths.
 
-Zero-spread snapshots remain stored and counted; alignment marks them unusable. This
-conservative initial policy avoids treating an unvalidated free-spread quote as execution
-quality. Report exposes sampled source and receipt gaps, positive/zero-spread counts,
+Zero-spread snapshots remain stored and counted; alignment and quote validation reject them by
+default (`allow_commission_bearing_zero_spread=False`), and accept them only when explicitly
+opted in by policy for verified `ctrader_algo` live-poll sessions with `commission > 0` and
+`commission_type == "UsdPerMillionUsdVolume"`. Report exposes sampled source and receipt gaps, positive/zero-spread counts,
 spread bounds, pre-start cached-tick flags, symbol/bridge diagnostics, missing sequence
 counts, closed sessions, source-to-bridge lag and bridge-to-Python clock deltas. Alignment
 also decomposes `quote_source_age_seconds` into `quote_source_to_bridge_seconds`,
