@@ -163,7 +163,7 @@ Following the two-phase drain, cutoff-window and cost-provenance updates, a foll
 | Residual open-position recovery (`09:30 UTC`) | **Both Oct 23 open positions closed on fresh live quotes** (`unclosed_risk = false`, cent-level PnL/fee reconciliation) | Recovery without historical price backfilling; multi-day offline mark change is not strategy alpha |
 | Uninterrupted runtime (`12:25–13:02 UTC`) | **2,240.0 s continuous session** (`2.33×` `max_holding_seconds + exit_buffer_seconds`), `3,517` live quotes (`0` rejected) | Continuous operation across US Durable Goods and Home Price Index windows with clean `flat_completed` drain |
 | Protection coverage | **10,761 checks** (`9,653` fresh valid quotes, `0` unavailable checks while holding an open position) | Continuous protection monitoring; quiet `> 2.0 s` inter-tick pauses fail closed without synthetic quotes |
-| Full event accounting | **84 events persisted** (`77` filtered, `5` `IGNORE_EVENT` model decisions, `2` stale-quote fail-closed rejections) | Honest retention of ignored and rejected arrivals (`0` forced entries when macro prints match consensus) |
+| Full event accounting | **84 events persisted** (`77` filtered, `5` `IGNORE_EVENT` model decisions, `2` stale-quote fail-closed rejections) | Honest retention of ignored and rejected arrivals (`0` forced entries when prints lack actionable surprise) |
 
 Raw SQLite/JSONL evidence remains local under ignored `data/` paths. The [Shadow observation and acceptance report](docs/shadow-acceptance.md) describes the captures, account profiles and limitations. Results from different sizing profiles must not be combined or presented as additional live trades.
 
