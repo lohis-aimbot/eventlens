@@ -189,8 +189,7 @@ The current offline/synthetic suite contains **316 passing tests**, with CI on P
 
 [Stage objectives and acceptance criteria →](docs/roadmap.md)
 
-<details>
-<summary><strong>Long-horizon research agenda</strong></summary>
+### Long-horizon research agenda
 
 Planned research extensions beyond the current Shadow and Demo milestones remain strictly subordinate to independent hard risk and must outperform simpler baselines before adoption:
 
@@ -200,8 +199,6 @@ Planned research extensions beyond the current Shadow and Demo milestones remain
 | **Conditional Generative Market World Model** | **Medium-horizon research** | Mitigates macro-event sample scarcity via conditional trajectory generation—jointly modeling post-release price jumps, liquidity droughts and spread-widening dynamics—for offline counterfactual stress testing of sizing and exit policies, benchmarked against historical bootstrap baselines. |
 | **Self-Exciting Microstructure Regime Detection (Hawkes Point Processes)** | **Medium-horizon research** | Models clustered information arrivals and sub-second tick-intensity bursts with Hawkes point processes to detect informed order-flow and adverse-selection regimes for execution gating and adaptive exit calibration. |
 | **Regularized Programmatic Policy Search** | **Gated long-horizon research** | Restricts evolutionary program/parameter search (FunSearch / Eureka paradigm) to bounded execution and exit policies under walk-forward validation, Deflated Sharpe Ratio penalties and generative stress-test gates to control multiple-testing bias. |
-
-</details>
 
 ## Repository
 
