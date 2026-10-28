@@ -64,6 +64,45 @@ class RejectedRecord(Contract):
     reason: str
 
 
+class ArticleEnrichment(Contract):
+    """Fetched full-text body and raw HTTP evidence for an official release."""
+
+    provider: Identifier
+    basis: Basis = "live_poll"
+    source_id: Identifier
+    source_url: Identifier
+    rss_fingerprint: str | None = None
+    request_started_at: Timestamp
+    fetched_at: Timestamp
+    elapsed_ms: float = Field(ge=0)
+    attempts: int = Field(ge=1)
+    response_headers: dict[str, str] = Field(default_factory=dict)
+    raw_payload: bytes = Field(max_length=1_000_000)
+    extracted_text: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ordered(self) -> Self:
+        if self.fetched_at < self.request_started_at:
+            raise ValueError("Enrichment clock moved backwards")
+        return self
+
+
+class StoredEnrichment(Contract):
+    enrichment_id: Identifier
+    poll_id: Identifier | None = None
+    provider: Identifier
+    basis: Basis
+    source_id: Identifier
+    source_url: Identifier
+    rss_fingerprint: str | None = None
+    payload_hash: Identifier
+    extracted_text: str
+    request_started_at: Timestamp
+    fetched_at: Timestamp
+    recorded_at: Timestamp
+    available_at: Timestamp
+
+
 class CaptureBatch(Contract):
     provider: Identifier
     stream: Identifier
@@ -78,6 +117,7 @@ class CaptureBatch(Contract):
     response_headers: dict[str, str] = Field(default_factory=dict)
     records: tuple[SourceRecord, ...] = ()
     rejected: tuple[RejectedRecord, ...] = ()
+    enrichments: tuple[ArticleEnrichment, ...] = ()
     parse_error: str | None = None
 
     @model_validator(mode="after")
@@ -92,6 +132,12 @@ class CaptureBatch(Contract):
             for record in self.records
         ):
             raise ValueError("News display time is after receipt")
+        if any(
+            enr.provider != self.provider or enr.basis != self.basis for enr in self.enrichments
+        ):
+            raise ValueError("Enrichment provider or basis disagrees with capture batch")
+        if any(enr.fetched_at > self.received_at for enr in self.enrichments):
+            raise ValueError("Enrichment fetched after capture batch receipt")
         if self.parse_error and self.records:
             raise ValueError("Invalid envelopes must not emit normalized records")
         return self
@@ -175,6 +221,23 @@ class ObserverStore:
                     CREATE TABLE IF NOT EXISTS observer_failures (
                         failure_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
                         stream TEXT NOT NULL, recorded_at TEXT NOT NULL, error TEXT NOT NULL);
+                    CREATE TABLE IF NOT EXISTS observer_enrichments (
+                        enrichment_id TEXT PRIMARY KEY,
+                        poll_id TEXT REFERENCES observer_polls(poll_id),
+                        provider TEXT NOT NULL,
+                        basis TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        source_url TEXT NOT NULL,
+                        rss_fingerprint TEXT,
+                        payload_hash TEXT NOT NULL REFERENCES observer_payloads(sha256),
+                        extracted_text TEXT NOT NULL,
+                        request_started_at TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        recorded_at TEXT NOT NULL,
+                        available_at TEXT,
+                        metadata TEXT NOT NULL);
+                    CREATE INDEX IF NOT EXISTS idx_observer_enrichments_lookup
+                        ON observer_enrichments(provider, basis, source_id, available_at);
                     """
                 )
                 self.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
@@ -183,6 +246,12 @@ class ObserverStore:
         except BaseException:
             self.db.close()
             raise
+
+    def _has_enrichments_table(self) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='observer_enrichments'"
+        ).fetchone()
+        return row is not None
 
     def close(self) -> None:
         with self._lock:
@@ -287,7 +356,9 @@ class ObserverStore:
                     "INSERT OR IGNORE INTO observer_payloads VALUES (?, ?)",
                     (payload_hash, gzip.compress(batch.payload, mtime=0)),
                 )
-                metadata = batch.model_dump(mode="json", exclude={"payload", "records"})
+                metadata = batch.model_dump(
+                    mode="json", exclude={"payload", "records", "enrichments"}
+                )
                 self.db.execute(
                     "INSERT INTO observer_polls VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
@@ -306,6 +377,36 @@ class ObserverStore:
                     ),
                 )
                 self.db.executemany("INSERT INTO observer_sightings VALUES (?, ?, ?, ?)", sightings)
+                for enr in batch.enrichments:
+                    enr_hash = hashlib.sha256(enr.raw_payload).hexdigest()
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO observer_payloads VALUES (?, ?)",
+                        (enr_hash, gzip.compress(enr.raw_payload, mtime=0)),
+                    )
+                    enr_meta = enr.model_dump(
+                        mode="json", exclude={"raw_payload", "extracted_text"}
+                    )
+                    self.db.execute(
+                        """INSERT INTO observer_enrichments VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )""",
+                        (
+                            str(uuid4()),
+                            poll_id,
+                            enr.provider,
+                            enr.basis,
+                            enr.source_id,
+                            enr.source_url,
+                            enr.rss_fingerprint,
+                            enr_hash,
+                            enr.extracted_text,
+                            enr.request_started_at.isoformat(),
+                            enr.fetched_at.isoformat(),
+                            now.isoformat(),
+                            None,
+                            json.dumps(enr_meta),
+                        ),
+                    )
                 if not batch.parse_error:
                     self.db.execute(
                         """INSERT INTO observer_streams VALUES (?, ?, ?, ?)
@@ -324,6 +425,11 @@ class ObserverStore:
                     "UPDATE observer_polls SET available_at=?, result=? WHERE poll_id=?",
                     (result["available_at"], json.dumps(result), poll_id),
                 )
+                if batch.enrichments:
+                    self.db.execute(
+                        "UPDATE observer_enrichments SET available_at=? WHERE poll_id=?",
+                        (result["available_at"], poll_id),
+                    )
             return result
 
     def failure(self, provider: str, stream: str, error: str) -> None:
@@ -348,6 +454,84 @@ class ObserverStore:
                 raise KeyError(poll_id)
             return gzip.decompress(row["body_gzip"])
 
+    def enrichment_payload(self, enrichment_id: str) -> bytes:
+        with self._lock:
+            if not self._has_enrichments_table():
+                raise KeyError(enrichment_id)
+            row = self.db.execute(
+                """SELECT p.body_gzip
+                FROM observer_payloads p
+                JOIN observer_enrichments e ON p.sha256 = e.payload_hash
+                WHERE e.enrichment_id=?""",
+                (enrichment_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(enrichment_id)
+            return gzip.decompress(row["body_gzip"])
+
+    def enrichments(
+        self,
+        *,
+        provider: str | None = None,
+        source_id: str | None = None,
+        basis: Basis = "live_poll",
+        as_of: datetime | None = None,
+    ) -> tuple[StoredEnrichment, ...]:
+        with self._lock:
+            if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+                raise ValueError("Enrichment cutoff requires a timezone")
+            if not self._has_enrichments_table():
+                return ()
+            query = """SELECT * FROM observer_enrichments
+                WHERE basis=? AND available_at IS NOT NULL"""
+            params: list[Any] = [basis]
+            if provider is not None:
+                query += " AND provider=?"
+                params.append(provider)
+            if source_id is not None:
+                query += " AND source_id=?"
+                params.append(source_id)
+            query += " ORDER BY rowid ASC"
+            rows = self.db.execute(query, params).fetchall()
+            items = tuple(
+                StoredEnrichment(
+                    enrichment_id=str(r["enrichment_id"]),
+                    poll_id=str(r["poll_id"]) if r["poll_id"] is not None else None,
+                    provider=str(r["provider"]),
+                    basis=basis,
+                    source_id=str(r["source_id"]),
+                    source_url=str(r["source_url"]),
+                    rss_fingerprint=(
+                        str(r["rss_fingerprint"]) if r["rss_fingerprint"] is not None else None
+                    ),
+                    payload_hash=str(r["payload_hash"]),
+                    extracted_text=str(r["extracted_text"]),
+                    request_started_at=r["request_started_at"],
+                    fetched_at=r["fetched_at"],
+                    recorded_at=r["recorded_at"],
+                    available_at=r["available_at"],
+                )
+                for r in rows
+            )
+            if as_of is None:
+                return items
+            cutoff = as_of.astimezone(UTC)
+            return tuple(
+                item for item in items if item.available_at <= cutoff and item.fetched_at <= cutoff
+            )
+
+    def latest_enrichments(
+        self,
+        *,
+        provider: str,
+        basis: Basis = "live_poll",
+        as_of: datetime | None = None,
+    ) -> dict[str, StoredEnrichment]:
+        latest: dict[str, StoredEnrichment] = {}
+        for item in self.enrichments(provider=provider, basis=basis, as_of=as_of):
+            latest[item.source_id] = item
+        return latest
+
     def first_sighting_state(
         self,
         *,
@@ -368,6 +552,26 @@ class ObserverStore:
                 (provider, basis, kind, source_id, revision),
             ).fetchone()
             return str(row["state"]) if row is not None else None
+
+    def non_baseline_source_ids(
+        self, *, provider: str, kind: Kind = "news", basis: Basis = "live_poll"
+    ) -> set[str]:
+        """Return source_ids whose initial sighting in this stream was live ('new'), not 'baseline'."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT s.source_id, s.state
+                FROM observer_sightings s
+                JOIN observer_polls p ON p.poll_id = s.poll_id
+                WHERE p.provider=? AND p.basis=? AND p.kind=?
+                ORDER BY p.rowid ASC""",
+                (provider, basis, kind),
+            ).fetchall()
+            first_state_by_id: dict[str, str] = {}
+            for row in rows:
+                sid = str(row["source_id"])
+                if sid not in first_state_by_id:
+                    first_state_by_id[sid] = str(row["state"])
+            return {sid for sid, st in first_state_by_id.items() if st != "baseline"}
 
     def has_stream_baseline(
         self, *, provider: str, stream: str, basis: Basis = "live_poll"
@@ -487,6 +691,10 @@ class ObserverStore:
                 name: self.db.execute(f"SELECT COUNT(*) FROM observer_{name}").fetchone()[0]
                 for name in ("polls", "revisions", "sightings", "failures", "payloads")
             }
+            if self._has_enrichments_table():
+                counts["enrichments"] = self.db.execute(
+                    "SELECT COUNT(*) FROM observer_enrichments"
+                ).fetchone()[0]
             recent = self.db.execute(
                 "SELECT result FROM observer_polls ORDER BY rowid DESC LIMIT 10"
             ).fetchall()

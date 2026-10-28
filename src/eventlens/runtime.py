@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -32,7 +32,11 @@ from .observer import Basis, ObserverStore
 from .quotes import QuoteStore, build_market_snapshot, validate_market_quote
 from .sources.events import EventFilter
 from .sources.wallstreetcn import CaptureError, WallStreetCNFilter, WallStreetCNSource
-from .trading.agent import SinglePassTradingAgent, TradingAgent
+from .trading.agent import (
+    QuoteUnavailableForDecisionError,
+    SinglePassTradingAgent,
+    TradingAgent,
+)
 from .trading.execution import APPLICATION_ID, ShadowExecutor, ShadowFill, SQLiteShadowLedger
 from .trading.portfolio import (
     DeterministicTargetValidator,
@@ -45,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 CycleStatus = Literal[
     "filtered_out",
+    "awaiting_market_quote",
+    "expired",
     "reasoning_failed",
     "no_target",
     "target_rejected",
@@ -138,6 +144,15 @@ class SQLiteRuntimeStore:
                     stop_reason TEXT,
                     summary_json TEXT
                 );
+                CREATE TABLE IF NOT EXISTS runtime_event_bundles (
+                    member_event_id TEXT PRIMARY KEY,
+                    bundle_event_id TEXT NOT NULL,
+                    source_reference TEXT NOT NULL,
+                    received_at TEXT NOT NULL,
+                    bound_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_runtime_bundle_members
+                    ON runtime_event_bundles(bundle_event_id);
                 """
             )
             runner_cols = {
@@ -314,12 +329,176 @@ class SQLiteRuntimeStore:
             )
             return ev_id
 
+    def get_bound_bundle_id(self, member_event_id: str) -> str | None:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT bundle_event_id FROM runtime_event_bundles WHERE member_event_id=?",
+                (member_event_id,),
+            ).fetchone()
+            return str(row["bundle_event_id"]) if row is not None else None
+
+    def bundle_members(self, bundle_event_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(
+                self.db.execute(
+                    """SELECT * FROM runtime_event_bundles
+                    WHERE bundle_event_id=?
+                    ORDER BY member_event_id""",
+                    (bundle_event_id,),
+                ).fetchall()
+            )
+
+    def bind_bundle_members(
+        self,
+        *,
+        bundle_event: Event,
+        members: Sequence[tuple[str, Event]],
+        now: datetime,
+    ) -> None:
+        """Atomically persist stable bundle membership before any model call or execution."""
+        now_utc = _utc(now)
+        with self._lock, self.db:
+            existing_bundle = self.db.execute(
+                "SELECT 1 FROM runtime_events WHERE event_id=?",
+                (bundle_event.event_id,),
+            ).fetchone()
+            if existing_bundle is None:
+                self.db.execute(
+                    """INSERT INTO runtime_events VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )""",
+                    (
+                        bundle_event.event_id,
+                        bundle_event.source_reference,
+                        "received",
+                        "bundle_bound",
+                        0,
+                        now_utc.isoformat(),
+                        now_utc.isoformat(),
+                        _utc(bundle_event.received_timestamp).isoformat(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        0,
+                        0,
+                        None,
+                        None,
+                    ),
+                )
+            for member_id, member_ev in members:
+                bound_row = self.db.execute(
+                    "SELECT bundle_event_id FROM runtime_event_bundles WHERE member_event_id=?",
+                    (member_id,),
+                ).fetchone()
+                if (
+                    bound_row is not None
+                    and str(bound_row["bundle_event_id"]) != bundle_event.event_id
+                ):
+                    raise ValueError(
+                        f"Member {member_id} is already bound to {bound_row['bundle_event_id']}"
+                    )
+                self.db.execute(
+                    "INSERT OR IGNORE INTO runtime_event_bundles VALUES (?, ?, ?, ?, ?)",
+                    (
+                        member_id,
+                        bundle_event.event_id,
+                        member_ev.source_reference,
+                        _utc(member_ev.received_timestamp).isoformat(),
+                        now_utc.isoformat(),
+                    ),
+                )
+                existing_member = self.db.execute(
+                    "SELECT state FROM runtime_events WHERE event_id=?",
+                    (member_id,),
+                ).fetchone()
+                if existing_member is None:
+                    self.db.execute(
+                        """INSERT INTO runtime_events VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )""",
+                        (
+                            member_id,
+                            member_ev.source_reference,
+                            "bundle_member_pending",
+                            f"bound_to:{bundle_event.event_id}",
+                            0,
+                            now_utc.isoformat(),
+                            now_utc.isoformat(),
+                            _utc(member_ev.received_timestamp).isoformat(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            0,
+                            None,
+                            None,
+                        ),
+                    )
+
+    def finalize_bundle_members(
+        self,
+        bundle_event_id: str,
+        *,
+        now: datetime,
+        reason_prefix: str = "bundled_into",
+    ) -> int:
+        """Mark all durably bound constituents of a finished/exhausted bundle as 'bundled'."""
+        members = self.bundle_members(bundle_event_id)
+        if not members:
+            return 0
+        now_utc = _utc(now)
+        updated = 0
+        for row in members:
+            member_id = str(row["member_event_id"])
+            current = self.get_event_state(member_id)
+            if current is not None and current["state"] == "bundled":
+                continue
+            self.upsert_event_state(
+                event_id=member_id,
+                source_reference=str(row["source_reference"]),
+                received_at=datetime.fromisoformat(str(row["received_at"])),
+                now=now_utc,
+                state="bundled",
+                reason=f"{reason_prefix}:{bundle_event_id}",
+            )
+            updated += 1
+        return updated
+
+    def unfinalized_bundle_ids(self) -> list[str]:
+        """Return bundle_event_ids that still have at least one member not marked 'bundled'."""
+        with self._lock:
+            rows = self.db.execute(
+                """SELECT DISTINCT b.bundle_event_id
+                FROM runtime_event_bundles b
+                LEFT JOIN runtime_events m ON m.event_id = b.member_event_id
+                WHERE m.state IS NULL OR m.state != 'bundled'
+                ORDER BY b.bound_at"""
+            ).fetchall()
+            return [str(r["bundle_event_id"]) for r in rows]
+
     def incomplete_events(self) -> list[sqlite3.Row]:
         with self._lock:
             return list(
                 self.db.execute(
                     """SELECT * FROM runtime_events
-                    WHERE state IN ('received', 'filtered_accepted', 'reasoning_failed', 'memory_committed', 'risk_assessed')
+                    WHERE state IN (
+                        'received',
+                        'filtered_accepted',
+                        'awaiting_market_quote',
+                        'reasoning_failed',
+                        'memory_committed',
+                        'risk_assessed'
+                    )
                     ORDER BY first_seen_at"""
                 ).fetchall()
             )
@@ -518,6 +697,7 @@ TERMINAL_EVENT_STATES = frozenset(
         "shadow_recorded",
         "shadow_rejected",
         "completed",
+        "expired",
         "recovery_expired",
         "recovery_abandoned",
     }
@@ -541,6 +721,7 @@ class IntradayEventRuntime:
         state_store: SQLiteRuntimeStore | None = None,
         event_filter: EventFilter | None = None,
         max_recovery_event_age: timedelta = timedelta(seconds=60),
+        max_quote_wait_age: timedelta = timedelta(seconds=60),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.memory = memory
@@ -559,6 +740,7 @@ class IntradayEventRuntime:
             self.state_store = None
         self.event_filter = event_filter
         self.max_recovery_event_age = max_recovery_event_age
+        self.max_quote_wait_age = max_quote_wait_age
         self.clock = clock
         self._lock = asyncio.Lock()
 
@@ -573,7 +755,13 @@ class IntradayEventRuntime:
 
     async def run_cycle(self, event: Event) -> RuntimeCycleResult:
         async with self._lock:
-            return await self._run_cycle_locked(event)
+            res = await self._run_cycle_locked(event)
+            if self.state_store is not None and res.status in TERMINAL_EVENT_STATES:
+                self.state_store.finalize_bundle_members(
+                    event.event_id,
+                    now=_utc(self.clock()),
+                )
+            return res
 
     async def _run_cycle_locked(self, event: Event) -> RuntimeCycleResult:
         now = _utc(self.clock())
@@ -686,7 +874,7 @@ class IntradayEventRuntime:
             )
 
         # 3. Record initial receipt if not yet recorded
-        if existing_row is None:
+        if existing_row is None or existing_row["reason"] == "bundle_bound":
             if self.state_store is not None:
                 self.state_store.upsert_event_state(
                     event_id=event.event_id,
@@ -698,7 +886,7 @@ class IntradayEventRuntime:
                 )
             await log("collector", "event_persisted", event.source_reference)
 
-        # 4. Run filter only if not already filtered_accepted / reasoning_failed
+        # 4. Run filter only if not already filtered_accepted / awaiting_market_quote / reasoning_failed
         if existing_row is None or existing_row["state"] == "received":
             if self.event_filter is not None:
                 if hasattr(self.event_filter, "unmark_seen"):
@@ -732,8 +920,36 @@ class IntradayEventRuntime:
                 )
             await log("filter", "accept", "eligible_event")
 
-        # 5. Assemble pre-LLM context and preserve exact snapshot seen by the model
+        # 4b. If event was waiting for a valid quote and its quote-wait validity window has elapsed,
+        # expire it deterministically without ever calling the model (even if quotes later recovered).
         pre_now = _utc(self.clock())
+        if (
+            existing_row is not None
+            and existing_row["state"] == "awaiting_market_quote"
+            and (pre_now - _utc(event.received_timestamp)) > self.max_quote_wait_age
+        ):
+            exp_reason = "event_expired_awaiting_quote:validity_window_elapsed"
+            if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
+                self.event_filter.unmark_seen(event.event_id)
+            if self.state_store is not None:
+                self.state_store.upsert_event_state(
+                    event_id=event.event_id,
+                    source_reference=event.source_reference,
+                    received_at=event.received_timestamp,
+                    now=pre_now,
+                    state="expired",
+                    reason=exp_reason,
+                    increment_attempts=False,
+                )
+            await log("runtime", "expired", exp_reason)
+            return RuntimeCycleResult(
+                event_id=event.event_id,
+                status="expired",
+                reason=exp_reason,
+                audit_records=tuple(cycle_audit),
+            )
+
+        # 5. Assemble pre-LLM context and preserve exact snapshot seen by the model
         memory_snap = await self.memory.snapshot(as_of=max(pre_now, event.received_timestamp))
         pre_market = self.market_provider(pre_now)
         pre_portfolio = await self._snapshot_portfolio(pre_market)
@@ -752,13 +968,18 @@ class IntradayEventRuntime:
             as_of=pre_as_of,
         )
         context_json = context.model_dump_json()
+        pre_llm_state = (
+            "awaiting_market_quote"
+            if existing_row is not None and existing_row["state"] == "awaiting_market_quote"
+            else "filtered_accepted"
+        )
         if self.state_store is not None:
             self.state_store.upsert_event_state(
                 event_id=event.event_id,
                 source_reference=event.source_reference,
                 received_at=event.received_timestamp,
                 now=pre_now,
-                state="filtered_accepted",
+                state=pre_llm_state,
                 reason="context_assembled",
                 context_json=context_json,
             )
@@ -768,7 +989,8 @@ class IntradayEventRuntime:
             f"memory_v={memory_snap.memory_version} pre_snap={pre_portfolio.snapshot_id} pre_market={pre_market.snapshot_id}",
         )
 
-        # 6. Invoke LLM agent (transient failures are recorded as reasoning_failed and remain retryable)
+        # 6. Invoke LLM agent (missing/stale quotes wait without consuming retry budget;
+        # model timeouts and invalid outputs count as reasoning_failed attempts separately)
         input_tokens = 0
         output_tokens = 0
         try:
@@ -779,6 +1001,47 @@ class IntradayEventRuntime:
                 output_tokens = run_res.output_tokens
             else:
                 decision = await self.agent.decide(context)
+        except QuoteUnavailableForDecisionError as exc:
+            if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
+                self.event_filter.unmark_seen(event.event_id)
+            now_q = _utc(self.clock())
+            if (now_q - _utc(event.received_timestamp)) > self.max_quote_wait_age:
+                exp_reason = f"event_expired_awaiting_quote:{exc.quote_reason}"
+                if self.state_store is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=event.event_id,
+                        source_reference=event.source_reference,
+                        received_at=event.received_timestamp,
+                        now=now_q,
+                        state="expired",
+                        reason=exp_reason,
+                        increment_attempts=False,
+                    )
+                await log("runtime", "expired", exp_reason)
+                return RuntimeCycleResult(
+                    event_id=event.event_id,
+                    status="expired",
+                    reason=exp_reason,
+                    audit_records=tuple(cycle_audit),
+                )
+            wait_reason = f"awaiting_valid_quote:{exc.quote_reason}"
+            if self.state_store is not None:
+                self.state_store.upsert_event_state(
+                    event_id=event.event_id,
+                    source_reference=event.source_reference,
+                    received_at=event.received_timestamp,
+                    now=now_q,
+                    state="awaiting_market_quote",
+                    reason=wait_reason,
+                    increment_attempts=False,
+                )
+            await log("runtime", "awaiting_market_quote", wait_reason)
+            return RuntimeCycleResult(
+                event_id=event.event_id,
+                status="awaiting_market_quote",
+                reason=wait_reason,
+                audit_records=tuple(cycle_audit),
+            )
         except Exception as exc:
             err_reason = f"{type(exc).__name__}: {exc}"
             if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
@@ -1344,6 +1607,11 @@ class IntradayEventRuntime:
                         state="recovery_abandoned",
                         reason="recovery_max_attempts_exceeded",
                     )
+                    self.state_store.finalize_bundle_members(
+                        ev.event_id,
+                        now=now,
+                        reason_prefix="bundled_recovery_abandoned",
+                    )
                     rec = AuditRecord(
                         audit_id=str(uuid4()),
                         occurred_at=now,
@@ -1370,12 +1638,52 @@ class IntradayEventRuntime:
                 ev_source = (
                     _utc(ev.source_timestamp) if ev.source_timestamp is not None else ev_received
                 )
+                if (
+                    row["state"] == "awaiting_market_quote"
+                    and ev_received <= now
+                    and ev_source <= now
+                    and (now - ev_received) > min(eff_max_age, self.max_quote_wait_age)
+                ):
+                    exp_reason = "event_expired_awaiting_quote:recovery_validity_window_elapsed"
+                    self.state_store.upsert_event_state(
+                        event_id=ev.event_id,
+                        source_reference=ev.source_reference,
+                        received_at=ev.received_timestamp,
+                        now=now,
+                        state="expired",
+                        reason=exp_reason,
+                    )
+                    self.state_store.finalize_bundle_members(
+                        ev.event_id,
+                        now=now,
+                        reason_prefix="bundled_expired",
+                    )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=now,
+                        component="runtime",
+                        event_id=ev.event_id,
+                        policy_version=self.risk_engine.policy.policy_version,
+                        outcome="expired",
+                        detail=f"{exp_reason}: received_at={ev_received.isoformat()} now={now.isoformat()}",
+                    )
+                    self.state_store.append_audit(rec)
+                    await self.audit_sink.append(rec)
+                    results.append(
+                        RuntimeCycleResult(
+                            event_id=ev.event_id,
+                            status="expired",
+                            reason=exp_reason,
+                            recovered=True,
+                            audit_records=(rec,),
+                        )
+                    )
+                    continue
+
                 stale_reason: str | None = None
                 if ev_received > now or ev_source > now:
                     stale_reason = "recovery_event_future_timestamp"
-                elif (now - ev_received) > eff_max_age or (
-                    ev.source_timestamp is not None and (now - ev_source) > eff_max_age
-                ):
+                elif (now - ev_received) > eff_max_age:
                     stale_reason = "recovery_event_stale"
 
                 if stale_reason is not None:
@@ -1386,6 +1694,11 @@ class IntradayEventRuntime:
                         now=now,
                         state="recovery_expired",
                         reason=stale_reason,
+                    )
+                    self.state_store.finalize_bundle_members(
+                        ev.event_id,
+                        now=now,
+                        reason_prefix="bundled_recovery_expired",
                     )
                     rec = AuditRecord(
                         audit_id=str(uuid4()),
@@ -1440,6 +1753,13 @@ class IntradayEventRuntime:
                     reason="llm_decision_timeout",
                     increment_attempts=True,
                 )
+                after_to = self.state_store.get_event_state(ev.event_id)
+                if after_to is not None and int(after_to["attempts"]) >= max_attempts:
+                    self.state_store.finalize_bundle_members(
+                        ev.event_id,
+                        now=now_to,
+                        reason_prefix="bundled_timeout_exhausted",
+                    )
                 rec = AuditRecord(
                     audit_id=str(uuid4()),
                     occurred_at=now_to,
@@ -1467,6 +1787,21 @@ class IntradayEventRuntime:
                 if not cycle_task.done():
                     cycle_task.cancel()
                     await asyncio.gather(cycle_task, return_exceptions=True)
+
+        # Reconcile any already-terminal/exhausted bundles whose member marking crashed partway through
+        for b_id in self.state_store.unfinalized_bundle_ids():
+            if (
+                stop_event is not None and stop_event.is_set()
+            ) or self.state_store.is_stop_requested():
+                break
+            b_row = self.state_store.get_event_state(b_id)
+            if b_row is None:
+                continue
+            if b_row["state"] in TERMINAL_EVENT_STATES or (
+                b_row["state"] == "reasoning_failed" and int(b_row["attempts"]) >= max_attempts
+            ):
+                self.state_store.finalize_bundle_members(b_id, now=_utc(self.clock()))
+
         return tuple(results)
 
 
@@ -1495,6 +1830,7 @@ class ShadowRunner:
         llm_timeout_seconds: float = 20.0,
         max_reasoning_attempts: int = 3,
         max_recovery_event_age_seconds: float = 60.0,
+        max_quote_wait_seconds: float | None = None,
         exit_buffer_seconds: float = 0.0,
         exit_drain_timeout_seconds: float = 0.0,
         strict_window_coverage: bool = False,
@@ -1521,6 +1857,8 @@ class ShadowRunner:
         self.llm_timeout_seconds = llm_timeout_seconds
         self.max_reasoning_attempts = max_reasoning_attempts
         self.max_recovery_event_age_seconds = max_recovery_event_age_seconds
+        if max_quote_wait_seconds is not None:
+            self.runtime.max_quote_wait_age = timedelta(seconds=max_quote_wait_seconds)
         self.exit_buffer_seconds = exit_buffer_seconds
         self.exit_drain_timeout_seconds = exit_drain_timeout_seconds
         self.strict_window_coverage = strict_window_coverage
@@ -1529,6 +1867,7 @@ class ShadowRunner:
         self.clock = clock
         self._stop_event = asyncio.Event()
         self._drain_stop_event = asyncio.Event()
+        self._event_wakeup = asyncio.Event()
         self._stop_reason: str | None = None
         self._run_started_at: datetime | None = None
         self._run_duration_seconds: float | None = None
@@ -1692,6 +2031,14 @@ class ShadowRunner:
     ) -> tuple[tuple[ShadowFill, ...], tuple[ShadowFill, ...]]:
         """Execute one quote-driven protective exit + pending fill + mark-to-market cycle."""
         market = await asyncio.to_thread(self._current_market)
+        if self.runtime.state_store is not None:
+            qc = validate_market_quote(
+                market,
+                as_of=_utc(self.clock()),
+                policy=self.ledger.exit_policy.quote_quality_policy("EUR/USD"),
+            )
+            if qc.valid:
+                self._event_wakeup.set()
         exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
         target_fills = await asyncio.to_thread(
             self.ledger.fill_pending,
@@ -1821,7 +2168,7 @@ class ShadowRunner:
         return expired, exit_fills
 
     async def step_events(self) -> tuple[RuntimeCycleResult, ...]:
-        """Scan ObserverStore for unprocessed revisions, filter, bundle simultaneous releases, and run cycles."""
+        """Scan ObserverStore for unprocessed revisions, reconcile bound/in-progress cycles, bundle simultaneous releases durably, and run cycles."""
         if self.observer_store is None:
             return ()
         from .sources.english_tier1 import (
@@ -1844,6 +2191,21 @@ class ShadowRunner:
             else EURUSDEventFilter(clock=self.clock)
         )
         eligible_pairs: list[tuple[Any, Event]] = []
+        pending_in_progress_ids: list[str] = []
+        pending_seen: set[str] = set()
+        revisions_by_ev_id: dict[str, Any] = {}
+
+        def _is_exhausted_or_terminal(row: sqlite3.Row | None) -> bool:
+            if row is None:
+                return False
+            return bool(
+                row["state"] in TERMINAL_EVENT_STATES
+                or (
+                    row["state"] == "reasoning_failed"
+                    and int(row["attempts"]) >= self.max_reasoning_attempts
+                )
+            )
+
         for rev in revisions:
             if self._stop_event.is_set() or (
                 self.runtime.state_store is not None
@@ -1851,16 +2213,30 @@ class ShadowRunner:
             ):
                 break
             ev_id = revision_event_id(rev)
+            revisions_by_ev_id[ev_id] = rev
             if self.runtime.state_store is not None:
-                existing = self.runtime.state_store.get_event_state(ev_id)
-                if existing is not None and (
-                    existing["state"] in TERMINAL_EVENT_STATES
-                    or (
-                        existing["state"] == "reasoning_failed"
-                        and int(existing["attempts"]) >= self.max_reasoning_attempts
-                    )
-                ):
+                bound_bundle_id = self.runtime.state_store.get_bound_bundle_id(ev_id)
+                if bound_bundle_id is not None:
+                    member_row = self.runtime.state_store.get_event_state(ev_id)
+                    bundle_row = self.runtime.state_store.get_event_state(bound_bundle_id)
+                    if (
+                        member_row is None
+                        or member_row["state"] != "bundled"
+                        or (bundle_row is not None and not _is_exhausted_or_terminal(bundle_row))
+                    ) and bound_bundle_id not in pending_seen:
+                        pending_seen.add(bound_bundle_id)
+                        pending_in_progress_ids.append(bound_bundle_id)
                     continue
+
+                existing = self.runtime.state_store.get_event_state(ev_id)
+                if existing is not None:
+                    if _is_exhausted_or_terminal(existing):
+                        continue
+                    if ev_id not in pending_seen:
+                        pending_seen.add(ev_id)
+                        pending_in_progress_ids.append(ev_id)
+                    continue
+
             active_filter.unmark_seen(ev_id)
             f_res, ev = active_filter.evaluate_revision(rev, checked_at=_utc(self.clock()))
             if not self.allow_baseline_revisions:
@@ -1904,9 +2280,101 @@ class ShadowRunner:
                 continue
             eligible_pairs.append((rev, ev))
 
-        if not eligible_pairs:
-            return ()
+        results: list[RuntimeCycleResult] = []
 
+        async def _execute_event_cycle(ev_obj: Event, *, is_bundled: bool) -> None:
+            active_filter.unmark_seen(ev_obj.event_id)
+            try:
+                cycle_res = await asyncio.wait_for(
+                    self.runtime.run_cycle(ev_obj),
+                    timeout=self.llm_timeout_seconds,
+                )
+                results.append(cycle_res)
+                if is_bundled and self.runtime.state_store is not None:
+                    b_state = self.runtime.state_store.get_event_state(ev_obj.event_id)
+                    if _is_exhausted_or_terminal(b_state):
+                        self.runtime.state_store.finalize_bundle_members(
+                            ev_obj.event_id,
+                            now=_utc(self.clock()),
+                        )
+            except TimeoutError:
+                active_filter.unmark_seen(ev_obj.event_id)
+                if self.runtime.state_store is not None:
+                    for m_row in self.runtime.state_store.bundle_members(ev_obj.event_id):
+                        active_filter.unmark_seen(str(m_row["member_event_id"]))
+                    self.runtime.state_store.upsert_event_state(
+                        event_id=ev_obj.event_id,
+                        source_reference=ev_obj.source_reference,
+                        received_at=ev_obj.received_timestamp,
+                        now=_utc(self.clock()),
+                        state="reasoning_failed",
+                        reason="llm_decision_timeout",
+                        increment_attempts=True,
+                    )
+                    if is_bundled:
+                        b_after = self.runtime.state_store.get_event_state(ev_obj.event_id)
+                        if (
+                            b_after is not None
+                            and int(b_after["attempts"]) >= self.max_reasoning_attempts
+                        ):
+                            self.runtime.state_store.finalize_bundle_members(
+                                ev_obj.event_id,
+                                now=_utc(self.clock()),
+                                reason_prefix="bundled_timeout_exhausted",
+                            )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=_utc(self.clock()),
+                        component="agent",
+                        event_id=ev_obj.event_id,
+                        outcome="reasoning_failed",
+                        detail="llm_decision_timeout",
+                    )
+                    self.runtime.state_store.append_audit(rec)
+                    await self.runtime.audit_sink.append(rec)
+
+        # Phase A: Reconcile already-bound bundles and in-progress singletons without regrouping
+        if self.runtime.state_store is not None:
+            for p_id in pending_in_progress_ids:
+                if self._stop_event.is_set() or self.runtime.state_store.is_stop_requested():
+                    break
+                p_row = self.runtime.state_store.get_event_state(p_id)
+                p_committed = await self.runtime.memory.decision_for_event(p_id)
+                has_members = bool(self.runtime.state_store.bundle_members(p_id))
+                if p_row is not None and p_row["state"] in TERMINAL_EVENT_STATES:
+                    if has_members:
+                        self.runtime.state_store.finalize_bundle_members(
+                            p_id, now=_utc(self.clock())
+                        )
+                    continue
+                if (
+                    p_row is not None
+                    and p_row["state"] == "reasoning_failed"
+                    and p_committed is None
+                    and int(p_row["attempts"]) >= self.max_reasoning_attempts
+                ):
+                    if has_members:
+                        self.runtime.state_store.finalize_bundle_members(
+                            p_id,
+                            now=_utc(self.clock()),
+                            reason_prefix="bundled_attempts_exhausted",
+                        )
+                    continue
+
+                p_ev = await self.runtime.memory.get_event(p_id)
+                if p_ev is None and p_id in revisions_by_ev_id:
+                    active_filter.unmark_seen(p_id)
+                    _, p_ev = active_filter.evaluate_revision(
+                        revisions_by_ev_id[p_id], checked_at=_utc(self.clock())
+                    )
+                if p_ev is None:
+                    continue
+                await _execute_event_cycle(p_ev, is_bundled=has_members)
+
+        if not eligible_pairs:
+            return tuple(results)
+
+        # Phase B: Group brand-new eligible events and persist bundle membership BEFORE model/execution
         if self.bundle_simultaneous:
             bundles = bundle_simultaneous_events(
                 eligible_pairs,
@@ -1918,7 +2386,6 @@ class ShadowRunner:
                 for rev_item, ev_item in eligible_pairs
             )
 
-        results: list[RuntimeCycleResult] = []
         for bundle in bundles:
             if self._stop_event.is_set() or (
                 self.runtime.state_store is not None
@@ -1926,98 +2393,33 @@ class ShadowRunner:
             ):
                 break
             ev = bundle.event
-            if bundle.is_bundled and self.runtime.state_store is not None:
-                existing_bundle = self.runtime.state_store.get_event_state(ev.event_id)
-                if existing_bundle is not None and (
-                    existing_bundle["state"] in TERMINAL_EVENT_STATES
-                    or (
-                        existing_bundle["state"] == "reasoning_failed"
-                        and int(existing_bundle["attempts"]) >= self.max_reasoning_attempts
-                    )
-                ):
-                    for rev_c, ev_c in bundle.constituents:
-                        self.runtime.state_store.upsert_event_state(
-                            event_id=revision_event_id(rev_c),
-                            source_reference=ev_c.source_reference,
-                            received_at=ev_c.received_timestamp,
-                            now=_utc(self.clock()),
-                            state="bundled",
-                            reason=f"bundled_into:{ev.event_id}",
-                        )
-                    continue
-                active_filter.unmark_seen(ev.event_id)
-
-            try:
-                cycle_res = await asyncio.wait_for(
-                    self.runtime.run_cycle(ev),
-                    timeout=self.llm_timeout_seconds,
-                )
-                results.append(cycle_res)
-                if bundle.is_bundled and self.runtime.state_store is not None:
-                    b_state = self.runtime.state_store.get_event_state(ev.event_id)
-                    if b_state is not None and (
-                        b_state["state"] in TERMINAL_EVENT_STATES
-                        or (
-                            b_state["state"] == "reasoning_failed"
-                            and int(b_state["attempts"]) >= self.max_reasoning_attempts
-                        )
-                    ):
-                        for rev_c, ev_c in bundle.constituents:
-                            self.runtime.state_store.upsert_event_state(
-                                event_id=revision_event_id(rev_c),
-                                source_reference=ev_c.source_reference,
-                                received_at=ev_c.received_timestamp,
-                                now=_utc(self.clock()),
-                                state="bundled",
-                                reason=f"bundled_into:{ev.event_id}",
-                            )
-            except TimeoutError:
-                active_filter.unmark_seen(ev.event_id)
-                for rev_c, _ in bundle.constituents:
-                    active_filter.unmark_seen(revision_event_id(rev_c))
+            if bundle.is_bundled:
+                await self.runtime.memory.record_event(ev)
                 if self.runtime.state_store is not None:
-                    self.runtime.state_store.upsert_event_state(
-                        event_id=ev.event_id,
-                        source_reference=ev.source_reference,
-                        received_at=ev.received_timestamp,
+                    self.runtime.state_store.bind_bundle_members(
+                        bundle_event=ev,
+                        members=tuple(
+                            (revision_event_id(rev_c), ev_c) for rev_c, ev_c in bundle.constituents
+                        ),
                         now=_utc(self.clock()),
-                        state="reasoning_failed",
-                        reason="llm_decision_timeout",
-                        increment_attempts=True,
                     )
-                    if bundle.is_bundled:
-                        b_after = self.runtime.state_store.get_event_state(ev.event_id)
-                        if (
-                            b_after is not None
-                            and int(b_after["attempts"]) >= self.max_reasoning_attempts
-                        ):
-                            for rev_c, ev_c in bundle.constituents:
-                                self.runtime.state_store.upsert_event_state(
-                                    event_id=revision_event_id(rev_c),
-                                    source_reference=ev_c.source_reference,
-                                    received_at=ev_c.received_timestamp,
-                                    now=_utc(self.clock()),
-                                    state="bundled",
-                                    reason=f"bundled_timeout_exhausted:{ev.event_id}",
-                                )
-                    rec = AuditRecord(
-                        audit_id=str(uuid4()),
-                        occurred_at=_utc(self.clock()),
-                        component="agent",
-                        event_id=ev.event_id,
-                        outcome="reasoning_failed",
-                        detail="llm_decision_timeout",
-                    )
-                    self.runtime.state_store.append_audit(rec)
-                    await self.runtime.audit_sink.append(rec)
+                    existing_bundle = self.runtime.state_store.get_event_state(ev.event_id)
+                    if _is_exhausted_or_terminal(existing_bundle):
+                        self.runtime.state_store.finalize_bundle_members(
+                            ev.event_id,
+                            now=_utc(self.clock()),
+                        )
+                        continue
+            await _execute_event_cycle(ev, is_bundled=bundle.is_bundled)
         return tuple(results)
 
     async def run(self, *, duration_seconds: float) -> dict[str, Any]:
-        """Run all three loops concurrently with a hard duration limit and two-phase protective drain shutdown."""
+        """Run independent news-poll, event, quote, and protection loops with two-phase protective drain shutdown."""
         if duration_seconds <= 0:
             raise ValueError("duration_seconds must be positive")
         self._stop_event = asyncio.Event()
         self._drain_stop_event = asyncio.Event()
+        self._event_wakeup = asyncio.Event()
         self._stop_reason = None
         started_at = _utc(self.clock())
         self._run_started_at = started_at
@@ -2080,7 +2482,100 @@ class ShadowRunner:
                 except TimeoutError:
                     pass
 
-        async def _news_and_event_worker() -> None:
+        async def _news_poll_worker() -> None:
+            if not self.poll_news or self.observer_store is None or self.news_source is None:
+                await self._stop_event.wait()
+                return
+
+            obs_store = self.observer_store
+            active_poll_tasks: set[asyncio.Task[Any]] = set()
+            supplemental_in_flight = False
+
+            async def _poll_primary() -> None:
+                if hasattr(self.news_source, "poll_due_streams"):
+                    try:
+                        await self.news_source.poll_due_streams(
+                            obs_store,
+                            limit=35,
+                            on_stream_recorded=lambda _res: self._event_wakeup.set(),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        await asyncio.to_thread(
+                            obs_store.failure,
+                            getattr(self.news_source, "provider", "tier1_english"),
+                            "multi_stream",
+                            str(exc),
+                        )
+                else:
+                    for kind in ("news", "calendar"):
+                        if self._stop_event.is_set():
+                            break
+                        try:
+                            batch = await self.news_source.fetch(kind, channel="global", limit=25)
+                            await asyncio.to_thread(obs_store.record, batch)
+                            self._event_wakeup.set()
+                        except asyncio.CancelledError:
+                            raise
+                        except (CaptureError, Exception) as exc:
+                            await asyncio.to_thread(
+                                obs_store.failure,
+                                self.news_source.provider,
+                                f"{kind}/global",
+                                str(exc),
+                            )
+
+            async def _poll_supplemental() -> None:
+                nonlocal supplemental_in_flight
+                if self.supplemental_calendar_source is None or supplemental_in_flight:
+                    return
+                supplemental_in_flight = True
+                try:
+                    cal_batch = await self.supplemental_calendar_source.fetch("calendar", limit=25)
+                    await asyncio.to_thread(obs_store.record, cal_batch)
+                    self._event_wakeup.set()
+                except asyncio.CancelledError:
+                    raise
+                except (CaptureError, Exception) as exc:
+                    await asyncio.to_thread(
+                        obs_store.failure,
+                        self.supplemental_calendar_source.provider,
+                        "calendar/supplemental",
+                        str(exc),
+                    )
+                finally:
+                    supplemental_in_flight = False
+
+            try:
+                while not self._stop_event.is_set():
+                    if (
+                        self.runtime.state_store is not None
+                        and self.runtime.state_store.is_stop_requested()
+                    ):
+                        self._stop_event.set()
+                        break
+                    t_primary = asyncio.create_task(_poll_primary())
+                    active_poll_tasks.add(t_primary)
+                    t_primary.add_done_callback(active_poll_tasks.discard)
+                    if self.supplemental_calendar_source is not None and not supplemental_in_flight:
+                        t_supp = asyncio.create_task(_poll_supplemental())
+                        active_poll_tasks.add(t_supp)
+                        t_supp.add_done_callback(active_poll_tasks.discard)
+                    try:
+                        await asyncio.wait_for(
+                            self._stop_event.wait(), timeout=self.news_poll_interval_seconds
+                        )
+                    except TimeoutError:
+                        pass
+            finally:
+                for pending_t in list(active_poll_tasks):
+                    if not pending_t.done():
+                        pending_t.cancel()
+                if active_poll_tasks:
+                    await asyncio.gather(*active_poll_tasks, return_exceptions=True)
+
+        async def _event_worker() -> None:
             try:
                 await self.runtime.recover_incomplete(
                     max_event_age=timedelta(seconds=self.max_recovery_event_age_seconds),
@@ -2091,8 +2586,6 @@ class ShadowRunner:
             except Exception as exc:
                 logger.warning("recovery_worker_error: %s", exc)
 
-            last_poll = 0.0
-            loop = asyncio.get_running_loop()
             while not self._stop_event.is_set():
                 if (
                     self.runtime.state_store is not None
@@ -2100,68 +2593,26 @@ class ShadowRunner:
                 ):
                     self._stop_event.set()
                     break
-                now_mono = loop.time()
-                if (
-                    self.poll_news
-                    and self.observer_store is not None
-                    and self.news_source is not None
-                    and (
-                        last_poll == 0.0 or now_mono - last_poll >= self.news_poll_interval_seconds
-                    )
-                ):
-                    last_poll = now_mono
-                    if hasattr(self.news_source, "poll_due_streams"):
-                        try:
-                            await self.news_source.poll_due_streams(self.observer_store, limit=35)
-                        except Exception as exc:
-                            await asyncio.to_thread(
-                                self.observer_store.failure,
-                                getattr(self.news_source, "provider", "tier1_english"),
-                                "multi_stream",
-                                str(exc),
-                            )
-                    else:
-                        for kind in ("news", "calendar"):
-                            if self._stop_event.is_set():
-                                break
-                            try:
-                                batch = await self.news_source.fetch(
-                                    kind, channel="global", limit=25
-                                )
-                                await asyncio.to_thread(self.observer_store.record, batch)
-                            except (CaptureError, Exception) as exc:
-                                await asyncio.to_thread(
-                                    self.observer_store.failure,
-                                    self.news_source.provider,
-                                    f"{kind}/global",
-                                    str(exc),
-                                )
-                    if (
-                        self.supplemental_calendar_source is not None
-                        and not self._stop_event.is_set()
-                    ):
-                        try:
-                            cal_batch = await self.supplemental_calendar_source.fetch(
-                                "calendar", limit=25
-                            )
-                            await asyncio.to_thread(self.observer_store.record, cal_batch)
-                        except (CaptureError, Exception) as exc:
-                            await asyncio.to_thread(
-                                self.observer_store.failure,
-                                self.supplemental_calendar_source.provider,
-                                "calendar/supplemental",
-                                str(exc),
-                            )
+                self._event_wakeup.clear()
                 try:
                     await self.step_events()
                 except Exception as exc:
                     logger.warning("event_worker_error: %s", exc)
+                if self._stop_event.is_set() or self._event_wakeup.is_set():
+                    continue
+                stop_w = asyncio.create_task(self._stop_event.wait())
+                wake_w = asyncio.create_task(self._event_wakeup.wait())
                 try:
-                    await asyncio.wait_for(
-                        self._stop_event.wait(), timeout=self.event_scan_interval_seconds
+                    await asyncio.wait(
+                        {stop_w, wake_w},
+                        timeout=self.event_scan_interval_seconds,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                except TimeoutError:
-                    pass
+                finally:
+                    for w_task in (stop_w, wake_w):
+                        if not w_task.done():
+                            w_task.cancel()
+                    await asyncio.gather(stop_w, wake_w, return_exceptions=True)
 
         def _open_position_state() -> tuple[Decimal, str | None]:
             row = self.ledger.db.execute(
@@ -2173,7 +2624,8 @@ class ShadowRunner:
 
         protection_task = asyncio.create_task(_protection_worker(), name="shadow-protection")
         quote_task = asyncio.create_task(_quote_worker(), name="shadow-quotes")
-        event_task = asyncio.create_task(_news_and_event_worker(), name="shadow-events")
+        poll_task = asyncio.create_task(_news_poll_worker(), name="shadow-news-polls")
+        event_task = asyncio.create_task(_event_worker(), name="shadow-events")
         timed_out = False
         shutdown_reason = "runner_stop_requested"
         event_worker_stopped_before_drain = False
@@ -2210,10 +2662,11 @@ class ShadowRunner:
                     stop_reason=shutdown_reason,
                 )
 
-            # Phase 1: Stop new event/LLM worker first while keeping quote & protection workers running
+            # Phase 1: Stop news polling and event/LLM workers first while keeping quote & protection workers running
+            poll_task.cancel()
             event_task.cancel()
-            await asyncio.gather(event_task, return_exceptions=True)
-            event_worker_stopped_before_drain = event_task.done()
+            await asyncio.gather(poll_task, event_task, return_exceptions=True)
+            event_worker_stopped_before_drain = event_task.done() and poll_task.done()
             quote_worker_alive_during_drain = not quote_task.done()
             protection_worker_alive_during_drain = not protection_task.done()
 

@@ -1,12 +1,39 @@
-# Source observation — v0.14
+# Source observation — v0.15.4
 
-The first observer stage captures financial news and calendar snapshots. It does not
-call an LLM, fetch market quotes, infer returns, connect a broker or create orders.
-This is Stage 1A, not completion of the realtime observer roadmap.
+The observer stage captures financial news and calendar snapshots across the Tier-1 English
+FX/central-bank stack (`sources/english_tier1.py`, default) and the legacy WallStreetCN
+adapter (`sources/wallstreetcn.py`). It does not call an LLM, fetch market quotes, infer
+returns, connect a broker or create orders.
 
-## Adapter and inputs
+## Adapters and inputs
 
-`sources/wallstreetcn.py` implements `CaptureSource.fetch`. Its initial website endpoints
+`sources/english_tier1.py` (`Tier1EnglishSource`) is the default live intake for
+`eventlens observe capture` and `eventlens shadow start --poll-news`, polling:
+- `investinglive` (`news/rss`): breaking FX & central-bank desk wire
+- `ecb` (`news/press`, `news/stats`): official ECB press and statistical releases
+- `fed` (`news/monetary`, `news/speeches`): official Federal Reserve monetary releases and speeches
+- `us_bea` (`news/releases`): official US Bureau of Economic Analysis GDP/PCE releases
+- `forexfactory` (`calendar/thisweek`): weekly EUR/USD macro release schedule JSON
+
+Each stream in `Tier1EnglishSource.poll_due_streams` executes in its own task, respects
+per-stream `min_poll_seconds` rate limits, `timeout_seconds`, `max_attempts` retry caps, and
+in-flight stream deduplication, and **persists (`store.record` / `store.failure`) and publishes
+(`available_at`) independently as soon as that stream completes**—fast streams never wait for a
+slow or hung stream, and cancellation stops any in-flight stream cleanly.
+
+For newly observed live `ecb` and `fed` announcements (`enrich_live_articles=True`), full
+article HTML is fetched once and persisted in `observer_enrichments` together with gzipped raw
+HTTP HTML bytes in `observer_payloads`, `request_started_at`, `fetched_at`, `recorded_at`,
+`available_at`, and `rss_fingerprint`:
+- Subsequent RSS polls reuse the persisted body when `rss_fingerprint` is unchanged, so items
+  never regress back to bare RSS summaries or emit bogus revisions when HTML is not re-fetched.
+- Genuine upstream RSS/article updates re-fetch and append a new immutable revision (`r2`, …)
+  while preserving prior revisions and raw HTML payloads.
+- Historical replay (`history(as_of=…)`, `revisions(as_of=…)`, `enrichments(as_of=…)`) filters
+  strictly by `available_at <= as_of` (where `available_at >= recorded_at >= received_at >= fetched_at`),
+  preventing lookahead into later-fetched full text.
+
+`sources/wallstreetcn.py` implements `CaptureSource.fetch` (`--source wallstreetcn`). Its initial website endpoints
 are also used by RSSHub's [news](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/wallstreetcn/live.tsx)
 and [calendar](https://github.com/DIYgod/RSSHub/blob/master/lib/routes/wallstreetcn/calendar.ts)
 adapters. They are not a documented public developer API with a known service guarantee.
@@ -94,6 +121,7 @@ applicable release time and excluding snapshots that already contain the actual.
 | `observer_sightings` | Baseline/new/revised/repeat state for every item seen in every capture |
 | `observer_streams` | Last successful window IDs for overlap diagnostics |
 | `observer_failures` | Bounded transport/status/size failures, without model or broker actions |
+| `observer_enrichments` | Official full-text enrichment bodies, `rss_fingerprint`, `request_started_at` / `fetched_at` / `recorded_at` / `available_at` clocks, and FK to raw HTML bytes in `observer_payloads` |
 
 A dedicated SQLite application ID prevents accidental writes into existing memory or
 research stores. Transactions prevent half-written captures; a file lock permits one
