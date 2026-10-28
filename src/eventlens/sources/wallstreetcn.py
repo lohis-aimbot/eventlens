@@ -440,6 +440,8 @@ def revision_to_event(revision: StoredRevision) -> Event:
 class WallStreetCNFilter:
     """Deterministic filter for WallStreetCN news and calendar observations."""
 
+    filter_version: str = FILTER_VERSION
+
     def __init__(
         self,
         *,
@@ -661,7 +663,7 @@ def filter_store_revisions(
     return {
         "scope": "source_filter_only",
         "execution_authorized": False,
-        "filter_version": FILTER_VERSION,
+        "filter_version": getattr(active_filter, "filter_version", FILTER_VERSION),
         "basis": basis,
         "as_of": cutoff.isoformat(),
         "evaluated": len(revisions),

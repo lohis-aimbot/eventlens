@@ -369,33 +369,56 @@ class ObserverStore:
             ).fetchone()
             return str(row["state"]) if row is not None else None
 
+    def has_stream_baseline(
+        self, *, provider: str, stream: str, basis: Basis = "live_poll"
+    ) -> bool:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM observer_streams WHERE provider=? AND basis=? AND stream=?",
+                (provider, basis, stream),
+            ).fetchone()
+            return row is not None
+
+    def known_source_ids(
+        self, *, provider: str, kind: Kind = "news", basis: Basis = "live_poll"
+    ) -> set[str]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT source_id FROM observer_revisions WHERE provider=? AND basis=? AND kind=?",
+                (provider, basis, kind),
+            ).fetchall()
+            return {str(row["source_id"]) for row in rows}
+
     def history(
         self,
         kind: Kind,
         source_id: str,
         *,
-        provider: str = "wallstreetcn",
+        provider: str | None = "wallstreetcn",
         basis: Basis = "live_poll",
         as_of: datetime | None = None,
     ) -> tuple[StoredRevision, ...]:
         with self._lock:
             if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
                 raise ValueError("History cutoff requires a timezone")
-            rows = self.db.execute(
-                """SELECT r.*, MIN(p.available_at) AS available_at
+            query = """SELECT r.*, MIN(p.available_at) AS available_at
                 FROM observer_revisions r JOIN observer_sightings s
                     ON s.source_id=r.source_id AND s.revision=r.revision
                 JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
                     AND p.basis=r.basis AND p.kind=r.kind
-                WHERE r.provider=? AND r.basis=? AND r.kind=? AND r.source_id=?
-                    AND p.available_at IS NOT NULL
+                WHERE r.basis=? AND r.kind=? AND r.source_id=?
+                    AND p.available_at IS NOT NULL"""
+            params: list[Any] = [basis, kind, source_id]
+            if provider is not None:
+                query += " AND r.provider=?"
+                params.append(provider)
+            query += """
                 GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
-                ORDER BY r.revision""",
-                (provider, basis, kind, source_id),
-            ).fetchall()
+                ORDER BY r.revision"""
+            rows = self.db.execute(query, params).fetchall()
             records = tuple(
                 StoredRevision(
-                    provider=provider,
+                    provider=str(row["provider"]),
                     basis=basis,
                     revision=row["revision"],
                     received_at=row["received_at"],
@@ -411,7 +434,7 @@ class ObserverStore:
         self,
         *,
         kind: Kind | None = None,
-        provider: str = "wallstreetcn",
+        provider: str | None = None,
         basis: Basis = "live_poll",
         as_of: datetime | None = None,
         limit: int = 100,
@@ -429,20 +452,23 @@ class ObserverStore:
                 JOIN observer_polls p
                     ON p.poll_id=s.poll_id AND p.provider=r.provider
                     AND p.basis=r.basis AND p.kind=r.kind
-                WHERE r.provider=? AND r.basis=? AND p.available_at IS NOT NULL
+                WHERE r.basis=? AND p.available_at IS NOT NULL
             """
-            params: list[Any] = [provider, basis]
+            params: list[Any] = [basis]
+            if provider is not None:
+                query += " AND r.provider=?"
+                params.append(provider)
             if kind is not None:
                 query += " AND r.kind=?"
                 params.append(kind)
             query += """
                 GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
-                ORDER BY available_at ASC, r.kind ASC, r.source_id ASC, r.revision ASC
+                ORDER BY available_at ASC, r.provider ASC, r.kind ASC, r.source_id ASC, r.revision ASC
             """
             rows = self.db.execute(query, params).fetchall()
             items = tuple(
                 StoredRevision(
-                    provider=provider,
+                    provider=str(row["provider"]),
                     basis=basis,
                     revision=row["revision"],
                     received_at=row["received_at"],

@@ -15,7 +15,8 @@ from .deepseek import DeepSeekClient
 from .observer import ObserverStore
 from .quotes import QuoteStore, build_market_snapshot
 from .runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeStore
-from .sources.wallstreetcn import WallStreetCNFilter, WallStreetCNSource
+from .sources.english_tier1 import EURUSDEventFilter, Tier1EnglishSource
+from .sources.wallstreetcn import WallStreetCNSource
 from .sqlite_memory import SQLiteThesisMemory
 from .trading.agent import SinglePassTradingAgent
 from .trading.execution import ProtectiveExitPolicy, ShadowCostModel, SQLiteShadowLedger
@@ -225,7 +226,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 if call_model
                 else _AbstainWithoutModelAgent()
             )
-            wscn_filter = WallStreetCNFilter()
+            ev_filter = EURUSDEventFilter()
             runtime = IntradayEventRuntime(
                 memory=memory,
                 portfolio_state=ledger,
@@ -235,7 +236,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 risk_engine=DeterministicHardRiskEngine(policy=risk_policy),
                 shadow_executor=ledger,
                 state_store=state_store,
-                event_filter=wscn_filter,
+                event_filter=ev_filter,
             )
 
             if args.command == "recover":
@@ -283,18 +284,31 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 }
 
             allow_baseline = getattr(args, "allow_baseline", None)
+            news_source_mode = getattr(args, "news_source", "tier1_english")
+            active_news_source: Any = None
+            supplemental_cal: WallStreetCNSource | None = None
+            if args.poll_news:
+                if news_source_mode == "wallstreetcn":
+                    active_news_source = WallStreetCNSource()
+                else:
+                    active_news_source = Tier1EnglishSource()
+                    if getattr(args, "supplement_calendar_actuals", False):
+                        supplemental_cal = WallStreetCNSource()
             runner = ShadowRunner(
                 runtime=runtime,
                 ledger=ledger,
                 observer_store=ostore,
                 quote_store=qstore,
                 quote_bridge_dir=quote_bridge_dir,
-                news_source=WallStreetCNSource() if args.poll_news else None,
+                news_source=active_news_source,
+                supplemental_calendar_source=supplemental_cal,
                 basis=basis,
                 poll_news=args.poll_news,
                 allow_baseline_revisions=(
                     bool(allow_baseline) if allow_baseline is not None else not args.poll_news
                 ),
+                bundle_simultaneous=bool(getattr(args, "bundle_events", True)),
+                news_bundle_window_seconds=float(getattr(args, "bundle_window_seconds", 60.0)),
                 news_poll_interval_seconds=args.news_interval,
                 event_scan_interval_seconds=args.event_interval,
                 quote_interval_seconds=args.quote_interval,
@@ -438,7 +452,30 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument(
         "--poll-news",
         action="store_true",
-        help="Poll public WallStreetCN news/calendar endpoints during the run",
+        help="Poll live Tier-1 English FX & official central bank feeds (investingLive, ECB, Fed, US BEA, ForexFactory)",
+    )
+    start_p.add_argument(
+        "--news-source",
+        choices=("tier1_english", "wallstreetcn"),
+        default="tier1_english",
+        help="Live news/macro source stack when --poll-news is enabled (default: tier1_english)",
+    )
+    start_p.add_argument(
+        "--supplement-calendar-actuals",
+        action="store_true",
+        help="Optionally poll structured numeric calendar actuals alongside tier1_english (without Chinese news)",
+    )
+    start_p.add_argument(
+        "--bundle-events",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Bundle simultaneous macro calendar indicators and same-provider burst headlines into single LLM calls",
+    )
+    start_p.add_argument(
+        "--bundle-window-seconds",
+        type=float,
+        default=60.0,
+        help="Time bucket in seconds for grouping simultaneous same-provider news headlines (0 disables news bundling)",
     )
     start_p.add_argument(
         "--allow-baseline",
