@@ -28,7 +28,7 @@
 EventLens is a Python research system built around **Event → Thesis Memory → Position**. Existing LLM APIs interpret financial events, maintain persistent trading theses and propose intraday exposure changes. Independent rules validate proposals, enforce risk limits and manage exits in a local Shadow ledger. The intended holding period is minutes to hours, with positions closed within the configured trading day.
 
 > [!NOTE]
-> **v0.15.3 · Shadow research foundation.** Event ingestion, single-pass LLM reasoning, thesis memory, deterministic risk checks, two-phase protective drain and cutoff guards are implemented. Live observations include two October 23 PMI runs (entries and timed exit), October 27 live-quote recovery/reconciliation of residual open positions, and an uninterrupted 2,240-second forward Shadow window across US macro releases. **No broker orders are connected, and profitability has not been established.**
+> **v0.15.4 · Shadow research foundation.** Event ingestion (independent per-stream Tier-1 English capture and non-regressing ECB/Fed full-text evidence), single-pass LLM reasoning, thesis memory, durable bundle crash recovery, quote-wait vs. model-retry separation, deterministic risk checks, two-phase protective drain and cutoff guards are implemented. Prior real observations (`v0.15.3`) include two October 23 PMI runs (entries and timed exit), October 27 live-quote recovery/reconciliation of residual open positions, and an uninterrupted 2,240-second forward Shadow window across US macro releases. **No broker orders are connected, and profitability has not been established.**
 
 <table>
   <tr>
@@ -72,11 +72,11 @@ One Python process and SQLite are sufficient initially. Analysis and decision ca
 
 | Layer | Implemented | Next capability |
 |---|---|---|
-| **Information** | Fed RSS plus WallStreetCN news/calendar capture, EUR/USD observation filter, raw responses, receipt/availability clocks and revision history | Wider source validation, representative quote alignment and long-running observation |
-| **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure proposals, source-evidence validation and immutable SQLite history | Broader forward evaluation of decision quality, failures and cost |
+| **Information** | Tier-1 English (`investingLive`, `ECB`, `Fed`, `US BEA`, `Forex Factory`) + legacy WallStreetCN capture, independent per-stream publication, non-regressing official full-text enrichment with raw HTML evidence, `EURUSDEventFilter` and revision history | Wider multi-session live source observation and representative quote alignment |
+| **LLM & memory** | DeepSeek JSON adapter, single-pass thesis + exposure proposals, durable `runtime_event_bundles` crash recovery, source-evidence validation and immutable SQLite history | Broader forward evaluation of decision quality, failures and cost |
 | **Market data** | Offline Bid/Ask tools plus bounded Demo EURUSD quote bridge (`10–86400s`), Razor commission metadata, raw-tick/clock diagnostics and as-of alignment | Continuous uninterrupted live coverage and authoritative broker positions |
-| **Research** | Historical input cutoffs, opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
-| **Trading** | Explicit `IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE` actions, account sizing profiles, independent hard risk, SQLite shadow fills/PnL, protective drain and cutoff guards | Uninterrupted Shadow protection and position reconciliation before cTrader Demo execution |
+| **Research** | Historical input cutoffs (including strict `as_of` anti-lookahead on enriched full text), opt-in LLM replay, costs, delays and recovery | Integrated strategy evaluation and forward observation |
+| **Trading** | Explicit `IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE` actions, quote-wait validity window (`awaiting_market_quote` → `expired`) separated from model retry budget, account sizing profiles, independent hard risk, SQLite shadow fills/PnL, protective drain and cutoff guards | Uninterrupted Shadow protection and position reconciliation before cTrader Demo execution |
 
 [Read the architecture and module map →](docs/architecture.md)
 
@@ -188,7 +188,10 @@ The chronological FOMC study covers **eight historical episodes**. It checks int
 
 ### Verification boundary
 
-The current offline/synthetic suite contains **316 passing tests**, with CI on Python 3.11 and 3.12. It covers contracts, recovery, quote checks, action semantics, risk rules, shutdown and accounting. Regression checks and bounded live observations are separate evidence: live open-to-exit fills within a single uninterrupted post-drain window and broader multi-session after-cost evaluation remain ahead of Demo order execution.
+EventLens strictly separates three evidence levels:
+- **Synthetic / offline automated tests (`331 passing tests`)**: CI on Python 3.11 and 3.12 verifies contracts, durable bundle crash recovery (`runtime_event_bundles`), non-regressing official full-text enrichment & anti-lookahead replay (`observer_enrichments`), independent fast/slow stream publication & non-blocking event consumption, quote-wait validity expiry vs. model retry accounting, action semantics, hard risk rules, two-phase shutdown and shadow ledger math using deterministic offline mocks and clocks.
+- **Real historical & live observations (preserved unmodified)**: Recorded on `v0.15.3` across October 22–27, 2026 (live cTrader Demo quotes, DeepSeek single-pass calls, residual position recovery and a `2,240.0 s` continuous window) plus the 8-episode historical FOMC study above.
+- **Uncompleted live acceptance**: The `v0.15.4` audit fixes have been verified only by offline synthetic tests so far (no live feed polling, paid model calls, or broker connections were run during the `v0.15.4` remediation). Live forward Shadow verification of the `v0.15.4` Tier-1 English / bundle / quote-wait paths, live open-to-exit fills within a single uninterrupted post-drain window, multi-session after-cost evaluation, and isolated cTrader Demo order execution remain pending.
 
 ## Roadmap
 
@@ -219,8 +222,8 @@ Planned research extensions beyond the current Shadow and Demo milestones remain
 ```text
 eventlens/
 ├── src/eventlens/
-│   ├── sources/         Fed and WallStreetCN source adapters
-│   ├── observer.py      Raw captures, revisions and availability history
+│   ├── sources/         Tier-1 English, Fed, cTrader Demo and WallStreetCN adapters
+│   ├── observer.py      Raw captures, revisions, enrichments and availability history
 │   ├── quotes.py        Demo quote evidence and as-of input alignment
 │   ├── research/        Historical data, replay and experiments
 │   ├── trading/         Agent, sizing, hard risk and Shadow execution/accounting
