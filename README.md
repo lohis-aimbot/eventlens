@@ -104,21 +104,24 @@ eventlens research series plan examples/synthetic-series-plan.json
 
 | Command group | Purpose |
 |---|---|
-| `eventlens observe …` | Bounded source/quote capture, offline demo and read-only timing audits |
-| `eventlens shadow …` | Bounded single-process automated Shadow loop (`start`, `stop`, `status`, `report`, `recover`) |
+| `eventlens observe …` | Tier-1 English FX/central-bank capture (`capture`), macro window schedule (`schedule`), offline demo and timing audits |
+| `eventlens shadow …` | Bounded single-process automated Shadow loop (`start`, `stop`, `status`, `report`, `recover`) with simultaneous release bundling |
 | `eventlens memory …` | Memory inspection, synthetic demo and explicit memory reasoning |
 | `eventlens source fed …` | Existing Fed polling collector; use `--help` to inspect options |
 | `eventlens research …` | Historical data, accounting, proposal validation and opt-in inference |
 
-The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Source capture accesses public website endpoints; paid research inference remains separate and opt-in. The optional quote watcher reads a separate, explicitly started Demo bridge; it does not invoke an LLM. All eight older `eventlens-*` commands remain available.
+The `demo`, `check` and `plan` examples above are offline. The demo writes invented, explicitly tagged records to `data/observer-demo.sqlite`. Live intake (`eventlens observe capture` and `eventlens shadow start --poll-news`) defaults to the **Tier-1 English FX & official macro stack** (`investingLive` FX desk wire, official `ECB` press & statistical releases, official `Federal Reserve` monetary & speech feeds, official `US BEA` GDP/PCE releases, and `Forex Factory` weekly schedule JSON), with simultaneous release bundling (`--bundle-events`) and explicit `Consensus Forecast: MISSING` separation when consensus estimates are absent. Paid research inference remains separate and opt-in. The optional quote watcher reads a separate, explicitly started Demo bridge; it does not invoke an LLM. All eight older `eventlens-*` commands remain available.
 
 Shadow sizing is configuration-driven: the CLI defaults to `pepperstone_razor_200` (modeled equity of $200 and 200x leverage); `--account-profile institutional_10k` selects the unleveraged $10,000 profile. These are local simulation settings, not balances read from a broker account.
 
 <details>
-<summary><strong>Capture financial news and calendar observations</strong></summary>
+<summary><strong>Capture Tier-1 English FX/macro feeds and inspect key macro windows</strong></summary>
 
 ```bash
-# One bounded cycle: news and the current Shanghai-date calendar; no API key needed
+# Inspect upcoming high/medium EUR & USD macro windows (Beijing Time + UTC, explicit MISSING consensus markers)
+eventlens observe schedule --hours 36
+
+# One bounded cycle across Tier-1 English feeds (investingLive, ECB, Fed, US BEA, ForexFactory); no API key needed
 eventlens observe capture
 
 # Read the resulting local capture report without network access

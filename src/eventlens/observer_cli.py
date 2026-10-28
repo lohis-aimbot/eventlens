@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from .observer import CaptureBatch, CaptureSource, Kind, ObserverStore
+from .sources.english_tier1 import (
+    EURUSDEventFilter,
+    Tier1EnglishSource,
+    build_macro_schedule,
+    format_macro_schedule_table,
+)
 from .sources.wallstreetcn import (
     CaptureError,
     WallStreetCNSource,
@@ -23,18 +29,45 @@ logger = logging.getLogger(__name__)
 
 
 async def capture(store: ObserverStore, args: argparse.Namespace) -> bool:
-    source: CaptureSource = WallStreetCNSource()
-    kinds: tuple[Kind, ...] = ("news", "calendar") if args.kind == "both" else (args.kind,)
+    resolved_source = args.source
+    if resolved_source is None:
+        resolved_source = (
+            "wallstreetcn"
+            if (args.date is not None or args.channel is not None)
+            else "tier1_english"
+        )
     failed = False
+    if resolved_source == "tier1_english":
+        tier1 = Tier1EnglishSource()
+        kind_filter: Kind | None = None if args.kind == "both" else args.kind
+        with store.exclusive():
+            for poll in range(args.polls):
+                results = await tier1.poll_due_streams(
+                    store,
+                    kind=kind_filter,
+                    limit=args.limit,
+                    day=args.date,
+                    force=True,
+                )
+                for res in results:
+                    failed |= res.get("status") != "ok"
+                    print(json.dumps(res, ensure_ascii=False), flush=True)
+                if poll + 1 < args.polls:
+                    await asyncio.sleep(args.interval)
+        return failed
+
+    source: CaptureSource = WallStreetCNSource()
+    channel = args.channel or "global"
+    kinds: tuple[Kind, ...] = ("news", "calendar") if args.kind == "both" else (args.kind,)
     with store.exclusive():
         for poll in range(args.polls):
             for kind in kinds:
                 try:
                     batch = await source.fetch(
-                        kind, channel=args.channel, limit=args.limit, day=args.date
+                        kind, channel=channel, limit=args.limit, day=args.date
                     )
                 except CaptureError as exc:
-                    stream = f"{kind}/{args.channel if kind == 'news' else args.date or 'today'}"
+                    stream = f"{kind}/{channel if kind == 'news' else args.date or 'today'}"
                     store.failure(source.provider, stream, str(exc))
                     result: dict[str, Any] = {
                         "stream": stream,
@@ -97,18 +130,66 @@ def main() -> None:
     parser.add_argument("--verbose", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     poll = commands.add_parser("capture", help="Bounded public HTTP capture; no model or orders")
+    poll.add_argument(
+        "--source",
+        choices=("tier1_english", "wallstreetcn"),
+        default=None,
+        help="Capture source stack (defaults to tier1_english)",
+    )
     poll.add_argument("--kind", choices=("news", "calendar", "both"), default="both")
-    poll.add_argument("--channel", choices=("global", "forex", "commodity"), default="global")
-    poll.add_argument("--limit", type=int, default=30)
+    poll.add_argument("--channel", choices=("global", "forex", "commodity"), default=None)
+    poll.add_argument("--limit", type=int, default=35)
     poll.add_argument("--date", type=date.fromisoformat, help="Calendar date in Asia/Shanghai")
     poll.add_argument("--polls", type=int, default=1, help="1–100 bounded polling cycles")
     poll.add_argument("--interval", type=float, default=30, help="Seconds between cycles (min 10)")
+
+    sched = commands.add_parser(
+        "schedule",
+        help="Read-only key macro window schedule (BJT + UTC) with explicit MISSING consensus markers",
+    )
+    sched.add_argument(
+        "--currencies",
+        type=str,
+        default="USD,EUR",
+        help="Comma-separated currency codes (e.g. USD,EUR or ALL)",
+    )
+    sched.add_argument(
+        "--min-impact",
+        choices=("high", "medium", "low"),
+        default="medium",
+        help="Minimum calendar impact tier to display (default: medium)",
+    )
+    sched.add_argument(
+        "--date",
+        type=date.fromisoformat,
+        default=None,
+        help="Specific calendar date in Asia/Shanghai (YYYY-MM-DD)",
+    )
+    sched.add_argument(
+        "--hours",
+        type=float,
+        default=36.0,
+        help="Hours ahead from now when --date is omitted (default: 36)",
+    )
+    sched.add_argument(
+        "--format",
+        choices=("table", "json"),
+        default="table",
+        help="Output format (default: table)",
+    )
+    sched.add_argument(
+        "--offline",
+        action="store_true",
+        help="Read schedule strictly from existing observer database without network calls",
+    )
+
     example = commands.add_parser("demo", help="Offline invented inputs, tagged synthetic")
     example.add_argument("path", type=Path)
     commands.add_parser("report", help="Read-only capture report; no network calls")
     history = commands.add_parser("history", help="Read-only source revision history")
     history.add_argument("kind", choices=("news", "calendar"))
     history.add_argument("source_id")
+    history.add_argument("--provider", type=str, default=None, help="Optional provider filter")
     history.add_argument("--basis", choices=("live_poll", "synthetic_fixture"), default="live_poll")
     history.add_argument(
         "--as-of", type=datetime.fromisoformat, help="Timezone-aware storage cutoff"
@@ -141,11 +222,39 @@ def main() -> None:
         or args.interval < 10
     ):
         parser.error("Require 1–100 polls/items and a finite interval of at least 10 seconds")
+    if args.command == "schedule" and (not math.isfinite(args.hours) or args.hours <= 0):
+        parser.error("--hours must be a positive finite number")
+
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     database = args.database or Path(
         "data/observer-demo.sqlite" if args.command == "demo" else "data/observer.sqlite"
     )
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     try:
+        if args.command == "schedule":
+            opt_store: ObserverStore | None = None
+            if args.offline or database.is_file():
+                opt_store = ObserverStore(database, readonly=True)
+            try:
+                ccys = [c.strip() for c in args.currencies.split(",") if c.strip()]
+                sched_data = asyncio.run(
+                    build_macro_schedule(
+                        observer_store=opt_store,
+                        currencies=ccys,
+                        min_impact=args.min_impact,
+                        target_date_bjt=args.date,
+                        hours_ahead=args.hours,
+                        offline_only=args.offline,
+                    )
+                )
+                if args.format == "json":
+                    print(json.dumps(sched_data, ensure_ascii=False, indent=2))
+                else:
+                    print(format_macro_schedule_table(sched_data))
+            finally:
+                if opt_store is not None:
+                    opt_store.close()
+            return
+
         store = ObserverStore(database, readonly=args.command in {"report", "history", "filter"})
         try:
             if args.command == "capture":
@@ -163,6 +272,7 @@ def main() -> None:
                             for item in store.history(
                                 args.kind,
                                 args.source_id,
+                                provider=args.provider,
                                 basis=args.basis,
                                 as_of=args.as_of,
                             )
@@ -181,6 +291,7 @@ def main() -> None:
                             basis=args.basis,
                             as_of=args.as_of,
                             limit=args.limit,
+                            event_filter=EURUSDEventFilter(),
                         ),
                         ensure_ascii=False,
                         indent=2,
@@ -190,7 +301,7 @@ def main() -> None:
                 print(json.dumps(store.report(), ensure_ascii=False, indent=2))
         finally:
             store.close()
-    except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
+    except (ValueError, RuntimeError, OSError, sqlite3.Error, CaptureError) as exc:
         parser.exit(1, f"Observer stopped: {type(exc).__name__}: {exc}\n")
 
 

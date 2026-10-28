@@ -511,6 +511,7 @@ def _effective_theses(memory: MemorySnapshot, decision: AgentDecision) -> dict[s
 TERMINAL_EVENT_STATES = frozenset(
     {
         "filtered_out",
+        "bundled",
         "no_target",
         "target_rejected",
         "risk_rejected",
@@ -1480,10 +1481,13 @@ class ShadowRunner:
         observer_store: ObserverStore | None = None,
         quote_store: QuoteStore | None = None,
         quote_bridge_dir: Path | None = None,
-        news_source: WallStreetCNSource | None = None,
+        news_source: Any = None,
+        supplemental_calendar_source: WallStreetCNSource | None = None,
         basis: Basis = "live_poll",
         poll_news: bool = False,
         allow_baseline_revisions: bool = True,
+        bundle_simultaneous: bool = True,
+        news_bundle_window_seconds: float = 60.0,
         news_poll_interval_seconds: float = 15.0,
         event_scan_interval_seconds: float = 1.0,
         quote_interval_seconds: float = 0.5,
@@ -1504,9 +1508,12 @@ class ShadowRunner:
         self.quote_store = quote_store
         self.quote_bridge_dir = quote_bridge_dir
         self.news_source = news_source
+        self.supplemental_calendar_source = supplemental_calendar_source
         self.basis: Basis = basis
         self.poll_news = poll_news
         self.allow_baseline_revisions = allow_baseline_revisions
+        self.bundle_simultaneous = bundle_simultaneous
+        self.news_bundle_window_seconds = news_bundle_window_seconds
         self.news_poll_interval_seconds = news_poll_interval_seconds
         self.event_scan_interval_seconds = event_scan_interval_seconds
         self.quote_interval_seconds = quote_interval_seconds
@@ -1814,9 +1821,16 @@ class ShadowRunner:
         return expired, exit_fills
 
     async def step_events(self) -> tuple[RuntimeCycleResult, ...]:
-        """Scan ObserverStore for unprocessed revisions, filter, and run bounded-timeout cycles."""
+        """Scan ObserverStore for unprocessed revisions, filter, bundle simultaneous releases, and run cycles."""
         if self.observer_store is None:
             return ()
+        from .sources.english_tier1 import (
+            EURUSDEventFilter,
+            EventBundle,
+            bundle_simultaneous_events,
+        )
+        from .sources.wallstreetcn import revision_event_id
+
         now = _utc(self.clock())
         revisions = await asyncio.to_thread(
             self.observer_store.revisions,
@@ -1824,20 +1838,18 @@ class ShadowRunner:
             as_of=now,
             limit=200,
         )
-        wscn_filter = (
+        active_filter = (
             self.runtime.event_filter
             if isinstance(self.runtime.event_filter, WallStreetCNFilter)
-            else WallStreetCNFilter(clock=self.clock)
+            else EURUSDEventFilter(clock=self.clock)
         )
-        results: list[RuntimeCycleResult] = []
+        eligible_pairs: list[tuple[Any, Event]] = []
         for rev in revisions:
             if self._stop_event.is_set() or (
                 self.runtime.state_store is not None
                 and self.runtime.state_store.is_stop_requested()
             ):
                 break
-            from .sources.wallstreetcn import revision_event_id
-
             ev_id = revision_event_id(rev)
             if self.runtime.state_store is not None:
                 existing = self.runtime.state_store.get_event_state(ev_id)
@@ -1849,8 +1861,8 @@ class ShadowRunner:
                     )
                 ):
                     continue
-            wscn_filter.unmark_seen(ev_id)
-            f_res, ev = wscn_filter.evaluate_revision(rev, checked_at=_utc(self.clock()))
+            active_filter.unmark_seen(ev_id)
+            f_res, ev = active_filter.evaluate_revision(rev, checked_at=_utc(self.clock()))
             if not self.allow_baseline_revisions:
                 sighting = await asyncio.to_thread(
                     self.observer_store.first_sighting_state,
@@ -1890,14 +1902,79 @@ class ShadowRunner:
                         reason=f_res.reason,
                     )
                 continue
+            eligible_pairs.append((rev, ev))
+
+        if not eligible_pairs:
+            return ()
+
+        if self.bundle_simultaneous:
+            bundles = bundle_simultaneous_events(
+                eligible_pairs,
+                news_bundle_window_seconds=self.news_bundle_window_seconds,
+            )
+        else:
+            bundles = tuple(
+                EventBundle(event=ev_item, constituents=((rev_item, ev_item),))
+                for rev_item, ev_item in eligible_pairs
+            )
+
+        results: list[RuntimeCycleResult] = []
+        for bundle in bundles:
+            if self._stop_event.is_set() or (
+                self.runtime.state_store is not None
+                and self.runtime.state_store.is_stop_requested()
+            ):
+                break
+            ev = bundle.event
+            if bundle.is_bundled and self.runtime.state_store is not None:
+                existing_bundle = self.runtime.state_store.get_event_state(ev.event_id)
+                if existing_bundle is not None and (
+                    existing_bundle["state"] in TERMINAL_EVENT_STATES
+                    or (
+                        existing_bundle["state"] == "reasoning_failed"
+                        and int(existing_bundle["attempts"]) >= self.max_reasoning_attempts
+                    )
+                ):
+                    for rev_c, ev_c in bundle.constituents:
+                        self.runtime.state_store.upsert_event_state(
+                            event_id=revision_event_id(rev_c),
+                            source_reference=ev_c.source_reference,
+                            received_at=ev_c.received_timestamp,
+                            now=_utc(self.clock()),
+                            state="bundled",
+                            reason=f"bundled_into:{ev.event_id}",
+                        )
+                    continue
+                active_filter.unmark_seen(ev.event_id)
+
             try:
                 cycle_res = await asyncio.wait_for(
                     self.runtime.run_cycle(ev),
                     timeout=self.llm_timeout_seconds,
                 )
                 results.append(cycle_res)
+                if bundle.is_bundled and self.runtime.state_store is not None:
+                    b_state = self.runtime.state_store.get_event_state(ev.event_id)
+                    if b_state is not None and (
+                        b_state["state"] in TERMINAL_EVENT_STATES
+                        or (
+                            b_state["state"] == "reasoning_failed"
+                            and int(b_state["attempts"]) >= self.max_reasoning_attempts
+                        )
+                    ):
+                        for rev_c, ev_c in bundle.constituents:
+                            self.runtime.state_store.upsert_event_state(
+                                event_id=revision_event_id(rev_c),
+                                source_reference=ev_c.source_reference,
+                                received_at=ev_c.received_timestamp,
+                                now=_utc(self.clock()),
+                                state="bundled",
+                                reason=f"bundled_into:{ev.event_id}",
+                            )
             except TimeoutError:
-                wscn_filter.unmark_seen(ev.event_id)
+                active_filter.unmark_seen(ev.event_id)
+                for rev_c, _ in bundle.constituents:
+                    active_filter.unmark_seen(revision_event_id(rev_c))
                 if self.runtime.state_store is not None:
                     self.runtime.state_store.upsert_event_state(
                         event_id=ev.event_id,
@@ -1908,6 +1985,21 @@ class ShadowRunner:
                         reason="llm_decision_timeout",
                         increment_attempts=True,
                     )
+                    if bundle.is_bundled:
+                        b_after = self.runtime.state_store.get_event_state(ev.event_id)
+                        if (
+                            b_after is not None
+                            and int(b_after["attempts"]) >= self.max_reasoning_attempts
+                        ):
+                            for rev_c, ev_c in bundle.constituents:
+                                self.runtime.state_store.upsert_event_state(
+                                    event_id=revision_event_id(rev_c),
+                                    source_reference=ev_c.source_reference,
+                                    received_at=ev_c.received_timestamp,
+                                    now=_utc(self.clock()),
+                                    state="bundled",
+                                    reason=f"bundled_timeout_exhausted:{ev.event_id}",
+                                )
                     rec = AuditRecord(
                         audit_id=str(uuid4()),
                         occurred_at=_utc(self.clock()),
@@ -2018,17 +2110,46 @@ class ShadowRunner:
                     )
                 ):
                     last_poll = now_mono
-                    for kind in ("news", "calendar"):
-                        if self._stop_event.is_set():
-                            break
+                    if hasattr(self.news_source, "poll_due_streams"):
                         try:
-                            batch = await self.news_source.fetch(kind, channel="global", limit=25)
-                            await asyncio.to_thread(self.observer_store.record, batch)
+                            await self.news_source.poll_due_streams(self.observer_store, limit=35)
+                        except Exception as exc:
+                            await asyncio.to_thread(
+                                self.observer_store.failure,
+                                getattr(self.news_source, "provider", "tier1_english"),
+                                "multi_stream",
+                                str(exc),
+                            )
+                    else:
+                        for kind in ("news", "calendar"):
+                            if self._stop_event.is_set():
+                                break
+                            try:
+                                batch = await self.news_source.fetch(
+                                    kind, channel="global", limit=25
+                                )
+                                await asyncio.to_thread(self.observer_store.record, batch)
+                            except (CaptureError, Exception) as exc:
+                                await asyncio.to_thread(
+                                    self.observer_store.failure,
+                                    self.news_source.provider,
+                                    f"{kind}/global",
+                                    str(exc),
+                                )
+                    if (
+                        self.supplemental_calendar_source is not None
+                        and not self._stop_event.is_set()
+                    ):
+                        try:
+                            cal_batch = await self.supplemental_calendar_source.fetch(
+                                "calendar", limit=25
+                            )
+                            await asyncio.to_thread(self.observer_store.record, cal_batch)
                         except (CaptureError, Exception) as exc:
                             await asyncio.to_thread(
                                 self.observer_store.failure,
-                                self.news_source.provider,
-                                f"{kind}/global",
+                                self.supplemental_calendar_source.provider,
+                                "calendar/supplemental",
                                 str(exc),
                             )
                 try:
