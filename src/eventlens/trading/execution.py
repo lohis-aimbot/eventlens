@@ -1577,7 +1577,7 @@ class SQLiteShadowLedger:
             realized_pnl_usd=realized_trade,
             equity_after_usd=equity_after,
             snapshot_id_after=new_snapshot_id,
-            synthetic_assumption=synthetic_used,
+            synthetic_assumption=synthetic_used or not quote.has_verified_provenance,
         )
         self.db.execute(
             "INSERT INTO shadow_fills VALUES (?, ?, ?, ?)",
@@ -1686,3 +1686,327 @@ class SQLiteShadowLedger:
                 "fills": fills,
                 "faults": faults,
             }
+
+
+_REQUIRED_READONLY_LEDGER_COLUMNS: dict[str, tuple[str, ...]] = {
+    "shadow_account": (
+        "id",
+        "snapshot_id",
+        "as_of",
+        "cash_usd",
+        "realized_pnl_usd",
+        "total_fees_usd",
+        "quantity_eur",
+        "avg_entry_price",
+        "opened_at",
+        "peak_favorable_mark",
+        "pending_exit_reason",
+        "pending_exit_since",
+        "last_valid_equity_usd",
+    ),
+    "shadow_daily_state": (
+        "trading_day",
+        "baseline_equity_usd",
+        "loss_limit_triggered",
+        "baseline_valid",
+        "baseline_reason",
+    ),
+    "shadow_receipts": (
+        "execution_id",
+        "receipt_json",
+        "order_status",
+        "terminal_at",
+        "terminal_reason",
+    ),
+    "shadow_fills": ("fill_id", "fill_json"),
+    "shadow_faults": ("fault_id",),
+}
+
+
+def inspect_shadow_ledger_readonly(
+    path: Path,
+    *,
+    market: MarketSnapshot | None = None,
+    cost_model: ShadowCostModel | None = None,
+    exit_policy: ProtectiveExitPolicy = ProtectiveExitPolicy(),
+    risk_policy: RiskPolicy = RiskPolicy(),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Inspect a shadow ledger strictly via `?mode=ro` without creating files, migrating schemas,
+    writing `shadow_daily_state`, updating `shadow_account`, or cancelling pending orders.
+    """
+    check_now = _utc(now or datetime.now(UTC))
+    effective_cost = (
+        cost_model
+        if cost_model is not None
+        else (
+            ShadowCostModel.pepperstone_razor()
+            if (
+                risk_policy.allow_commission_bearing_zero_spread
+                or exit_policy.allow_commission_bearing_zero_spread
+            )
+            else ShadowCostModel()
+        )
+    )
+    if not path.is_file():
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "missing_shadow_db",
+            "error": f"Shadow ledger database does not exist: {path}",
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+        }
+
+    try:
+        db = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+        db.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "readonly_open_failed",
+            "error": f"Unable to open shadow database in read-only mode: {exc}",
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+        }
+
+    try:
+        app_id = db.execute("PRAGMA application_id").fetchone()[0]
+        if app_id != APPLICATION_ID:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "invalid_application_id",
+                "error": f"Database at {path} is not an EventLens shadow ledger (application_id={app_id})",
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        existing_tables = {
+            str(r["name"])
+            for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        missing_elements: list[str] = []
+        for tbl, req_cols in _REQUIRED_READONLY_LEDGER_COLUMNS.items():
+            if tbl not in existing_tables:
+                missing_elements.append(f"table:{tbl}")
+                continue
+            present_cols = {
+                str(c["name"]) for c in db.execute(f"PRAGMA table_info({tbl})").fetchall()
+            }
+            for col in req_cols:
+                if col not in present_cols:
+                    missing_elements.append(f"column:{tbl}.{col}")
+        if missing_elements:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "unsupported_schema_readonly",
+                "error": (
+                    "Unsupported or legacy shadow ledger schema; read-only inspection refuses "
+                    "automatic schema migration."
+                ),
+                "missing_schema_elements": missing_elements,
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        account = db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+        if account is None:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "missing_shadow_account_row",
+                "error": "Shadow ledger has no shadow_account row (id=1).",
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        pending_rows = db.execute(
+            "SELECT execution_id FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
+        ).fetchall()
+        qty = Decimal(account["quantity_eur"])
+        cash = Decimal(account["cash_usd"])
+        realized = Decimal(account["realized_pnl_usd"])
+        fees = Decimal(account["total_fees_usd"])
+        entry = Decimal(account["avg_entry_price"]) if account["avg_entry_price"] else Decimal("0")
+        unrealized = Decimal("0.00")
+        valuation_valid = True
+        valuation_reason = "flat_no_quote_needed"
+
+        if qty != Decimal("0"):
+            quote_check = validate_market_quote(
+                market,
+                as_of=check_now,
+                policy=exit_policy.quote_quality_policy("EUR/USD"),
+            )
+            if quote_check.valid and quote_check.quote is not None:
+                mark = quote_check.quote.bid if qty > 0 else quote_check.quote.ask
+                unrealized = (qty * (mark - entry)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                valuation_valid = True
+                valuation_reason = "marked_to_valid_quote"
+            else:
+                valuation_valid = False
+                valuation_reason = f"unreliable_quote:{quote_check.reason}"
+
+        equity = cash + unrealized
+        day_id, _, _, _ = exit_policy.effective_window(check_now)
+        daily_row = db.execute(
+            "SELECT * FROM shadow_daily_state WHERE trading_day=?", (day_id,)
+        ).fetchone()
+        if daily_row is not None:
+            baseline = Decimal(daily_row["baseline_equity_usd"])
+            loss_triggered = bool(daily_row["loss_limit_triggered"])
+            base_valid = bool(daily_row["baseline_valid"])
+            base_reason = str(daily_row["baseline_reason"])
+            daily_persisted = True
+        else:
+            prior_daily = db.execute(
+                "SELECT * FROM shadow_daily_state WHERE trading_day < ? ORDER BY trading_day DESC LIMIT 1",
+                (day_id,),
+            ).fetchone()
+            refs: list[Decimal] = []
+            if account["last_valid_equity_usd"] is not None:
+                refs.append(Decimal(account["last_valid_equity_usd"]))
+            if prior_daily is not None:
+                refs.append(Decimal(prior_daily["baseline_equity_usd"]))
+            if valuation_valid:
+                refs.append(equity)
+            baseline = max(refs) if refs else equity
+            loss_triggered = (equity - baseline) <= -exit_policy.max_daily_loss_usd
+            base_valid = valuation_valid
+            base_reason = (
+                "readonly_unpersisted_day_rollover"
+                if valuation_valid
+                else "readonly_unconfirmed_open_position_without_valid_quote"
+            )
+            daily_persisted = False
+
+        daily_pnl = (equity - baseline).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        positions = (Position(instrument="EUR/USD", quantity=qty),) if qty != Decimal("0") else ()
+        acct_as_of = datetime.fromisoformat(account["as_of"])
+        snap_as_of = max(
+            acct_as_of,
+            market.as_of if market is not None and market.as_of <= check_now else acct_as_of,
+        )
+        snap = PortfolioSnapshot(
+            snapshot_id=account["snapshot_id"],
+            as_of=snap_as_of,
+            base_currency="USD",
+            equity=equity,
+            positions=positions,
+            pending_order_ids=tuple(str(r["execution_id"]) for r in pending_rows),
+            unrealized_pnl_usd=unrealized,
+            realized_pnl_usd=realized,
+            total_fees_usd=fees,
+            daily_pnl_usd=daily_pnl,
+            daily_baseline_equity_usd=baseline,
+            daily_loss_limit_triggered=loss_triggered,
+            daily_baseline_valid=base_valid,
+            daily_baseline_reason=base_reason,
+            pending_exit_reason=account["pending_exit_reason"],
+            valuation_valid=valuation_valid,
+            valuation_reason=valuation_reason,
+        )
+
+        receipt_rows = db.execute("SELECT * FROM shadow_receipts ORDER BY rowid").fetchall()
+        receipts: list[dict[str, Any]] = []
+        order_status_counts: dict[str, int] = {}
+        for r in receipt_rows:
+            item = json.loads(r["receipt_json"])
+            item["order_status"] = r["order_status"]
+            item["terminal_at"] = r["terminal_at"]
+            item["terminal_reason"] = r["terminal_reason"]
+            order_status_counts[r["order_status"]] = (
+                order_status_counts.get(r["order_status"], 0) + 1
+            )
+            receipts.append(item)
+
+        fills = [
+            json.loads(row["fill_json"])
+            for row in db.execute("SELECT fill_json FROM shadow_fills ORDER BY rowid")
+        ]
+        faults = [dict(row) for row in db.execute("SELECT * FROM shadow_faults ORDER BY rowid")]
+        daily_states = [
+            dict(row) for row in db.execute("SELECT * FROM shadow_daily_state ORDER BY trading_day")
+        ]
+
+        qty_lots = (qty / LOT_UNITS_EUR).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        ref_price = entry if entry > Decimal("0") else Decimal("1.0")
+        if market is not None:
+            q_eur = next((q for q in market.quotes if q.instrument == "EUR/USD"), None)
+            if q_eur is not None:
+                ref_price = (q_eur.bid + q_eur.ask) / Decimal("2")
+        margin_used = (
+            ((abs(qty) * ref_price) / risk_policy.leverage).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if qty != Decimal("0")
+            else Decimal("0.00")
+        )
+        free_margin = (snap.equity - margin_used).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        unclosed_risk = qty != Decimal("0")
+        alerts: list[str] = []
+        recovery_instructions: str | None = None
+        if unclosed_risk:
+            alerts.append(
+                f"UNCLOSED_SHADOW_POSITION: quantity_eur={account['quantity_eur']} "
+                f"({qty_lots} lots), avg_entry_price={account['avg_entry_price']}, "
+                f"pending_exit_reason={account['pending_exit_reason']}, "
+                f"valuation_valid={snap.valuation_valid}"
+            )
+            recovery_instructions = (
+                f"Start EventLensQuoteBridge in cTrader and run: "
+                f".venv/bin/eventlens shadow recover --shadow-db {path.resolve()} "
+                f'--quotes-db <quotes.sqlite> --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge"'
+            )
+        elif account["pending_exit_reason"] is not None:
+            alerts.append(
+                f"PENDING_EXIT_STATE: pending_exit_reason={account['pending_exit_reason']}"
+            )
+
+        return {
+            "readonly": True,
+            "degraded": False,
+            "status": "ok",
+            "daily_baseline_persisted": daily_persisted,
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+            "unclosed_risk": unclosed_risk,
+            "alerts": alerts,
+            "recovery_instructions": recovery_instructions,
+            "cost_model": effective_cost.model_dump(mode="json"),
+            "exit_policy": exit_policy.model_dump(mode="json"),
+            "risk_policy": risk_policy.model_dump(mode="json"),
+            "snapshot": snap.model_dump(mode="json"),
+            "cash_usd": account["cash_usd"],
+            "realized_pnl_usd": account["realized_pnl_usd"],
+            "total_fees_usd": account["total_fees_usd"],
+            "quantity_eur": account["quantity_eur"],
+            "quantity_lots": str(qty_lots),
+            "leverage": str(risk_policy.leverage),
+            "margin_used_usd": str(margin_used),
+            "free_margin_usd": str(free_margin),
+            "avg_entry_price": account["avg_entry_price"],
+            "opened_at": account["opened_at"],
+            "peak_favorable_mark": account["peak_favorable_mark"],
+            "pending_exit_reason": account["pending_exit_reason"],
+            "pending_exit_since": account["pending_exit_since"],
+            "receipt_count": len(receipts),
+            "order_status_counts": order_status_counts,
+            "fill_count": len(fills),
+            "fault_count": len(faults),
+            "daily_states": daily_states,
+            "receipts": receipts,
+            "fills": fills,
+            "faults": faults,
+        }
+    finally:
+        db.close()

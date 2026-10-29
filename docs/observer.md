@@ -1,4 +1,4 @@
-# Source observation — v0.15.4
+# Source observation — v0.15.6
 
 The observer stage captures financial news and calendar snapshots across the Tier-1 English
 FX/central-bank stack (`sources/english_tier1.py`, default) and the legacy WallStreetCN
@@ -9,11 +9,11 @@ returns, connect a broker or create orders.
 
 `sources/english_tier1.py` (`Tier1EnglishSource`) is the default live intake for
 `eventlens observe capture` and `eventlens shadow start --poll-news`, polling:
-- `investinglive` (`news/rss`): breaking FX & central-bank desk wire
+- `investinglive` (`news/live_feed`, `news/central_banks_live`): live HTML Next.js RSC/DOM desk wire (`live_forward_acceptance_status = "pending"`—replacing the CloudFront-cached `news/rss` feed observed with `Age: 313s` on `2026-10-29`, while remaining pending live forward multi-poll acceptance; `X-Cache: Miss` alone is never treated as proof of zero-lag delivery)
 - `ecb` (`news/press`, `news/stats`): official ECB press and statistical releases
 - `fed` (`news/monetary`, `news/speeches`): official Federal Reserve monetary releases and speeches
 - `us_bea` (`news/releases`): official US Bureau of Economic Analysis GDP/PCE releases
-- `forexfactory` (`calendar/thisweek`): weekly EUR/USD macro release schedule JSON
+- `forexfactory` (`calendar/thisweek`): weekly EUR/USD macro release schedule JSON (preserving `reported_forecast = None` and explicit `Consensus Forecast: MISSING` whenever consensus estimates are absent—never substituting `previous`)
 
 Each stream in `Tier1EnglishSource.poll_due_streams` executes in its own task, respects
 per-stream `min_poll_seconds` rate limits, `timeout_seconds`, `max_attempts` retry caps, and
@@ -87,17 +87,31 @@ time and retries, not a fixed release-to-receipt latency. `--kind news|calendar|
 `--channel` and `--date YYYY-MM-DD` control the requested inputs. Running a historical-date
 calendar request today still records today's receipt; it does not reconstruct the past.
 
-## Clock meanings
+## Clock meanings & latency taxonomy
 
 | Field | Meaning |
 |---|---|
-| `original_published_at` | Unknown for this adapter; never filled from display/schedule time |
-| `publisher_display_at` | News website's `display_time`, which may change after an edit |
-| `scheduled_at` | Calendar `public_date`; may be in the future and is not release confirmation |
+| `original_published_at` | Unknown (`None`) unless independently verified; never filled from display, modified, or scheduled time |
+| `publisher_display_at` | Publisher's initial/displayed article time (`publishedUtc`, RSS `<pubDate>`, or `display_time`); unverified |
+| `modified_at` | Publisher's explicit content-modification timestamp (`modifiedUtc` or RSS `<updated>/<modified>`) when provided |
+| `scheduled_at` | Calendar release schedule (`public_date` / ISO schedule); not actual release confirmation (`schedule_to_receipt_seconds` is never called `publication_lag_seconds`) |
 | `request_started_at` | Local request operation start, including retries/pacing |
 | `received_at` | Actual local time after the successful response body is fully received |
 | `recorded_at` | Start of the storage write; not a claim of completed commit |
 | `available_at` | Conservative clock sampled after normalized data commits, then published to history |
+
+Revisions (`revision >= 2`) never compute latency against the initial article's `publisher_display_at`:
+when `modified_at` is present, `classify_timestamp_taxonomy` reports `latency_basis = "modified_to_receipt"`;
+when `modified_at` is absent, `verifiable_lag_seconds` remains `None` (`latency_basis = "revision_without_modified_timestamp"`).
+Upstream clocks slightly ahead of local `received_at` leave unverified display timestamps `None` rather than clamping lag to a misleading `0.0s`.
+
+## Stream health evaluation (`evaluate_observer_stream_health`)
+
+`ObserverStore.report()` and `eventlens shadow status|report` expose 4 orthogonal dimensions per stream:
+1. `http_transport`: `last_poll_at`, `elapsed_ms`, `attempts`, `consecutive_failures`, `last_error`, and `last_parse_error` (including `investinglive_dom_or_rsc_structure_changed` if an HTML response returns 0 articles/cards).
+2. `cache_observation`: `x_cache`, `cf_cache_status`, `age_seconds`, `cache_control`, `header_date_skew_seconds`, and `cache_miss_proves_zero_lag = False`.
+3. `content_activity`: `total_polls`, `unchanged_polls_since_update`, `last_content_update_at`, and `quiet_duration_seconds`—cleanly separating `quiet_market` (valid HTTP/parse + fresh headers + 0 new items, `allows_new_risk = True`) from `fault` (timeouts, HTTP errors, DOM breakage) and `degraded_cache_or_lag` (`Age > 60s`, stale `Date` header, unaged CDN `Hit`, or excessive verified lag, `allows_new_risk = False`).
+4. `verifiable_lag`: `last_verifiable_lag_seconds`, `max_verifiable_lag_seconds`, `lag_basis`, and `verifiability`.
 
 Storage uses UTC; only calendar-date selection uses Shanghai time. A capture first
 commits raw evidence, revisions and sightings atomically, then publishes an availability

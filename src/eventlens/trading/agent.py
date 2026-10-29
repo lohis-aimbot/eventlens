@@ -113,8 +113,13 @@ Never output broker orders, prices, quantities, timestamps, or account credentia
 4. evidence_quote rules (CRITICAL):
    - When memory_action is "ignore" and portfolio_action in ("IGNORE_EVENT", "HOLD"), set evidence_quote=null.
    - Otherwise, evidence_quote MUST be a substantive verbatim sentence/phrase copied from current_event_verbatim_text ONLY.
-   - NEVER quote bracketed adapter headers (e.g. "[INVESTINGLIVE]", "[Categories: ...]", "[REVISION ...]") or "Source URL:" lines.
+   - NEVER quote bracketed adapter headers (e.g. "[INVESTINGLIVE]", "[Categories: ...]", "[REVISION ...]", "[INTERNAL STATEFUL REVIEW ...]") or "Source URL:" lines.
    - NEVER copy text from prior_memory_theses_do_not_quote or invent commentary about missing data.
+5. Internal stateful reviews (when review_context is non-null):
+   - This is an internal scheduled or structured-price re-evaluation of an existing thesis, NOT a new news arrival.
+   - Respect review_context.origin_event_age_seconds and original event timestamps; never treat aged text as fresh news.
+   - Conditions marked "unexecutable_natural_language" in review_context.condition_evaluations were NOT evaluated by code.
+   - A price level crossing or scheduled review NEVER mandates trading: HOLD, CLOSE, and SET_TARGET all remain genuine choices; abstain with HOLD when follow-through, spread, or aged evidence does not justify risk.
 JSON example for reversal (invalidate prior short thesis + create active long + SET_TARGET long):
 {"memory_action":"create","thesis_id":null,"status":"active",
 "narrative":"Dovish Q&A shift triggered USD positioning squeeze higher in EUR/USD","instruments":["EUR/USD"],
@@ -350,14 +355,18 @@ class SinglePassTradingAgent:
         require_verified_provenance: bool = False,
         max_position_weight: Decimal = Decimal("0.25"),
         decision_ttl: timedelta = timedelta(minutes=2),
+        review_horizon: timedelta = timedelta(hours=1),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if (
             max_quote_age <= timedelta(0)
             or decision_ttl <= timedelta(0)
+            or review_horizon <= timedelta(0)
             or max_position_weight <= Decimal("0")
         ):
-            raise ValueError("Quote age, decision TTL, and max position weight must be positive")
+            raise ValueError(
+                "Quote age, decision TTL, review horizon, and max position weight must be positive"
+            )
         self.client = client
         self.instrument = instrument
         self.max_quote_age = max_quote_age
@@ -371,6 +380,7 @@ class SinglePassTradingAgent:
             require_verified_provenance=require_verified_provenance,
         )
         self.decision_ttl = decision_ttl
+        self.review_horizon = review_horizon
         self.clock = clock
 
     async def decide(self, context: AgentContext) -> AgentDecision:
@@ -432,6 +442,7 @@ class SinglePassTradingAgent:
                 context.event.raw_text,
                 context.memory,
                 completed,
+                review_horizon=self.review_horizon,
             )
             if self.instrument not in primary_changes[0].thesis.instruments:
                 raise ValueError(f"Thesis instruments must include {self.instrument}")
@@ -461,6 +472,7 @@ class SinglePassTradingAgent:
                             context.event.raw_text,
                             context.memory,
                             completed,
+                            review_horizon=self.review_horizon,
                         )
                     )
             changes = (*primary_changes, *invalidated_changes)
@@ -597,6 +609,11 @@ class SinglePassTradingAgent:
                 "risk_constraints": {
                     "max_abs_target_weight": str(self.max_position_weight),
                 },
+                "review_context": (
+                    context.review_context.model_dump(mode="json")
+                    if context.review_context is not None
+                    else None
+                ),
                 "current_event_verbatim_text": context.event.raw_text,
                 "event_metadata": context.event.model_dump(mode="json", exclude={"raw_text"}),
                 "prior_memory_theses_do_not_quote": [

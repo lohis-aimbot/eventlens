@@ -588,8 +588,10 @@ def parse_investinglive_live_html(
                 }
             )
 
-    if not items_raw and "<html" not in html_doc.lower():
-        return (), (), "invalid_investinglive_html"
+    if not items_raw:
+        if "<html" not in html_doc.lower():
+            return (), (), "invalid_investinglive_html"
+        return (), (), "investinglive_dom_or_rsc_structure_changed"
 
     records: list[SourceRecord] = []
     rejected: list[RejectedRecord] = []
@@ -627,7 +629,8 @@ def parse_investinglive_live_html(
                 if parsed_pub <= received_utc:
                     displayed = parsed_pub
                 elif parsed_pub <= received_utc + timedelta(seconds=120):
-                    displayed = received_utc
+                    # Upstream clock ahead of receipt: leave display timestamp None rather than faking 0.0s lag.
+                    displayed = None
                 else:
                     raise ValueError("publisher_display_after_receipt")
 
@@ -663,6 +666,15 @@ def parse_investinglive_live_html(
             ).strip()
 
             mod_utc = str(obj.get("modifiedUtc") or "").strip() or None
+            modified: datetime | None = None
+            if mod_utc:
+                parsed_mod = _parse_feed_datetime(mod_utc)
+                if parsed_mod <= received_utc:
+                    modified = parsed_mod
+                elif parsed_mod <= received_utc + timedelta(seconds=120):
+                    modified = None
+                else:
+                    raise ValueError("modified_after_receipt")
             if out_rss_fingerprints is not None:
                 out_rss_fingerprints[source_id] = _rss_item_fingerprint(
                     title=title,
@@ -703,6 +715,7 @@ def parse_investinglive_live_html(
                     title=title,
                     text=full_text,
                     publisher_display_at=displayed,
+                    modified_at=modified,
                     importance=importance,
                 )
             )
@@ -760,16 +773,30 @@ def parse_rss_capture(
                 continue
             seen_ids.add(source_id)
 
-            raw_pub = _child_text(item, ("pubDate", "date", "published", "updated"))
+            raw_pub = _child_text(item, ("pubDate", "date", "published"))
+            raw_updated = _child_text(item, ("updated", "modified"))
+            if not raw_pub and raw_updated:
+                raw_pub = raw_updated
             displayed: datetime | None = None
             if raw_pub:
                 parsed_pub = _parse_feed_datetime(raw_pub)
                 if parsed_pub <= received_utc:
                     displayed = parsed_pub
                 elif parsed_pub <= received_utc + timedelta(seconds=120):
-                    displayed = received_utc
+                    # Upstream clock ahead of receipt: leave display timestamp None rather than faking 0.0s lag.
+                    displayed = None
                 else:
                     raise ValueError("publisher_display_after_receipt")
+
+            modified: datetime | None = None
+            if raw_updated:
+                parsed_upd = _parse_feed_datetime(raw_updated)
+                if parsed_upd <= received_utc:
+                    modified = parsed_upd
+                elif parsed_upd <= received_utc + timedelta(seconds=120):
+                    modified = None
+                else:
+                    raise ValueError("modified_after_receipt")
 
             categories = _child_texts(item, "category")
             raw_desc = _child_text(item, ("encoded", "description", "summary", "content"))
@@ -780,6 +807,7 @@ def parse_rss_capture(
                     url=url,
                     desc_plain=desc_plain,
                     categories=categories,
+                    modified_at=raw_updated or None,
                 )
             enriched = bodies.get(source_id, "").strip()
 
@@ -807,6 +835,7 @@ def parse_rss_capture(
                     title=title,
                     text=full_text,
                     publisher_display_at=displayed,
+                    modified_at=modified,
                     importance=importance,
                 )
             )
@@ -946,7 +975,16 @@ class Tier1EnglishSource:
                             k.lower(): v
                             for k, v in resp.headers.items()
                             if k.lower()
-                            in {"content-type", "etag", "last-modified", "date", "age", "x-cache"}
+                            in {
+                                "content-type",
+                                "etag",
+                                "last-modified",
+                                "date",
+                                "age",
+                                "x-cache",
+                                "cf-cache-status",
+                                "cache-control",
+                            }
                         }
                         if status == 429 or 500 <= status <= 599:
                             raise CaptureError(f"transient_http_{status}")
