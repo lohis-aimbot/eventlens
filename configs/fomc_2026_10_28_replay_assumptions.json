@@ -1,0 +1,68 @@
+{
+  "replay_id": "fomc_2026_10_28_historical_1m_bar_case_study",
+  "quarantined_scratch_run": "scratch/fomc_oct28_run (preserved unmodified; excluded from live forward Shadow evidence)",
+  "market_source_provider": "yahoo_finance_1m_ohlc",
+  "instrument": "EUR/USD",
+  "bar_interval_seconds": 60,
+  "assumed_spread_pips": "0.2",
+  "sensitivity_arrival_offsets_seconds": [0, 15, 60, 180, 300],
+  "events": [
+    {
+      "event_id": "fed:monetary:fomc-20261028a:r1",
+      "source_url": "https://www.federalreserve.gov/newsevents/pressreleases/monetary20261028a.htm",
+      "official_schedule_or_display_utc": "2026-10-28T18:00:00+00:00",
+      "assumed_received_utc": "2026-10-28T18:00:05+00:00",
+      "arrival_timestamp_kind": "manual_investigator_assumption",
+      "captured_contemporaneously": false,
+      "post_hoc_manual_trim": false,
+      "notes": "Fetched post-hoc on 2026-10-29; exact live receipt timestamp on 2026-10-28 was not recorded."
+    },
+    {
+      "event_id": "investinglive:centralbank:warsh-opening-20261028:r1",
+      "source_url": "https://investinglive.com/central-banks/feds-warsh-opening-statement-inflation-progress-has-stalled-20261028/",
+      "official_schedule_or_display_utc": "2026-10-28T18:34:00+00:00",
+      "assumed_received_utc": "2026-10-28T18:34:05+00:00",
+      "arrival_timestamp_kind": "manual_investigator_assumption",
+      "captured_contemporaneously": false,
+      "post_hoc_manual_trim": false,
+      "notes": "Post-hoc article fetch; publisher display time does not establish uncached wire arrival time."
+    },
+    {
+      "event_id": "investinglive:centralbank:warsh-qa-20261028:r1",
+      "source_url": "https://investinglive.com/central-banks/feds-warsh-qa-we-did-not-discuss-raising-rates-today-20261028/",
+      "official_schedule_or_display_utc": "2026-10-28T18:39:00+00:00",
+      "assumed_received_utc": "2026-10-28T18:39:05+00:00",
+      "arrival_timestamp_kind": "manual_investigator_assumption",
+      "captured_contemporaneously": false,
+      "post_hoc_manual_trim": true,
+      "notes": "Manually sliced via trim_before_marker from final post-conference article; contemporaneous intermediate state is unverified."
+    },
+    {
+      "event_id": "investinglive:centralbank:warsh-qa-20261028:r2",
+      "source_url": "https://investinglive.com/central-banks/feds-warsh-qa-we-did-not-discuss-raising-rates-today-20261028/",
+      "official_schedule_or_display_utc": "2026-10-28T18:55:00+00:00",
+      "assumed_received_utc": "2026-10-28T18:55:05+00:00",
+      "arrival_timestamp_kind": "manual_investigator_assumption",
+      "captured_contemporaneously": false,
+      "post_hoc_manual_trim": false,
+      "notes": "Full post-hoc Q&A body assigned manual 18:55:05Z receipt assumption."
+    }
+  ],
+  "sample_bars": [
+    {"bar_open_utc": "2026-10-28T18:00:00+00:00", "open": "1.11560", "high": "1.11580", "low": "1.11410", "close": "1.11430"},
+    {"bar_open_utc": "2026-10-28T18:01:00+00:00", "open": "1.11430", "high": "1.11450", "low": "1.11380", "close": "1.11400"},
+    {"bar_open_utc": "2026-10-28T18:03:00+00:00", "open": "1.11410", "high": "1.11440", "low": "1.11370", "close": "1.11390"},
+    {"bar_open_utc": "2026-10-28T18:05:00+00:00", "open": "1.11390", "high": "1.11420", "low": "1.11350", "close": "1.11360"},
+    {"bar_open_utc": "2026-10-28T18:34:00+00:00", "open": "1.11340", "high": "1.11370", "low": "1.11290", "close": "1.11310"},
+    {"bar_open_utc": "2026-10-28T18:35:00+00:00", "open": "1.11310", "high": "1.11350", "low": "1.11280", "close": "1.11320"},
+    {"bar_open_utc": "2026-10-28T18:37:00+00:00", "open": "1.11330", "high": "1.11390", "low": "1.11320", "close": "1.11380"},
+    {"bar_open_utc": "2026-10-28T18:39:00+00:00", "open": "1.11400", "high": "1.11540", "low": "1.11390", "close": "1.11510"},
+    {"bar_open_utc": "2026-10-28T18:40:00+00:00", "open": "1.11510", "high": "1.11620", "low": "1.11490", "close": "1.11590"},
+    {"bar_open_utc": "2026-10-28T18:42:00+00:00", "open": "1.11600", "high": "1.11680", "low": "1.11580", "close": "1.11650"},
+    {"bar_open_utc": "2026-10-28T18:44:00+00:00", "open": "1.11640", "high": "1.11710", "low": "1.11620", "close": "1.11690"},
+    {"bar_open_utc": "2026-10-28T18:55:00+00:00", "open": "1.11680", "high": "1.11720", "low": "1.11640", "close": "1.11670"},
+    {"bar_open_utc": "2026-10-28T18:56:00+00:00", "open": "1.11670", "high": "1.11700", "low": "1.11630", "close": "1.11660"},
+    {"bar_open_utc": "2026-10-28T18:58:00+00:00", "open": "1.11650", "high": "1.11690", "low": "1.11610", "close": "1.11640"},
+    {"bar_open_utc": "2026-10-28T19:00:00+00:00", "open": "1.11640", "high": "1.11670", "low": "1.11600", "close": "1.11620"}
+  ]
+}

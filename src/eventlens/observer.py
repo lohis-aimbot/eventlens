@@ -9,6 +9,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, Self
 from uuid import uuid4
@@ -43,13 +44,17 @@ class SourceRecord(Contract):
     publisher_display_at: Timestamp | None = None
     scheduled_at: Timestamp | None = None
     original_published_at: Timestamp | None = None
+    modified_at: Timestamp | None = None
     importance: int | None = Field(default=None, ge=0)
     macro: MacroValues | None = None
 
     @model_validator(mode="after")
     def time_semantics(self) -> Self:
         if self.kind == "calendar" and (
-            self.scheduled_at is None or self.macro is None or self.publisher_display_at is not None
+            self.scheduled_at is None
+            or self.macro is None
+            or self.publisher_display_at is not None
+            or self.modified_at is not None
         ):
             raise ValueError(
                 "Calendar records require a schedule and values, not a publication time"
@@ -132,6 +137,11 @@ class CaptureBatch(Contract):
             for record in self.records
         ):
             raise ValueError("News display time is after receipt")
+        if any(
+            record.modified_at is not None and record.modified_at > self.received_at
+            for record in self.records
+        ):
+            raise ValueError("News modified time is after receipt")
         if any(
             enr.provider != self.provider or enr.basis != self.basis for enr in self.enrichments
         ):
@@ -706,4 +716,418 @@ class ObserverStore:
                     "SELECT COUNT(*) FROM observer_polls WHERE available_at IS NULL"
                 ).fetchone()[0],
                 "recent_polls": [json.loads(row["result"]) for row in recent],
+                "stream_health": evaluate_observer_stream_health(self.db, basis="live_poll"),
             }
+
+
+def _parse_iso_utc(raw: str | datetime | None) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.astimezone(UTC) if raw.tzinfo is not None else raw.replace(tzinfo=UTC)
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    return dt.astimezone(UTC)
+
+
+def _parse_http_date_utc(raw: str | None) -> datetime | None:
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        dt = parsedate_to_datetime(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
+def classify_timestamp_taxonomy(
+    *,
+    kind: str,
+    revision: int = 1,
+    original_published_at: datetime | str | None = None,
+    publisher_display_at: datetime | str | None = None,
+    scheduled_at: datetime | str | None = None,
+    modified_at: datetime | str | None = None,
+    received_at: datetime | str | None = None,
+    available_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Explicitly separate publication, display, schedule, modification, receipt, and availability clocks.
+
+    Rules enforced:
+    1. Unknown ``original_published_at`` remains ``None`` (never backfilled from display/schedule).
+    2. Calendar ``scheduled_at -> received_at`` is ``schedule_to_receipt_seconds``, NOT publication lag.
+    3. Revisions (``revision >= 2``) never compute lag from original ``publisher_display_at``;
+       they use ``modified_at`` when verified/present, or mark lag ``None`` (unverifiable).
+    """
+    orig_dt = _parse_iso_utc(original_published_at)
+    disp_dt = _parse_iso_utc(publisher_display_at)
+    sched_dt = _parse_iso_utc(scheduled_at)
+    mod_dt = _parse_iso_utc(modified_at)
+    rx_dt = _parse_iso_utc(received_at)
+    avail_dt = _parse_iso_utc(available_at)
+
+    def _iso(val: datetime | None) -> str | None:
+        return val.isoformat() if val is not None else None
+
+    def _delta(end: datetime | None, start: datetime | None) -> float | None:
+        if end is None or start is None:
+            return None
+        return round((end - start).total_seconds(), 3)
+
+    pub_lag = _delta(rx_dt, orig_dt) if orig_dt is not None else None
+    disp_lag: float | None = None
+    mod_lag: float | None = None
+    sched_lag: float | None = None
+    verifiable_lag: float | None = None
+    timestamp_kind: str = "unknown"
+    latency_basis: str = "unknown_source_time"
+    verifiability: str = "unknown"
+
+    if kind == "calendar" or (sched_dt is not None and disp_dt is None and mod_dt is None):
+        sched_lag = _delta(rx_dt, sched_dt)
+        if orig_dt is not None:
+            timestamp_kind = "original_published_at"
+            latency_basis = "original_publication_to_receipt"
+            verifiable_lag = pub_lag
+            verifiability = "verified_original_publication_time"
+        elif sched_dt is not None:
+            timestamp_kind = "scheduled_at"
+            latency_basis = "schedule_to_receipt"
+            verifiable_lag = None
+            verifiability = "scheduled_time_not_actual_release_time"
+    elif revision >= 2:
+        if mod_dt is not None:
+            timestamp_kind = "modified_at"
+            latency_basis = "modified_to_receipt"
+            mod_lag = _delta(rx_dt, mod_dt)
+            verifiable_lag = mod_lag
+            verifiability = "publisher_modified_timestamp"
+        else:
+            timestamp_kind = "untimestamped_revision"
+            latency_basis = "revision_without_modified_timestamp"
+            verifiable_lag = None
+            verifiability = "unverifiable_revision_origin_time"
+    else:
+        if orig_dt is not None:
+            timestamp_kind = "original_published_at"
+            latency_basis = "original_publication_to_receipt"
+            verifiable_lag = pub_lag
+            verifiability = "verified_original_publication_time"
+        elif mod_dt is not None and (disp_dt is None or mod_dt > disp_dt):
+            timestamp_kind = "modified_at"
+            latency_basis = "modified_to_receipt"
+            mod_lag = _delta(rx_dt, mod_dt)
+            verifiable_lag = mod_lag
+            verifiability = "publisher_modified_timestamp"
+        elif disp_dt is not None:
+            timestamp_kind = "publisher_display_at"
+            latency_basis = "display_to_receipt"
+            disp_lag = _delta(rx_dt, disp_dt)
+            verifiable_lag = disp_lag
+            verifiability = "unverified_publisher_display_time"
+
+    return {
+        "original_published_at": _iso(orig_dt),
+        "publisher_display_at": _iso(disp_dt),
+        "scheduled_at": _iso(sched_dt),
+        "modified_at": _iso(mod_dt),
+        "received_at": _iso(rx_dt),
+        "available_at": _iso(avail_dt),
+        "timestamp_kind": timestamp_kind,
+        "latency_basis": latency_basis,
+        "verifiability": verifiability,
+        "publication_lag_seconds": pub_lag,
+        "display_to_receipt_seconds": disp_lag,
+        "modified_to_receipt_seconds": mod_lag,
+        "schedule_to_receipt_seconds": sched_lag,
+        "verifiable_lag_seconds": verifiable_lag,
+    }
+
+
+def evaluate_observer_stream_health(
+    store_or_conn: ObserverStore | sqlite3.Connection,
+    *,
+    as_of: datetime | None = None,
+    basis: Basis = "live_poll",
+    max_cache_age_seconds: float = 60.0,
+    max_date_skew_seconds: float = 120.0,
+    max_verifiable_lag_seconds: float = 180.0,
+) -> list[dict[str, Any]]:
+    """Evaluate 4 orthogonal source-health dimensions per stream without conflating quiet markets and faults."""
+    if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
+        raise ValueError("Health evaluation cutoff requires a timezone")
+    cutoff = as_of.astimezone(UTC) if as_of is not None else None
+
+    if isinstance(store_or_conn, ObserverStore):
+        conn = store_or_conn.db
+        lock_ctx: Any = store_or_conn._lock
+    else:
+        conn = store_or_conn
+        lock_ctx = threading.RLock()
+
+    with lock_ctx:
+        poll_rows = conn.execute(
+            """SELECT poll_id, provider, stream, kind, received_at, available_at, metadata, result
+            FROM observer_polls
+            WHERE basis=?
+            ORDER BY rowid ASC""",
+            (basis,),
+        ).fetchall()
+        fail_rows = conn.execute(
+            """SELECT provider, stream, recorded_at, error
+            FROM observer_failures
+            ORDER BY rowid ASC"""
+        ).fetchall()
+        rev_rows = conn.execute(
+            """SELECT r.provider, p.stream, r.kind, r.source_id, r.revision, r.received_at,
+                      p.available_at, r.record
+            FROM observer_revisions r
+            JOIN observer_sightings s
+              ON s.source_id = r.source_id AND s.revision = r.revision
+            JOIN observer_polls p
+              ON p.poll_id = s.poll_id
+             AND p.provider = r.provider
+             AND p.basis = r.basis
+             AND p.kind = r.kind
+            WHERE r.basis=? AND s.state IN ('baseline', 'new', 'revised')
+            ORDER BY p.rowid ASC""",
+            (basis,),
+        ).fetchall()
+
+    polls_by_key: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    for row in poll_rows:
+        rx_dt = _parse_iso_utc(row["received_at"])
+        if cutoff is not None and (rx_dt is None or rx_dt > cutoff):
+            continue
+        polls_by_key.setdefault((str(row["provider"]), str(row["stream"])), []).append(row)
+
+    fails_by_key: dict[tuple[str, str], list[tuple[datetime, str]]] = {}
+    for row in fail_rows:
+        f_dt = _parse_iso_utc(row["recorded_at"])
+        if f_dt is None or (cutoff is not None and f_dt > cutoff):
+            continue
+        if basis != "live_poll" and str(row["stream"]).endswith("/synthetic"):
+            pass
+        elif basis != "live_poll":
+            continue
+        fails_by_key.setdefault((str(row["provider"]), str(row["stream"])), []).append(
+            (f_dt, str(row["error"]))
+        )
+
+    lags_by_key: dict[tuple[str, str], list[tuple[datetime, float, str, str]]] = {}
+    for row in rev_rows:
+        rx_dt = _parse_iso_utc(row["received_at"])
+        if rx_dt is None or (cutoff is not None and rx_dt > cutoff):
+            continue
+        try:
+            rec_dict = json.loads(row["record"])
+        except (TypeError, ValueError):
+            continue
+        tax = classify_timestamp_taxonomy(
+            kind=str(row["kind"]),
+            revision=int(row["revision"]),
+            original_published_at=rec_dict.get("original_published_at"),
+            publisher_display_at=rec_dict.get("publisher_display_at"),
+            scheduled_at=rec_dict.get("scheduled_at"),
+            modified_at=rec_dict.get("modified_at"),
+            received_at=rx_dt,
+            available_at=_parse_iso_utc(row["available_at"]),
+        )
+        v_lag = tax["verifiable_lag_seconds"]
+        if v_lag is not None:
+            lags_by_key.setdefault((str(row["provider"]), str(row["stream"])), []).append(
+                (
+                    rx_dt,
+                    float(v_lag),
+                    str(tax["latency_basis"]),
+                    str(tax["verifiability"]),
+                )
+            )
+
+    all_keys = sorted(set(polls_by_key) | set(fails_by_key))
+    reports: list[dict[str, Any]] = []
+    for key in all_keys:
+        provider, stream = key
+        s_polls = polls_by_key.get(key, [])
+        s_fails = fails_by_key.get(key, [])
+        s_lags = lags_by_key.get(key, [])
+
+        last_poll_dt: datetime | None = None
+        request_url: str | None = None
+        elapsed_ms: float | None = None
+        attempts: int | None = None
+        parse_error: str | None = None
+        headers: dict[str, str] = {}
+        unchanged_polls = 0
+        last_update_dt: datetime | None = None
+
+        for p_row in s_polls:
+            p_rx = _parse_iso_utc(p_row["received_at"])
+            last_poll_dt = p_rx
+            try:
+                meta = json.loads(p_row["metadata"])
+            except (TypeError, ValueError):
+                meta = {}
+            try:
+                res = json.loads(p_row["result"])
+            except (TypeError, ValueError):
+                res = {}
+            request_url = meta.get("request_url") or request_url
+            elapsed_ms = float(meta["elapsed_ms"]) if "elapsed_ms" in meta else elapsed_ms
+            attempts = int(meta["attempts"]) if "attempts" in meta else attempts
+            parse_error = meta.get("parse_error") or res.get("parse_error")
+            raw_hdrs = meta.get("response_headers") or {}
+            headers = {str(k).lower(): str(v) for k, v in raw_hdrs.items()}
+            counts = res.get("counts") or {}
+            if (
+                int(counts.get("new", 0)) > 0
+                or int(counts.get("revised", 0)) > 0
+                or int(counts.get("baseline", 0)) > 0
+            ):
+                unchanged_polls = 0
+                last_update_dt = p_rx
+            else:
+                unchanged_polls += 1
+
+        consecutive_failures = 0
+        last_fail_dt: datetime | None = None
+        last_error: str | None = None
+        for f_dt, f_err in reversed(s_fails):
+            if last_poll_dt is None or f_dt >= last_poll_dt:
+                consecutive_failures += 1
+                if last_fail_dt is None:
+                    last_fail_dt = f_dt
+                    last_error = f_err
+            else:
+                break
+
+        age_val: float | None = None
+        if "age" in headers:
+            try:
+                age_val = float(headers["age"])
+            except ValueError:
+                age_val = None
+        hdr_date_dt = _parse_http_date_utc(headers.get("date"))
+        date_skew_sec: float | None = None
+        if hdr_date_dt is not None and last_poll_dt is not None:
+            date_skew_sec = round((last_poll_dt - hdr_date_dt).total_seconds(), 2)
+
+        last_v_lag = s_lags[-1][1] if s_lags else None
+        last_v_basis = s_lags[-1][2] if s_lags else None
+        last_v_verifiability = s_lags[-1][3] if s_lags else None
+        max_v_lag = max((item[1] for item in s_lags), default=None)
+
+        ref_clock = cutoff or last_poll_dt or last_fail_dt
+        quiet_sec: float | None = None
+        if ref_clock is not None and last_update_dt is not None:
+            quiet_sec = round(max(0.0, (ref_clock - last_update_dt).total_seconds()), 2)
+
+        alerts: list[str] = []
+        health_status: Literal["healthy", "quiet_market", "degraded_cache_or_lag", "fault"] = (
+            "healthy"
+        )
+        allows_new_risk = True
+
+        if consecutive_failures > 0 or last_poll_dt is None:
+            health_status = "fault"
+            allows_new_risk = False
+            alerts.append(f"transport_failure:{last_error or 'no_successful_polls'}")
+        elif parse_error:
+            health_status = "fault"
+            allows_new_risk = False
+            alerts.append(f"parse_or_dom_fault:{parse_error}")
+        else:
+            cache_hit_header = (
+                headers.get("x-cache") or headers.get("cf-cache-status") or ""
+            ).lower()
+            if age_val is not None and age_val > max_cache_age_seconds:
+                health_status = "degraded_cache_or_lag"
+                allows_new_risk = False
+                alerts.append(f"cdn_cache_age_exceeded:{age_val}s")
+            if date_skew_sec is not None and date_skew_sec > max_date_skew_seconds:
+                health_status = "degraded_cache_or_lag"
+                allows_new_risk = False
+                alerts.append(f"http_date_header_stale:{date_skew_sec}s")
+            if "hit" in cache_hit_header and age_val is None and health_status == "healthy":
+                health_status = "degraded_cache_or_lag"
+                allows_new_risk = False
+                alerts.append(f"cdn_cache_hit_without_age:{cache_hit_header}")
+            if (
+                last_v_lag is not None
+                and last_v_verifiability
+                in {"verified_original_publication_time", "publisher_modified_timestamp"}
+                and last_v_lag > max_verifiable_lag_seconds
+                and unchanged_polls == 0
+            ):
+                health_status = "degraded_cache_or_lag"
+                allows_new_risk = False
+                alerts.append(f"verifiable_event_lag_exceeded:{last_v_lag}s")
+            elif (
+                last_v_lag is not None
+                and last_v_lag > max_verifiable_lag_seconds
+                and unchanged_polls == 0
+            ):
+                alerts.append(f"unverified_display_lag_observed:{last_v_lag}s")
+            if health_status == "healthy" and unchanged_polls > 0:
+                health_status = "quiet_market"
+
+        live_acceptance_status = (
+            "pending"
+            if provider == "investinglive"
+            and stream in {"news/live_feed", "news/central_banks_live"}
+            else "observed_or_established"
+        )
+
+        reports.append(
+            {
+                "provider": provider,
+                "stream": stream,
+                "request_url": request_url,
+                "health_status": health_status,
+                "allows_new_risk": allows_new_risk,
+                "alerts": alerts,
+                "live_forward_acceptance_status": live_acceptance_status,
+                "http_transport": {
+                    "last_poll_at": last_poll_dt.isoformat() if last_poll_dt else None,
+                    "elapsed_ms": elapsed_ms,
+                    "attempts": attempts,
+                    "consecutive_failures": consecutive_failures,
+                    "last_failure_at": last_fail_dt.isoformat() if last_fail_dt else None,
+                    "last_error": last_error,
+                    "last_parse_error": parse_error,
+                },
+                "cache_observation": {
+                    "x_cache": headers.get("x-cache"),
+                    "cf_cache_status": headers.get("cf-cache-status"),
+                    "age_seconds": age_val,
+                    "cache_control": headers.get("cache-control"),
+                    "header_date": headers.get("date"),
+                    "header_date_skew_seconds": date_skew_sec,
+                    "cache_miss_proves_zero_lag": False,
+                },
+                "content_activity": {
+                    "total_polls": len(s_polls),
+                    "unchanged_polls_since_update": unchanged_polls,
+                    "last_content_update_at": (
+                        last_update_dt.isoformat() if last_update_dt else None
+                    ),
+                    "quiet_duration_seconds": quiet_sec,
+                },
+                "verifiable_lag": {
+                    "last_verifiable_lag_seconds": last_v_lag,
+                    "max_verifiable_lag_seconds": max_v_lag,
+                    "lag_basis": last_v_basis,
+                    "verifiability": last_v_verifiability,
+                },
+            }
+        )
+    return reports

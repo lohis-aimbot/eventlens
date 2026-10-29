@@ -3,17 +3,24 @@
 import fcntl
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Callable, Literal, Self
 from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from .contracts import Contract, Identifier, MarketSnapshot, Quote, Timestamp
+from .contracts import (
+    Contract,
+    Identifier,
+    MarketSnapshot,
+    PriceTrajectorySummary,
+    Quote,
+    Timestamp,
+)
 from .observer import Basis, ObserverStore
 
 
@@ -306,6 +313,39 @@ class QuoteStore:
                 commission_type=start.commission_type,
             )
 
+    def recent_mids(
+        self,
+        symbol: str,
+        cutoff: datetime,
+        *,
+        lookback: timedelta = timedelta(minutes=38),
+        basis: Basis = "live_poll",
+    ) -> tuple[tuple[datetime, Decimal], ...]:
+        """Return causal (received_at, mid_price) samples strictly published at or before cutoff."""
+        with self._lock:
+            cutoff_utc = utc(cutoff)
+            earliest_utc = cutoff_utc - max(timedelta(0), lookback)
+            rows = self.db.execute(
+                """SELECT received_at, quote FROM quote_observations
+                WHERE symbol=? AND basis=?
+                  AND available_at IS NOT NULL AND available_at <= ?
+                  AND received_at >= ? AND received_at <= ?
+                ORDER BY received_at ASC, sequence ASC""",
+                (
+                    symbol,
+                    basis,
+                    cutoff_utc.isoformat(),
+                    earliest_utc.isoformat(),
+                    cutoff_utc.isoformat(),
+                ),
+            ).fetchall()
+            out: list[tuple[datetime, Decimal]] = []
+            for row in rows:
+                q = BridgeQuote.model_validate_json(row["quote"])
+                mid = (q.bid + q.ask) / Decimal("2")
+                out.append((utc(datetime.fromisoformat(row["received_at"])), mid))
+            return tuple(out)
+
     def active_session_remaining_seconds(
         self, cutoff: datetime, *, symbol: str = "EURUSD", basis: Basis = "live_poll"
     ) -> float | None:
@@ -538,6 +578,59 @@ def align_news(
     }
 
 
+EURUSD_PIP = Decimal("0.0001")
+
+
+def compute_price_trajectory(
+    samples: Sequence[tuple[datetime, Decimal]],
+    cutoff: datetime,
+    *,
+    instrument: str = "EUR/USD",
+) -> PriceTrajectorySummary | None:
+    """Compute causal pip changes and range bounds strictly from observations <= cutoff."""
+    cutoff_utc = utc(cutoff)
+    causal = sorted(
+        ((utc(ts), mid) for ts, mid in samples if utc(ts) <= cutoff_utc and mid > Decimal("0")),
+        key=lambda item: item[0],
+    )
+    if not causal:
+        return None
+    current_mid = causal[-1][1]
+
+    def _horizon_delta_pips(target_sec: float, min_sec: float, max_sec: float) -> Decimal | None:
+        best_mid: Decimal | None = None
+        best_gap: float | None = None
+        for ts, mid in causal:
+            age_s = (cutoff_utc - ts).total_seconds()
+            if min_sec <= age_s <= max_sec:
+                gap = abs(age_s - target_sec)
+                if best_gap is None or gap < best_gap:
+                    best_gap = gap
+                    best_mid = mid
+        if best_mid is None:
+            return None
+        return ((current_mid - best_mid) / EURUSD_PIP).quantize(
+            Decimal("0.1"), rounding=ROUND_HALF_UP
+        )
+
+    mids_15m = [mid for ts, mid in causal if (cutoff_utc - ts).total_seconds() <= 900.0]
+    mids_30m = [mid for ts, mid in causal if (cutoff_utc - ts).total_seconds() <= 1800.0]
+    return PriceTrajectorySummary(
+        instrument=instrument,
+        as_of=cutoff_utc,
+        current_mid=current_mid,
+        change_1m_pips=_horizon_delta_pips(60.0, 35.0, 120.0),
+        change_5m_pips=_horizon_delta_pips(300.0, 210.0, 420.0),
+        change_15m_pips=_horizon_delta_pips(900.0, 660.0, 1140.0),
+        change_30m_pips=_horizon_delta_pips(1800.0, 1350.0, 2250.0),
+        window_15m_high_mid=max(mids_15m) if mids_15m else None,
+        window_15m_low_mid=min(mids_15m) if mids_15m else None,
+        window_30m_high_mid=max(mids_30m) if mids_30m else None,
+        window_30m_low_mid=min(mids_30m) if mids_30m else None,
+        sample_count_30m=len(mids_30m),
+    )
+
+
 def build_market_snapshot(
     quotes: QuoteStore,
     cutoff: datetime,
@@ -555,6 +648,8 @@ def build_market_snapshot(
             as_of=cutoff,
             quotes=(),
         )
+    samples = quotes.recent_mids(symbol, cutoff, basis=basis)
+    trajectory = compute_price_trajectory(samples, cutoff, instrument=instrument)
     return MarketSnapshot(
         snapshot_id=f"quote:{obs.quote.session_id}:{obs.quote.sequence}",
         as_of=cutoff,
@@ -573,10 +668,8 @@ def build_market_snapshot(
                 commission_type=obs.commission_type,
             ),
         ),
+        price_trajectory=trajectory,
     )
-
-
-EURUSD_PIP = Decimal("0.0001")
 
 
 class QuoteQualityPolicy(Contract):

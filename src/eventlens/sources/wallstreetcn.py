@@ -208,6 +208,8 @@ def _record(item: Any, kind: Kind, received: datetime, day: date | None) -> Sour
     )
     text = f"{macro.country or ''} {title}\nScheduled: {scheduled.isoformat()}\n"
     text += json.dumps(macro.model_dump(), ensure_ascii=False, sort_keys=True)
+    if macro.reported_forecast is None:
+        text += "\nConsensus Forecast: MISSING (do not substitute previous)"
     foresight = _plain(item.get("foresight") or "")
     if foresight:
         text += "\n" + foresight
@@ -418,9 +420,16 @@ def revision_to_event(revision: StoredRevision) -> Event:
     if record.kind == "calendar":
         source_time = record.original_published_at or record.scheduled_at or revision.received_at
         source_type = "macro"
+    elif revision.revision >= 2:
+        # Never attribute a revised item's modification time to r1's original publisher_display_at.
+        source_time = record.modified_at or revision.received_at
+        source_type = "news"
     else:
         source_time = (
-            record.original_published_at or record.publisher_display_at or revision.received_at
+            record.original_published_at
+            or record.modified_at
+            or record.publisher_display_at
+            or revision.received_at
         )
         source_type = "news"
     title = record.title.strip()

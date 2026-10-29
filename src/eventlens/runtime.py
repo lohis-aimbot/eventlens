@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Sequence
@@ -12,6 +13,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import uuid4
+
+from pydantic import Field
 
 from .contracts import (
     AgentContext,
@@ -24,11 +27,13 @@ from .contracts import (
     MarketSnapshot,
     MemorySnapshot,
     PortfolioSnapshot,
+    ReviewConditionEvaluation,
+    ReviewContext,
     RiskAssessment,
     Thesis,
 )
 from .memory import ThesisMemory
-from .observer import Basis, ObserverStore
+from .observer import Basis, ObserverStore, evaluate_observer_stream_health
 from .quotes import QuoteStore, build_market_snapshot, validate_market_quote
 from .sources.events import EventFilter
 from .sources.wallstreetcn import CaptureError, WallStreetCNFilter, WallStreetCNSource
@@ -66,6 +71,104 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("Runtime requires timezone-aware timestamps")
     return value.astimezone(UTC)
+
+
+_STRUCTURED_PRICE_RULE_RE = re.compile(
+    r"^\s*(EUR/USD|EURUSD)\s*(?:(mid|bid|ask)\s*)?(>=|<=|>|<)\s*(\d+(?:\.\d+)?)\s*$",
+    re.IGNORECASE,
+)
+
+
+class PriceTriggerCondition(Contract):
+    """Unambiguous structured EUR/USD price trigger; prose conditions never become this type."""
+
+    instrument: Identifier = "EUR/USD"
+    reference: Literal["mid", "bid", "ask"] = "mid"
+    operator: Literal[">=", "<=", ">", "<"]
+    level: Decimal = Field(gt=0)
+
+    def matches(self, *, bid: Decimal, ask: Decimal, mid: Decimal) -> tuple[bool, Decimal]:
+        observed = mid if self.reference == "mid" else (bid if self.reference == "bid" else ask)
+        if self.operator == ">=":
+            return observed >= self.level, observed
+        if self.operator == "<=":
+            return observed <= self.level, observed
+        if self.operator == ">":
+            return observed > self.level, observed
+        return observed < self.level, observed
+
+
+class ConditionParseResult(Contract):
+    raw_condition: str
+    executable: bool
+    status: Literal["executable_price_rule", "unexecutable_natural_language"]
+    condition: PriceTriggerCondition | None = None
+    detail: str
+
+
+def parse_invalidation_condition(raw: str) -> ConditionParseResult:
+    """Strictly separate single-clause EUR/USD price comparisons from natural-language conditions."""
+    if not raw or not raw.strip():
+        return ConditionParseResult(
+            raw_condition=raw,
+            executable=False,
+            status="unexecutable_natural_language",
+            condition=None,
+            detail="Empty condition cannot be executed as a structured price rule.",
+        )
+    match = _STRUCTURED_PRICE_RULE_RE.match(raw)
+    if match is None:
+        return ConditionParseResult(
+            raw_condition=raw,
+            executable=False,
+            status="unexecutable_natural_language",
+            condition=None,
+            detail="Natural-language or unsupported multi-clause/instrument condition; not auto-executable.",
+        )
+    raw_ref = (match.group(2) or "mid").lower()
+    ref: Literal["mid", "bid", "ask"] = (
+        "bid" if raw_ref == "bid" else ("ask" if raw_ref == "ask" else "mid")
+    )
+    raw_op = match.group(3)
+    op: Literal[">=", "<=", ">", "<"] = (
+        ">=" if raw_op == ">=" else ("<=" if raw_op == "<=" else (">" if raw_op == ">" else "<"))
+    )
+    level = Decimal(match.group(4))
+    if level <= Decimal("0"):
+        return ConditionParseResult(
+            raw_condition=raw,
+            executable=False,
+            status="unexecutable_natural_language",
+            condition=None,
+            detail="Non-positive price level is not executable.",
+        )
+    cond = PriceTriggerCondition(
+        instrument="EUR/USD",
+        reference=ref,
+        operator=op,
+        level=level,
+    )
+    return ConditionParseResult(
+        raw_condition=raw,
+        executable=True,
+        status="executable_price_rule",
+        condition=cond,
+        detail=f"Executable structured rule: EUR/USD {ref} {op} {level}",
+    )
+
+
+class ReviewPolicy(Contract):
+    """Operator-controlled policy for stateful thesis re-evaluation with dedup, cooldown, and call budgets."""
+
+    enabled: bool = False
+    enable_review_at: bool = True
+    enable_price_conditions: bool = True
+    periodic_review_seconds: float | None = Field(default=None, gt=0)
+    breakout_excursion_pips: Decimal | None = Field(default=None, gt=0)
+    structured_price_rules: tuple[str, ...] = ()
+    cooldown_seconds: float = Field(default=120.0, ge=0)
+    max_reviews_per_thesis: int = Field(default=3, ge=1)
+    max_total_review_calls: int = Field(default=10, ge=1)
 
 
 class AuditSink(Protocol):
@@ -153,6 +256,28 @@ class SQLiteRuntimeStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_runtime_bundle_members
                     ON runtime_event_bundles(bundle_event_id);
+                CREATE TABLE IF NOT EXISTS runtime_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    dedup_key TEXT NOT NULL UNIQUE,
+                    trigger_kind TEXT NOT NULL,
+                    trigger_detail TEXT NOT NULL,
+                    thesis_id TEXT NOT NULL,
+                    thesis_revision INTEGER NOT NULL,
+                    origin_event_id TEXT NOT NULL,
+                    origin_source_timestamp TEXT,
+                    origin_received_timestamp TEXT NOT NULL,
+                    origin_event_age_seconds REAL NOT NULL,
+                    triggered_at TEXT NOT NULL,
+                    market_snapshot_id TEXT NOT NULL,
+                    market_mid TEXT NOT NULL,
+                    condition_evaluations_json TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    decision_id TEXT,
+                    model_version TEXT,
+                    portfolio_action TEXT,
+                    outcome_reason TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             runner_cols = {
@@ -636,6 +761,7 @@ class SQLiteRuntimeStore:
                     "SELECT record_json FROM runtime_audit_log ORDER BY seq"
                 ).fetchall()
             ]
+            reviews = self.list_reviews()
             return {
                 "runner": self.runner_status(),
                 "event_count": len(events),
@@ -651,9 +777,293 @@ class SQLiteRuntimeStore:
                     "receipt_to_fill_ms": fill_lags,
                 },
                 "events": events,
+                "review_count": len(reviews),
+                "reviews": reviews,
                 "audit_count": len(audits),
                 "audit_records": audits,
             }
+
+    def has_review_dedup_key(self, dedup_key: str) -> bool:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM runtime_reviews WHERE dedup_key=?",
+                (dedup_key,),
+            ).fetchone()
+            return row is not None
+
+    def count_reviews(self, *, thesis_id: str | None = None) -> int:
+        with self._lock:
+            if thesis_id is None:
+                row = self.db.execute("SELECT COUNT(*) AS cnt FROM runtime_reviews").fetchone()
+            else:
+                row = self.db.execute(
+                    "SELECT COUNT(*) AS cnt FROM runtime_reviews WHERE thesis_id=?",
+                    (thesis_id,),
+                ).fetchone()
+            return int(row["cnt"]) if row is not None else 0
+
+    def last_review_triggered_at(self, *, thesis_id: str | None = None) -> datetime | None:
+        with self._lock:
+            if thesis_id is None:
+                row = self.db.execute(
+                    "SELECT triggered_at FROM runtime_reviews ORDER BY triggered_at DESC LIMIT 1"
+                ).fetchone()
+            else:
+                row = self.db.execute(
+                    "SELECT triggered_at FROM runtime_reviews WHERE thesis_id=? ORDER BY triggered_at DESC LIMIT 1",
+                    (thesis_id,),
+                ).fetchone()
+            if row is None or not row["triggered_at"]:
+                return None
+            return _utc(datetime.fromisoformat(str(row["triggered_at"])))
+
+    def record_review_started(
+        self,
+        *,
+        review_id: str,
+        dedup_key: str,
+        review_context: ReviewContext,
+        market_snapshot_id: str,
+        market_mid: Decimal,
+        now: datetime,
+    ) -> None:
+        now_utc = _utc(now)
+        with self._lock, self.db:
+            self.db.execute(
+                """INSERT INTO runtime_reviews VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?
+                )""",
+                (
+                    review_id,
+                    dedup_key,
+                    review_context.trigger_kind,
+                    review_context.trigger_detail,
+                    review_context.thesis_id,
+                    review_context.thesis_revision,
+                    review_context.origin_event_id,
+                    review_context.origin_source_timestamp.isoformat()
+                    if review_context.origin_source_timestamp is not None
+                    else None,
+                    review_context.origin_received_timestamp.isoformat(),
+                    review_context.origin_event_age_seconds,
+                    review_context.triggered_at.isoformat(),
+                    market_snapshot_id,
+                    str(market_mid),
+                    json.dumps(
+                        [c.model_dump(mode="json") for c in review_context.condition_evaluations],
+                        ensure_ascii=False,
+                    ),
+                    "started",
+                    now_utc.isoformat(),
+                ),
+            )
+
+    def update_review_outcome(
+        self,
+        *,
+        review_id: str,
+        state: str,
+        outcome_reason: str,
+        now: datetime,
+        decision: AgentDecision | None = None,
+    ) -> None:
+        now_utc = _utc(now)
+        with self._lock, self.db:
+            self.db.execute(
+                """UPDATE runtime_reviews
+                SET state=?,
+                    decision_id=COALESCE(?, decision_id),
+                    model_version=COALESCE(?, model_version),
+                    portfolio_action=COALESCE(?, portfolio_action),
+                    outcome_reason=?,
+                    updated_at=?
+                WHERE review_id=?""",
+                (
+                    state,
+                    decision.decision_id if decision is not None else None,
+                    decision.model_version if decision is not None else None,
+                    decision.portfolio_action if decision is not None else None,
+                    outcome_reason,
+                    now_utc.isoformat(),
+                    review_id,
+                ),
+            )
+
+    def list_reviews(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT * FROM runtime_reviews ORDER BY triggered_at ASC, rowid ASC"
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                raw_conds = d.pop("condition_evaluations_json", "[]")
+                try:
+                    d["condition_evaluations"] = json.loads(raw_conds)
+                except (ValueError, TypeError):
+                    d["condition_evaluations"] = []
+                out.append(d)
+            return out
+
+
+def inspect_runtime_store_readonly(path: Path) -> dict[str, Any]:
+    """Read-only runtime status and summary inspection: never creates files or mutates schema/rows."""
+    resolved = path.resolve()
+    empty_summary = {
+        "runner": {"status": "missing_database"},
+        "event_count": 0,
+        "state_counts": {},
+        "reason_counts": {},
+        "model_calls": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "latency_summary": {
+            "receipt_to_decision_samples": 0,
+            "receipt_to_decision_ms": [],
+            "receipt_to_fill_samples": 0,
+            "receipt_to_fill_ms": [],
+        },
+        "events": [],
+        "review_count": 0,
+        "reviews": [],
+        "audit_count": 0,
+        "audit_records": [],
+    }
+    if not resolved.is_file():
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "missing_database",
+            "detail": f"Runtime database does not exist: {resolved}",
+            "runner": {"status": "missing_database"},
+            "summary_report": empty_summary,
+        }
+    try:
+        conn = sqlite3.connect(
+            resolved.as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+    except sqlite3.Error as exc:
+        err_summary = dict(empty_summary)
+        err_summary["runner"] = {"status": "readonly_open_failed"}
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "readonly_open_failed",
+            "detail": str(exc),
+            "runner": {"status": "readonly_open_failed"},
+            "summary_report": err_summary,
+        }
+
+    conn.row_factory = sqlite3.Row
+    try:
+        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
+        tables = {
+            str(r["name"])
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        required_tables = {"runtime_events", "runtime_audit_log", "shadow_runner_state"}
+        if app_id != APPLICATION_ID or not required_tables.issubset(tables):
+            deg_runner = {"status": "unsupported_schema_readonly"}
+            deg_summary = dict(empty_summary)
+            deg_summary["runner"] = deg_runner
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "unsupported_schema_readonly",
+                "detail": "Runtime tables missing or incompatible; read-only query will not migrate.",
+                "runner": deg_runner,
+                "summary_report": deg_summary,
+            }
+
+        runner_row = conn.execute("SELECT * FROM shadow_runner_state WHERE id=1").fetchone()
+        if runner_row is None:
+            runner_data: dict[str, Any] = {"status": "idle"}
+        else:
+            runner_data = dict(runner_row)
+            if runner_data.get("summary_json"):
+                try:
+                    runner_data["summary"] = json.loads(runner_data.pop("summary_json"))
+                except (ValueError, TypeError):
+                    runner_data["summary"] = None
+            else:
+                runner_data.pop("summary_json", None)
+                runner_data["summary"] = None
+
+        events = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT event_id, source_reference, state, reason, attempts, first_seen_at, updated_at, received_at, decision_id, memory_version, assessment_id, execution_id, input_tokens, output_tokens, receipt_to_decision_ms, receipt_to_fill_ms FROM runtime_events ORDER BY first_seen_at"
+            ).fetchall()
+        ]
+        state_counts: dict[str, int] = {}
+        reason_counts: dict[str, int] = {}
+        decision_lags: list[int] = []
+        fill_lags: list[int] = []
+        total_input_tokens = 0
+        total_output_tokens = 0
+        model_calls = 0
+        for ev in events:
+            state_counts[ev["state"]] = state_counts.get(ev["state"], 0) + 1
+            reason_counts[ev["reason"]] = reason_counts.get(ev["reason"], 0) + 1
+            total_input_tokens += int(ev["input_tokens"] or 0)
+            total_output_tokens += int(ev["output_tokens"] or 0)
+            if ev["decision_id"] is not None:
+                model_calls += 1
+            if ev["receipt_to_decision_ms"] is not None:
+                decision_lags.append(int(ev["receipt_to_decision_ms"]))
+            if ev["receipt_to_fill_ms"] is not None:
+                fill_lags.append(int(ev["receipt_to_fill_ms"]))
+        audits = [
+            json.loads(r["record_json"])
+            for r in conn.execute(
+                "SELECT record_json FROM runtime_audit_log ORDER BY seq"
+            ).fetchall()
+        ]
+        reviews: list[dict[str, Any]] = []
+        if "runtime_reviews" in tables:
+            for r in conn.execute(
+                "SELECT * FROM runtime_reviews ORDER BY triggered_at ASC, rowid ASC"
+            ).fetchall():
+                d = dict(r)
+                raw_conds = d.pop("condition_evaluations_json", "[]")
+                try:
+                    d["condition_evaluations"] = json.loads(raw_conds)
+                except (ValueError, TypeError):
+                    d["condition_evaluations"] = []
+                reviews.append(d)
+
+        summary = {
+            "runner": runner_data,
+            "event_count": len(events),
+            "state_counts": state_counts,
+            "reason_counts": reason_counts,
+            "model_calls": model_calls,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "latency_summary": {
+                "receipt_to_decision_samples": len(decision_lags),
+                "receipt_to_decision_ms": decision_lags,
+                "receipt_to_fill_samples": len(fill_lags),
+                "receipt_to_fill_ms": fill_lags,
+            },
+            "events": events,
+            "review_count": len(reviews),
+            "reviews": reviews,
+            "audit_count": len(audits),
+            "audit_records": audits,
+        }
+        return {
+            "readonly": True,
+            "degraded": False,
+            "status": "ok",
+            "detail": None,
+            "runner": runner_data,
+            "summary_report": summary,
+        }
+    finally:
+        conn.close()
 
 
 class RuntimeCycleResult(Contract):
@@ -711,7 +1121,7 @@ class IntradayEventRuntime:
         self,
         *,
         memory: ThesisMemory,
-        portfolio_state: PortfolioState,
+        portfolio_state: PortfolioState | None = None,
         market_provider: Callable[[datetime], MarketSnapshot],
         agent: TradingAgent,
         target_validator: DeterministicTargetValidator | None = None,
@@ -722,10 +1132,19 @@ class IntradayEventRuntime:
         event_filter: EventFilter | None = None,
         max_recovery_event_age: timedelta = timedelta(seconds=60),
         max_quote_wait_age: timedelta = timedelta(seconds=60),
+        max_actionable_event_lag_seconds: float | None = None,
+        source_health_provider: Callable[[Event, datetime], str | None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.memory = memory
-        self.portfolio_state = portfolio_state
+        if portfolio_state is not None:
+            self.portfolio_state = portfolio_state
+        elif hasattr(shadow_executor, "snapshot"):
+            self.portfolio_state = shadow_executor  # type: ignore[assignment]
+        else:
+            raise ValueError(
+                "portfolio_state is required when shadow_executor does not implement snapshot()"
+            )
         self.market_provider = market_provider
         self.agent = agent
         self.target_validator = target_validator or DeterministicTargetValidator()
@@ -741,6 +1160,8 @@ class IntradayEventRuntime:
         self.event_filter = event_filter
         self.max_recovery_event_age = max_recovery_event_age
         self.max_quote_wait_age = max_quote_wait_age
+        self.max_actionable_event_lag_seconds = max_actionable_event_lag_seconds
+        self.source_health_provider = source_health_provider
         self.clock = clock
         self._lock = asyncio.Lock()
 
@@ -753,9 +1174,14 @@ class IntradayEventRuntime:
     async def handle(self, event: Event) -> None:
         await self.run_cycle(event)
 
-    async def run_cycle(self, event: Event) -> RuntimeCycleResult:
+    async def run_cycle(
+        self,
+        event: Event,
+        *,
+        review_context: ReviewContext | None = None,
+    ) -> RuntimeCycleResult:
         async with self._lock:
-            res = await self._run_cycle_locked(event)
+            res = await self._run_cycle_locked(event, review_context=review_context)
             if self.state_store is not None and res.status in TERMINAL_EVENT_STATES:
                 self.state_store.finalize_bundle_members(
                     event.event_id,
@@ -763,7 +1189,12 @@ class IntradayEventRuntime:
                 )
             return res
 
-    async def _run_cycle_locked(self, event: Event) -> RuntimeCycleResult:
+    async def _run_cycle_locked(
+        self,
+        event: Event,
+        *,
+        review_context: ReviewContext | None = None,
+    ) -> RuntimeCycleResult:
         now = _utc(self.clock())
         cycle_audit: list[AuditRecord] = []
         cost_version = (
@@ -887,8 +1318,9 @@ class IntradayEventRuntime:
             await log("collector", "event_persisted", event.source_reference)
 
         # 4. Run filter only if not already filtered_accepted / awaiting_market_quote / reasoning_failed
+        is_internal_review = review_context is not None or event.source_type == "internal_review"
         if existing_row is None or existing_row["state"] == "received":
-            if self.event_filter is not None:
+            if self.event_filter is not None and not is_internal_review:
                 if hasattr(self.event_filter, "unmark_seen"):
                     self.event_filter.unmark_seen(event.event_id)
                 filter_result = await self.event_filter.evaluate(event)
@@ -916,17 +1348,26 @@ class IntradayEventRuntime:
                     received_at=event.received_timestamp,
                     now=_utc(self.clock()),
                     state="filtered_accepted",
-                    reason="eligible_event",
+                    reason="internal_stateful_review" if is_internal_review else "eligible_event",
                 )
-            await log("filter", "accept", "eligible_event")
+            await log(
+                "filter",
+                "accept",
+                "internal_stateful_review" if is_internal_review else "eligible_event",
+            )
 
         # 4b. If event was waiting for a valid quote and its quote-wait validity window has elapsed,
         # expire it deterministically without ever calling the model (even if quotes later recovered).
         pre_now = _utc(self.clock())
+        wait_anchor = (
+            _utc(review_context.triggered_at)
+            if review_context is not None
+            else _utc(event.received_timestamp)
+        )
         if (
             existing_row is not None
             and existing_row["state"] == "awaiting_market_quote"
-            and (pre_now - _utc(event.received_timestamp)) > self.max_quote_wait_age
+            and (pre_now - wait_anchor) > self.max_quote_wait_age
         ):
             exp_reason = "event_expired_awaiting_quote:validity_window_elapsed"
             if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
@@ -960,12 +1401,15 @@ class IntradayEventRuntime:
             pre_market.as_of,
             pre_portfolio.as_of,
         )
+        if review_context is not None:
+            pre_as_of = max(pre_as_of, _utc(review_context.triggered_at))
         context = AgentContext(
             event=event,
             memory=memory_snap,
             portfolio=pre_portfolio,
             market=pre_market,
             as_of=pre_as_of,
+            review_context=review_context,
         )
         context_json = context.model_dump_json()
         pre_llm_state = (
@@ -1005,7 +1449,7 @@ class IntradayEventRuntime:
             if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
                 self.event_filter.unmark_seen(event.event_id)
             now_q = _utc(self.clock())
-            if (now_q - _utc(event.received_timestamp)) > self.max_quote_wait_age:
+            if (now_q - wait_anchor) > self.max_quote_wait_age:
                 exp_reason = f"event_expired_awaiting_quote:{exc.quote_reason}"
                 if self.state_store is not None:
                     self.state_store.upsert_event_state(
@@ -1462,11 +1906,29 @@ class IntradayEventRuntime:
         await log("runtime", "target_validated", decision.target.target_id, decision=decision)
 
         # Assess hard risk using the refreshed post-LLM market and portfolio snapshots
+        stale_source_reason: str | None = None
+        if event.source_type != "internal_review" and event.source != "internal_stateful_review":
+            if self.source_health_provider is not None:
+                stale_source_reason = self.source_health_provider(event, post_now)
+            if (
+                stale_source_reason is None
+                and self.max_actionable_event_lag_seconds is not None
+                and event.source_timestamp is not None
+            ):
+                lag_s = (
+                    _utc(event.received_timestamp) - _utc(event.source_timestamp)
+                ).total_seconds()
+                if lag_s > self.max_actionable_event_lag_seconds:
+                    stale_source_reason = (
+                        f"event_receipt_lag_{round(lag_s, 1)}s_exceeds_"
+                        f"{self.max_actionable_event_lag_seconds}s"
+                    )
         assessment = await self.risk_engine.assess(
             decision,
             post_portfolio,
             post_market,
             prior_theses=prior_theses,
+            source_stale_reason=stale_source_reason,
         )
         if self.state_store is not None:
             self.state_store.upsert_event_state(
@@ -1836,6 +2298,7 @@ class ShadowRunner:
         strict_window_coverage: bool = False,
         close_on_stop: bool = False,
         confirm_handoff: bool = False,
+        review_policy: ReviewPolicy = ReviewPolicy(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.runtime = runtime
@@ -1864,7 +2327,13 @@ class ShadowRunner:
         self.strict_window_coverage = strict_window_coverage
         self.close_on_stop = close_on_stop
         self.confirm_handoff = confirm_handoff
+        self.review_policy = ReviewPolicy.model_validate_json(review_policy.model_dump_json())
         self.clock = clock
+        self._thesis_ref_mids: dict[tuple[str, int], Decimal] = {}
+        self._in_memory_review_dedup: set[str] = set()
+        self._in_memory_review_times: dict[str, list[datetime]] = {}
+        if self.observer_store is not None and self.runtime.source_health_provider is None:
+            self.runtime.source_health_provider = self._check_event_source_health
         self._stop_event = asyncio.Event()
         self._drain_stop_event = asyncio.Event()
         self._event_wakeup = asyncio.Event()
@@ -2171,16 +2640,43 @@ class ShadowRunner:
         """Scan ObserverStore for unprocessed revisions, reconcile bound/in-progress cycles, bundle simultaneous releases durably, and run cycles."""
         if self.observer_store is None:
             return ()
+        ostore = self.observer_store
         from .sources.english_tier1 import (
             EURUSDEventFilter,
             EventBundle,
             bundle_simultaneous_events,
+            format_revision_marginal_delta,
         )
         from .sources.wallstreetcn import revision_event_id
 
         now = _utc(self.clock())
+
+        async def _enrich_revision_delta(rev_item: Any, ev_item: Event) -> Event:
+            if rev_item.revision < 2 or rev_item.record.kind != "news":
+                return ev_item
+            if "[REVISION r" in ev_item.raw_text:
+                return ev_item
+            hist = await asyncio.to_thread(
+                ostore.history,
+                rev_item.record.kind,
+                rev_item.record.source_id,
+                provider=rev_item.provider,
+                basis=rev_item.basis,
+                as_of=now,
+            )
+            prior_revs = [h for h in hist if h.revision < rev_item.revision]
+            prior_rev = prior_revs[-1] if prior_revs else None
+            delta_block = format_revision_marginal_delta(rev_item, prior_rev)
+            if not delta_block:
+                return ev_item
+            return ev_item.model_copy(
+                update={
+                    "raw_text": f"{delta_block}\n\n[FULL UPDATED ARTICLE TEXT]\n{ev_item.raw_text}"
+                }
+            )
+
         revisions = await asyncio.to_thread(
-            self.observer_store.revisions,
+            ostore.revisions,
             basis=self.basis,
             as_of=now,
             limit=200,
@@ -2278,6 +2774,7 @@ class ShadowRunner:
                         reason=f_res.reason,
                     )
                 continue
+            ev = await _enrich_revision_delta(rev, ev)
             eligible_pairs.append((rev, ev))
 
         results: list[RuntimeCycleResult] = []
@@ -2367,6 +2864,8 @@ class ShadowRunner:
                     _, p_ev = active_filter.evaluate_revision(
                         revisions_by_ev_id[p_id], checked_at=_utc(self.clock())
                     )
+                    if p_ev is not None:
+                        p_ev = await _enrich_revision_delta(revisions_by_ev_id[p_id], p_ev)
                 if p_ev is None:
                     continue
                 await _execute_event_cycle(p_ev, is_bundled=has_members)
@@ -2411,6 +2910,307 @@ class ShadowRunner:
                         )
                         continue
             await _execute_event_cycle(ev, is_bundled=bundle.is_bundled)
+        return tuple(results)
+
+    def _check_event_source_health(self, event: Event, as_of: datetime) -> str | None:
+        if self.observer_store is None:
+            return None
+        provider_prefix = event.event_id.split(":", 1)[0] if ":" in event.event_id else ""
+        if not provider_prefix:
+            provider_prefix = event.source.split("_", 1)[0]
+        reports = evaluate_observer_stream_health(
+            self.observer_store,
+            as_of=as_of,
+            basis=self.basis,
+        )
+        matching = [r for r in reports if r["provider"] == provider_prefix]
+        for rep in matching:
+            if not rep.get("allows_new_risk", True):
+                return f"{rep['provider']}:{rep['stream']}:{rep['health_status']}"
+        return None
+
+    async def step_reviews(self) -> tuple[RuntimeCycleResult, ...]:
+        """Evaluate stateful thesis triggers (structured price levels, review_at, excursion, periodic) without faking news."""
+        if not self.review_policy.enabled:
+            return ()
+
+        def _is_stopped(ts: datetime) -> bool:
+            if self._stop_event.is_set() or self._active_stop_reason(ts) is not None:
+                return True
+            if (
+                self.runtime.state_store is not None
+                and self.runtime.state_store.active_stop_reason(ts) is not None
+            ):
+                return True
+            return False
+
+        now = _utc(self.clock())
+        if _is_stopped(now):
+            return ()
+
+        market = await asyncio.to_thread(self._current_market)
+        qc = validate_market_quote(
+            market,
+            as_of=now,
+            policy=self.runtime.risk_engine.policy.quote_quality_policy("EUR/USD"),
+        )
+        if not qc.valid:
+            return ()
+        quote = next((q for q in market.quotes if q.instrument == "EUR/USD"), None)
+        if quote is None:
+            return ()
+        bid = quote.bid
+        ask = quote.ask
+        mid = (bid + ask) / Decimal("2")
+
+        store = self.runtime.state_store
+
+        def _total_reviews() -> int:
+            if store is not None:
+                return store.count_reviews()
+            return sum(len(v) for v in self._in_memory_review_times.values())
+
+        def _thesis_reviews(tid: str) -> int:
+            if store is not None:
+                return store.count_reviews(thesis_id=tid)
+            return len(self._in_memory_review_times.get(tid, ()))
+
+        def _last_thesis_trigger(tid: str) -> datetime | None:
+            if store is not None:
+                return store.last_review_triggered_at(thesis_id=tid)
+            ts_list = self._in_memory_review_times.get(tid)
+            return ts_list[-1] if ts_list else None
+
+        def _has_dedup(dkey: str) -> bool:
+            if store is not None:
+                return store.has_review_dedup_key(dkey)
+            return dkey in self._in_memory_review_dedup
+
+        if _total_reviews() >= self.review_policy.max_total_review_calls:
+            return ()
+
+        mem_snap = await self.runtime.memory.snapshot(as_of=now)
+        results: list[RuntimeCycleResult] = []
+
+        for thesis in mem_snap.theses:
+            now_iter = _utc(self.clock())
+            if _is_stopped(now_iter):
+                break
+            if _total_reviews() >= self.review_policy.max_total_review_calls:
+                break
+            if thesis.status != "active" or "EUR/USD" not in thesis.instruments:
+                continue
+            if _thesis_reviews(thesis.thesis_id) >= self.review_policy.max_reviews_per_thesis:
+                continue
+
+            ref_mid = self._thesis_ref_mids.setdefault((thesis.thesis_id, thesis.revision), mid)
+
+            last_trig = _last_thesis_trigger(thesis.thesis_id)
+            if (
+                last_trig is not None
+                and (now_iter - last_trig).total_seconds() < self.review_policy.cooldown_seconds
+            ):
+                continue
+
+            combined_rules = list(
+                dict.fromkeys(
+                    (*thesis.invalidation_conditions, *self.review_policy.structured_price_rules)
+                )
+            )
+            cond_evals: list[ReviewConditionEvaluation] = []
+            for raw_cond in combined_rules:
+                parsed = parse_invalidation_condition(raw_cond)
+                if parsed.executable and parsed.condition is not None:
+                    matched, obs_px = parsed.condition.matches(bid=bid, ask=ask, mid=mid)
+                    cond_evals.append(
+                        ReviewConditionEvaluation(
+                            raw_condition=raw_cond,
+                            executable=True,
+                            status="executable_price_rule",
+                            triggered=matched,
+                            detail=f"{parsed.detail} (observed={obs_px})",
+                        )
+                    )
+                else:
+                    cond_evals.append(
+                        ReviewConditionEvaluation(
+                            raw_condition=raw_cond,
+                            executable=False,
+                            status="unexecutable_natural_language",
+                            triggered=False,
+                            detail=parsed.detail,
+                        )
+                    )
+
+            chosen_kind: (
+                Literal[
+                    "scheduled_review_at",
+                    "structured_price_condition",
+                    "price_breakout_excursion",
+                    "periodic_review",
+                ]
+                | None
+            ) = None
+            chosen_detail: str = ""
+            chosen_dedup: str = ""
+
+            if self.review_policy.enable_price_conditions:
+                for ce in cond_evals:
+                    if ce.executable and ce.triggered:
+                        dkey = f"{thesis.thesis_id}:r{thesis.revision}:price:{ce.raw_condition.strip()}"
+                        if not _has_dedup(dkey):
+                            chosen_kind = "structured_price_condition"
+                            chosen_detail = f"{ce.raw_condition} ({ce.detail})"
+                            chosen_dedup = dkey
+                            break
+
+            if (
+                chosen_kind is None
+                and self.review_policy.enable_review_at
+                and now_iter >= _utc(thesis.review_at)
+            ):
+                dkey = f"{thesis.thesis_id}:r{thesis.revision}:review_at:{_utc(thesis.review_at).isoformat()}"
+                if not _has_dedup(dkey):
+                    chosen_kind = "scheduled_review_at"
+                    chosen_detail = (
+                        f"scheduled review_at {_utc(thesis.review_at).isoformat()} reached"
+                    )
+                    chosen_dedup = dkey
+
+            if chosen_kind is None and self.review_policy.breakout_excursion_pips is not None:
+                excursion_pips = abs(mid - ref_mid) / Decimal("0.0001")
+                if excursion_pips >= self.review_policy.breakout_excursion_pips:
+                    dkey = (
+                        f"{thesis.thesis_id}:r{thesis.revision}:excursion:"
+                        f"{self.review_policy.breakout_excursion_pips}"
+                    )
+                    if not _has_dedup(dkey):
+                        chosen_kind = "price_breakout_excursion"
+                        chosen_detail = (
+                            f"EUR/USD excursion {excursion_pips:.1f} pips >= "
+                            f"{self.review_policy.breakout_excursion_pips} pips"
+                        )
+                        chosen_dedup = dkey
+
+            if chosen_kind is None and self.review_policy.periodic_review_seconds is not None:
+                elapsed_s = (now_iter - _utc(thesis.updated_at)).total_seconds()
+                if elapsed_s >= self.review_policy.periodic_review_seconds:
+                    slot = int(elapsed_s // self.review_policy.periodic_review_seconds)
+                    dkey = f"{thesis.thesis_id}:r{thesis.revision}:periodic:{slot}"
+                    if not _has_dedup(dkey):
+                        chosen_kind = "periodic_review"
+                        chosen_detail = f"periodic review slot {slot} after {round(elapsed_s, 1)}s"
+                        chosen_dedup = dkey
+
+            if chosen_kind is None:
+                continue
+
+            origin_ev: Event | None = None
+            fallback_ev: Event | None = None
+            for ev_id in (*thesis.supporting_event_ids, *thesis.contradicting_event_ids):
+                loaded_ev = await self.runtime.memory.get_event(ev_id)
+                if loaded_ev is None:
+                    continue
+                if fallback_ev is None:
+                    fallback_ev = loaded_ev
+                if loaded_ev.source_type != "internal_review":
+                    origin_ev = loaded_ev
+            if origin_ev is None:
+                origin_ev = fallback_ev
+            if origin_ev is None:
+                continue
+
+            origin_age_s = round(
+                max(0.0, (now_iter - _utc(origin_ev.received_timestamp)).total_seconds()),
+                3,
+            )
+            review_id = str(uuid4())
+            review_ctx = ReviewContext(
+                review_id=review_id,
+                trigger_kind=chosen_kind,
+                trigger_detail=chosen_detail,
+                triggered_at=now_iter,
+                thesis_id=thesis.thesis_id,
+                thesis_revision=thesis.revision,
+                origin_event_id=origin_ev.event_id,
+                origin_source=origin_ev.source,
+                origin_source_timestamp=origin_ev.source_timestamp,
+                origin_received_timestamp=origin_ev.received_timestamp,
+                origin_event_age_seconds=origin_age_s,
+                condition_evaluations=tuple(cond_evals),
+            )
+            review_raw_text = (
+                f"[INTERNAL STATEFUL REVIEW] trigger={chosen_kind} ({chosen_detail}); "
+                f"origin_event_id={origin_ev.event_id}; origin_event_age_seconds={origin_age_s}\n\n"
+                f"{origin_ev.raw_text}"
+            )
+            review_event = Event(
+                event_id=f"internal_review:{review_id}",
+                source="internal_stateful_review",
+                source_type="internal_review",
+                source_reference=f"review://{thesis.thesis_id}/r{thesis.revision}/{chosen_kind}",
+                source_timestamp=origin_ev.source_timestamp,
+                received_timestamp=origin_ev.received_timestamp,
+                raw_text=review_raw_text,
+            )
+
+            if store is not None:
+                store.record_review_started(
+                    review_id=review_id,
+                    dedup_key=chosen_dedup,
+                    review_context=review_ctx,
+                    market_snapshot_id=market.snapshot_id,
+                    market_mid=mid,
+                    now=now_iter,
+                )
+            else:
+                self._in_memory_review_dedup.add(chosen_dedup)
+                self._in_memory_review_times.setdefault(thesis.thesis_id, []).append(now_iter)
+
+            try:
+                cycle_res = await asyncio.wait_for(
+                    self.runtime.run_cycle(review_event, review_context=review_ctx),
+                    timeout=self.llm_timeout_seconds,
+                )
+                if store is not None:
+                    store.update_review_outcome(
+                        review_id=review_id,
+                        state=cycle_res.status,
+                        outcome_reason=cycle_res.reason,
+                        now=_utc(self.clock()),
+                        decision=cycle_res.decision,
+                    )
+                results.append(cycle_res)
+            except TimeoutError:
+                now_to = _utc(self.clock())
+                if store is not None:
+                    store.update_review_outcome(
+                        review_id=review_id,
+                        state="reasoning_failed",
+                        outcome_reason="llm_decision_timeout",
+                        now=now_to,
+                    )
+                    store.upsert_event_state(
+                        event_id=review_event.event_id,
+                        source_reference=review_event.source_reference,
+                        received_at=review_event.received_timestamp,
+                        now=now_to,
+                        state="reasoning_failed",
+                        reason="llm_decision_timeout",
+                        increment_attempts=True,
+                    )
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=now_to,
+                        component="agent",
+                        event_id=review_event.event_id,
+                        policy_version=self.runtime.risk_engine.policy.policy_version,
+                        outcome="reasoning_failed",
+                        detail="llm_review_decision_timeout",
+                    )
+                    store.append_audit(rec)
+                    await self.runtime.audit_sink.append(rec)
+
         return tuple(results)
 
     async def run(self, *, duration_seconds: float) -> dict[str, Any]:
@@ -2596,6 +3396,8 @@ class ShadowRunner:
                 self._event_wakeup.clear()
                 try:
                     await self.step_events()
+                    if self.review_policy.enabled and not self._stop_event.is_set():
+                        await self.step_reviews()
                 except Exception as exc:
                     logger.warning("event_worker_error: %s", exc)
                 if self._stop_event.is_set() or self._event_wakeup.is_set():

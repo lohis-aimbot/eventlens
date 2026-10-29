@@ -159,6 +159,10 @@ class ProtectiveExitPolicy(Contract):
     max_holding_seconds: int = Field(default=1800, gt=0)
     max_position_loss_usd: Decimal = Field(default=Decimal("150"), gt=0)
     take_profit_usd: Decimal | None = Field(default=None, gt=0)
+    stop_loss_pips: Decimal | None = Field(default=None, gt=0)
+    take_profit_pips: Decimal | None = Field(default=None, gt=0)
+    trailing_activation_pips: Decimal | None = Field(default=None, gt=0)
+    trailing_distance_pips: Decimal | None = Field(default=None, gt=0)
     max_daily_loss_usd: Decimal = Field(default=Decimal("200"), gt=0)
     max_quote_age_ms: int = Field(default=2000, gt=0)
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
@@ -172,22 +176,48 @@ class ProtectiveExitPolicy(Contract):
     rollover_minute: int = Field(default=0, ge=0, le=59)
     daily_close_utc_hour: int | None = Field(default=None, ge=0, le=23)
 
+    @model_validator(mode="after")
+    def validate_trailing_policy(self) -> Self:
+        if (self.trailing_activation_pips is None) != (self.trailing_distance_pips is None):
+            raise ValueError(
+                "trailing_activation_pips and trailing_distance_pips must be both set or both None"
+            )
+        if (
+            self.trailing_activation_pips is not None
+            and self.trailing_distance_pips is not None
+            and self.trailing_distance_pips >= self.trailing_activation_pips
+        ):
+            raise ValueError(
+                "trailing_distance_pips must be strictly less than trailing_activation_pips"
+            )
+        return self
+
     @classmethod
     def pepperstone_razor_200(
         cls,
         *,
         max_holding_seconds: int = 900,
         max_quote_age_ms: int = 2000,
-        max_position_loss_usd: Decimal = Decimal("4.00"),
-        take_profit_usd: Decimal | None = Decimal("8.00"),
+        max_position_loss_usd: Decimal = Decimal("7.00"),
+        take_profit_usd: Decimal | None = None,
+        stop_loss_pips: Decimal | None = Decimal("11.0"),
+        take_profit_pips: Decimal | None = Decimal("18.0"),
+        trailing_activation_pips: Decimal | None = Decimal("10.0"),
+        trailing_distance_pips: Decimal | None = Decimal("5.0"),
         max_daily_loss_usd: Decimal = Decimal("8.00"),
         allow_commission_bearing_zero_spread: bool = True,
     ) -> "ProtectiveExitPolicy":
-        """Pepperstone Razor $200 USD Demo protection standard: 15m horizon, $4 SL, $8 TP (2:1 R:R), $8 daily loss."""
+        """Pepperstone Razor $200 USD Demo protection standard:
+        15m horizon, position-scaled 11-pip SL ($7.00 hard USD cap), 18-pip TP,
+        +10.0-pip trailing profit lock (5.0-pip pullback distance), and $8.00 daily loss cap."""
         return cls(
             max_holding_seconds=max_holding_seconds,
             max_position_loss_usd=max_position_loss_usd,
             take_profit_usd=take_profit_usd,
+            stop_loss_pips=stop_loss_pips,
+            take_profit_pips=take_profit_pips,
+            trailing_activation_pips=trailing_activation_pips,
+            trailing_distance_pips=trailing_distance_pips,
             max_daily_loss_usd=max_daily_loss_usd,
             max_quote_age_ms=max_quote_age_ms,
             max_spread_pips=Decimal("2.0"),
@@ -331,6 +361,7 @@ class SQLiteShadowLedger:
                         quantity_eur TEXT NOT NULL,
                         avg_entry_price TEXT,
                         opened_at TEXT,
+                        peak_favorable_mark TEXT,
                         pending_exit_reason TEXT,
                         pending_exit_since TEXT,
                         last_valid_equity_usd TEXT
@@ -404,9 +435,9 @@ class SQLiteShadowLedger:
                     self.db.execute(
                         """INSERT INTO shadow_account
                         (id, snapshot_id, as_of, cash_usd, realized_pnl_usd, total_fees_usd,
-                         quantity_eur, avg_entry_price, opened_at, pending_exit_reason, pending_exit_since,
-                         last_valid_equity_usd)
-                        VALUES (1, ?, ?, ?, '0.00', '0.00', '0', NULL, NULL, NULL, NULL, ?)""",
+                         quantity_eur, avg_entry_price, opened_at, peak_favorable_mark,
+                         pending_exit_reason, pending_exit_since, last_valid_equity_usd)
+                        VALUES (1, ?, ?, ?, '0.00', '0.00', '0', NULL, NULL, NULL, NULL, NULL, ?)""",
                         (
                             "shadow-snapshot-0",
                             now.isoformat(),
@@ -424,6 +455,8 @@ class SQLiteShadowLedger:
         acct_cols = {
             r["name"] for r in self.db.execute("PRAGMA table_info(shadow_account)").fetchall()
         }
+        if "peak_favorable_mark" not in acct_cols:
+            self.db.execute("ALTER TABLE shadow_account ADD COLUMN peak_favorable_mark TEXT")
         if "pending_exit_reason" not in acct_cols:
             self.db.execute("ALTER TABLE shadow_account ADD COLUMN pending_exit_reason TEXT")
         if "pending_exit_since" not in acct_cols:
@@ -1294,16 +1327,53 @@ class SQLiteShadowLedger:
                 unrealized = (qty * (mark - entry)).quantize(
                     Decimal("0.01"), rounding=ROUND_HALF_UP
                 )
+                favorable_pips = (
+                    (mark - entry) / EURUSD_PIP
+                    if qty > Decimal("0")
+                    else (entry - mark) / EURUSD_PIP
+                )
+                raw_prior_peak = account["peak_favorable_mark"]
+                prior_peak = Decimal(raw_prior_peak) if raw_prior_peak is not None else entry
+                if qty > Decimal("0"):
+                    peak_mark = max(prior_peak, entry, mark)
+                    peak_favorable_pips = (peak_mark - entry) / EURUSD_PIP
+                else:
+                    peak_mark = min(prior_peak, entry, mark)
+                    peak_favorable_pips = (entry - peak_mark) / EURUSD_PIP
+                giveback_pips = peak_favorable_pips - favorable_pips
+                if raw_prior_peak is None or peak_mark != prior_peak:
+                    self.db.execute(
+                        "UPDATE shadow_account SET peak_favorable_mark=? WHERE id=1",
+                        (str(peak_mark),),
+                    )
                 equity = cash + unrealized
                 daily_row = self._ensure_daily_state_locked(now, equity, valid_valuation=True)
                 daily_pnl = equity - Decimal(daily_row["baseline_equity_usd"])
-                if unrealized <= -self.exit_policy.max_position_loss_usd:
-                    exit_reason = exit_reason or "protective_stop_loss"
-                elif (
+                hit_usd_sl = unrealized <= -self.exit_policy.max_position_loss_usd
+                hit_pip_sl = (
+                    self.exit_policy.stop_loss_pips is not None
+                    and favorable_pips <= -self.exit_policy.stop_loss_pips
+                )
+                hit_usd_tp = (
                     self.exit_policy.take_profit_usd is not None
                     and unrealized >= self.exit_policy.take_profit_usd
-                ):
+                )
+                hit_pip_tp = (
+                    self.exit_policy.take_profit_pips is not None
+                    and favorable_pips >= self.exit_policy.take_profit_pips
+                )
+                hit_trailing = (
+                    self.exit_policy.trailing_activation_pips is not None
+                    and self.exit_policy.trailing_distance_pips is not None
+                    and peak_favorable_pips >= self.exit_policy.trailing_activation_pips
+                    and giveback_pips >= self.exit_policy.trailing_distance_pips
+                )
+                if hit_usd_sl or hit_pip_sl:
+                    exit_reason = exit_reason or "protective_stop_loss"
+                elif hit_usd_tp or hit_pip_tp:
                     exit_reason = exit_reason or "protective_take_profit"
+                elif hit_trailing:
+                    exit_reason = exit_reason or "protective_trailing_stop"
                 elif (
                     bool(daily_row["loss_limit_triggered"])
                     or daily_pnl <= -self.exit_policy.max_daily_loss_usd
@@ -1387,6 +1457,8 @@ class SQLiteShadowLedger:
             Decimal(account["avg_entry_price"]) if account["avg_entry_price"] else Decimal("0")
         )
         prior_opened = account["opened_at"]
+        raw_prior_peak = account["peak_favorable_mark"]
+        prior_peak = Decimal(raw_prior_peak) if raw_prior_peak is not None else None
 
         buy = delta > Decimal("0")
         fill_price, synthetic_used = self.cost_model.execution_price(quote, buy=buy)
@@ -1397,6 +1469,7 @@ class SQLiteShadowLedger:
         if prior_qty == Decimal("0"):
             new_entry: Decimal | None = fill_price
             new_opened: str | None = filled_at.isoformat()
+            same_direction = False
         elif (prior_qty > Decimal("0") and delta > Decimal("0")) or (
             prior_qty < Decimal("0") and delta < Decimal("0")
         ):
@@ -1404,6 +1477,7 @@ class SQLiteShadowLedger:
             weighted = (abs(prior_qty) * prior_entry + abs(delta) * fill_price) / total_abs
             new_entry = weighted.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
             new_opened = prior_opened
+            same_direction = True
         else:
             closed_units = min(abs(prior_qty), abs(delta))
             signed_closed = closed_units if prior_qty > Decimal("0") else -closed_units
@@ -1413,25 +1487,41 @@ class SQLiteShadowLedger:
             if new_qty == Decimal("0"):
                 new_entry = None
                 new_opened = None
+                same_direction = False
             elif (prior_qty > Decimal("0") and new_qty > Decimal("0")) or (
                 prior_qty < Decimal("0") and new_qty < Decimal("0")
             ):
                 new_entry = prior_entry
                 new_opened = prior_opened
+                same_direction = True
             else:
                 # Position reversal: closed prior leg, opened remainder at fill_price
                 new_entry = fill_price
                 new_opened = filled_at.isoformat()
+                same_direction = False
 
         new_cash = cash + realized_trade - commission
         new_realized = realized_total + realized_trade
         new_fees = fees_total + commission
         unrealized_after = Decimal("0.00")
+        new_peak_mark: Decimal | None = None
         if new_qty != Decimal("0") and new_entry is not None:
             mark = quote.bid if new_qty > 0 else quote.ask
             unrealized_after = (new_qty * (mark - new_entry)).quantize(
                 Decimal("0.01"), rounding=ROUND_HALF_UP
             )
+            if new_qty > Decimal("0"):
+                new_peak_mark = (
+                    max(prior_peak, new_entry, mark)
+                    if (same_direction and prior_peak is not None)
+                    else max(new_entry, mark)
+                )
+            else:
+                new_peak_mark = (
+                    min(prior_peak, new_entry, mark)
+                    if (same_direction and prior_peak is not None)
+                    else min(new_entry, mark)
+                )
         equity_after = new_cash + unrealized_after
         fill_count = self.db.execute("SELECT COUNT(*) FROM shadow_fills").fetchone()[0] + 1
         new_snapshot_id = f"shadow-snapshot-{fill_count}"
@@ -1440,7 +1530,7 @@ class SQLiteShadowLedger:
             """
             UPDATE shadow_account
             SET snapshot_id=?, as_of=?, cash_usd=?, realized_pnl_usd=?, total_fees_usd=?,
-                quantity_eur=?, avg_entry_price=?, opened_at=?,
+                quantity_eur=?, avg_entry_price=?, opened_at=?, peak_favorable_mark=?,
                 pending_exit_reason=CASE WHEN ? = '0' THEN NULL ELSE pending_exit_reason END,
                 pending_exit_since=CASE WHEN ? = '0' THEN NULL ELSE pending_exit_since END,
                 last_valid_equity_usd=?
@@ -1455,6 +1545,7 @@ class SQLiteShadowLedger:
                 str(new_qty),
                 str(new_entry) if new_entry is not None else None,
                 new_opened,
+                str(new_peak_mark) if new_peak_mark is not None else None,
                 str(new_qty),
                 str(new_qty),
                 str(equity_after),
@@ -1486,7 +1577,7 @@ class SQLiteShadowLedger:
             realized_pnl_usd=realized_trade,
             equity_after_usd=equity_after,
             snapshot_id_after=new_snapshot_id,
-            synthetic_assumption=synthetic_used,
+            synthetic_assumption=synthetic_used or not quote.has_verified_provenance,
         )
         self.db.execute(
             "INSERT INTO shadow_fills VALUES (?, ?, ?, ?)",
@@ -1583,6 +1674,7 @@ class SQLiteShadowLedger:
                 "free_margin_usd": str(free_margin),
                 "avg_entry_price": account["avg_entry_price"],
                 "opened_at": account["opened_at"],
+                "peak_favorable_mark": account["peak_favorable_mark"],
                 "pending_exit_reason": account["pending_exit_reason"],
                 "pending_exit_since": account["pending_exit_since"],
                 "receipt_count": len(receipts),
@@ -1594,3 +1686,327 @@ class SQLiteShadowLedger:
                 "fills": fills,
                 "faults": faults,
             }
+
+
+_REQUIRED_READONLY_LEDGER_COLUMNS: dict[str, tuple[str, ...]] = {
+    "shadow_account": (
+        "id",
+        "snapshot_id",
+        "as_of",
+        "cash_usd",
+        "realized_pnl_usd",
+        "total_fees_usd",
+        "quantity_eur",
+        "avg_entry_price",
+        "opened_at",
+        "peak_favorable_mark",
+        "pending_exit_reason",
+        "pending_exit_since",
+        "last_valid_equity_usd",
+    ),
+    "shadow_daily_state": (
+        "trading_day",
+        "baseline_equity_usd",
+        "loss_limit_triggered",
+        "baseline_valid",
+        "baseline_reason",
+    ),
+    "shadow_receipts": (
+        "execution_id",
+        "receipt_json",
+        "order_status",
+        "terminal_at",
+        "terminal_reason",
+    ),
+    "shadow_fills": ("fill_id", "fill_json"),
+    "shadow_faults": ("fault_id",),
+}
+
+
+def inspect_shadow_ledger_readonly(
+    path: Path,
+    *,
+    market: MarketSnapshot | None = None,
+    cost_model: ShadowCostModel | None = None,
+    exit_policy: ProtectiveExitPolicy = ProtectiveExitPolicy(),
+    risk_policy: RiskPolicy = RiskPolicy(),
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Inspect a shadow ledger strictly via `?mode=ro` without creating files, migrating schemas,
+    writing `shadow_daily_state`, updating `shadow_account`, or cancelling pending orders.
+    """
+    check_now = _utc(now or datetime.now(UTC))
+    effective_cost = (
+        cost_model
+        if cost_model is not None
+        else (
+            ShadowCostModel.pepperstone_razor()
+            if (
+                risk_policy.allow_commission_bearing_zero_spread
+                or exit_policy.allow_commission_bearing_zero_spread
+            )
+            else ShadowCostModel()
+        )
+    )
+    if not path.is_file():
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "missing_shadow_db",
+            "error": f"Shadow ledger database does not exist: {path}",
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+        }
+
+    try:
+        db = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+        db.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        return {
+            "readonly": True,
+            "degraded": True,
+            "status": "readonly_open_failed",
+            "error": f"Unable to open shadow database in read-only mode: {exc}",
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+        }
+
+    try:
+        app_id = db.execute("PRAGMA application_id").fetchone()[0]
+        if app_id != APPLICATION_ID:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "invalid_application_id",
+                "error": f"Database at {path} is not an EventLens shadow ledger (application_id={app_id})",
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        existing_tables = {
+            str(r["name"])
+            for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        missing_elements: list[str] = []
+        for tbl, req_cols in _REQUIRED_READONLY_LEDGER_COLUMNS.items():
+            if tbl not in existing_tables:
+                missing_elements.append(f"table:{tbl}")
+                continue
+            present_cols = {
+                str(c["name"]) for c in db.execute(f"PRAGMA table_info({tbl})").fetchall()
+            }
+            for col in req_cols:
+                if col not in present_cols:
+                    missing_elements.append(f"column:{tbl}.{col}")
+        if missing_elements:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "unsupported_schema_readonly",
+                "error": (
+                    "Unsupported or legacy shadow ledger schema; read-only inspection refuses "
+                    "automatic schema migration."
+                ),
+                "missing_schema_elements": missing_elements,
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        account = db.execute("SELECT * FROM shadow_account WHERE id=1").fetchone()
+        if account is None:
+            return {
+                "readonly": True,
+                "degraded": True,
+                "status": "missing_shadow_account_row",
+                "error": "Shadow ledger has no shadow_account row (id=1).",
+                "scope": "shadow_ledger_only",
+                "execution_authorized": False,
+            }
+
+        pending_rows = db.execute(
+            "SELECT execution_id FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
+        ).fetchall()
+        qty = Decimal(account["quantity_eur"])
+        cash = Decimal(account["cash_usd"])
+        realized = Decimal(account["realized_pnl_usd"])
+        fees = Decimal(account["total_fees_usd"])
+        entry = Decimal(account["avg_entry_price"]) if account["avg_entry_price"] else Decimal("0")
+        unrealized = Decimal("0.00")
+        valuation_valid = True
+        valuation_reason = "flat_no_quote_needed"
+
+        if qty != Decimal("0"):
+            quote_check = validate_market_quote(
+                market,
+                as_of=check_now,
+                policy=exit_policy.quote_quality_policy("EUR/USD"),
+            )
+            if quote_check.valid and quote_check.quote is not None:
+                mark = quote_check.quote.bid if qty > 0 else quote_check.quote.ask
+                unrealized = (qty * (mark - entry)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                valuation_valid = True
+                valuation_reason = "marked_to_valid_quote"
+            else:
+                valuation_valid = False
+                valuation_reason = f"unreliable_quote:{quote_check.reason}"
+
+        equity = cash + unrealized
+        day_id, _, _, _ = exit_policy.effective_window(check_now)
+        daily_row = db.execute(
+            "SELECT * FROM shadow_daily_state WHERE trading_day=?", (day_id,)
+        ).fetchone()
+        if daily_row is not None:
+            baseline = Decimal(daily_row["baseline_equity_usd"])
+            loss_triggered = bool(daily_row["loss_limit_triggered"])
+            base_valid = bool(daily_row["baseline_valid"])
+            base_reason = str(daily_row["baseline_reason"])
+            daily_persisted = True
+        else:
+            prior_daily = db.execute(
+                "SELECT * FROM shadow_daily_state WHERE trading_day < ? ORDER BY trading_day DESC LIMIT 1",
+                (day_id,),
+            ).fetchone()
+            refs: list[Decimal] = []
+            if account["last_valid_equity_usd"] is not None:
+                refs.append(Decimal(account["last_valid_equity_usd"]))
+            if prior_daily is not None:
+                refs.append(Decimal(prior_daily["baseline_equity_usd"]))
+            if valuation_valid:
+                refs.append(equity)
+            baseline = max(refs) if refs else equity
+            loss_triggered = (equity - baseline) <= -exit_policy.max_daily_loss_usd
+            base_valid = valuation_valid
+            base_reason = (
+                "readonly_unpersisted_day_rollover"
+                if valuation_valid
+                else "readonly_unconfirmed_open_position_without_valid_quote"
+            )
+            daily_persisted = False
+
+        daily_pnl = (equity - baseline).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        positions = (Position(instrument="EUR/USD", quantity=qty),) if qty != Decimal("0") else ()
+        acct_as_of = datetime.fromisoformat(account["as_of"])
+        snap_as_of = max(
+            acct_as_of,
+            market.as_of if market is not None and market.as_of <= check_now else acct_as_of,
+        )
+        snap = PortfolioSnapshot(
+            snapshot_id=account["snapshot_id"],
+            as_of=snap_as_of,
+            base_currency="USD",
+            equity=equity,
+            positions=positions,
+            pending_order_ids=tuple(str(r["execution_id"]) for r in pending_rows),
+            unrealized_pnl_usd=unrealized,
+            realized_pnl_usd=realized,
+            total_fees_usd=fees,
+            daily_pnl_usd=daily_pnl,
+            daily_baseline_equity_usd=baseline,
+            daily_loss_limit_triggered=loss_triggered,
+            daily_baseline_valid=base_valid,
+            daily_baseline_reason=base_reason,
+            pending_exit_reason=account["pending_exit_reason"],
+            valuation_valid=valuation_valid,
+            valuation_reason=valuation_reason,
+        )
+
+        receipt_rows = db.execute("SELECT * FROM shadow_receipts ORDER BY rowid").fetchall()
+        receipts: list[dict[str, Any]] = []
+        order_status_counts: dict[str, int] = {}
+        for r in receipt_rows:
+            item = json.loads(r["receipt_json"])
+            item["order_status"] = r["order_status"]
+            item["terminal_at"] = r["terminal_at"]
+            item["terminal_reason"] = r["terminal_reason"]
+            order_status_counts[r["order_status"]] = (
+                order_status_counts.get(r["order_status"], 0) + 1
+            )
+            receipts.append(item)
+
+        fills = [
+            json.loads(row["fill_json"])
+            for row in db.execute("SELECT fill_json FROM shadow_fills ORDER BY rowid")
+        ]
+        faults = [dict(row) for row in db.execute("SELECT * FROM shadow_faults ORDER BY rowid")]
+        daily_states = [
+            dict(row) for row in db.execute("SELECT * FROM shadow_daily_state ORDER BY trading_day")
+        ]
+
+        qty_lots = (qty / LOT_UNITS_EUR).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        ref_price = entry if entry > Decimal("0") else Decimal("1.0")
+        if market is not None:
+            q_eur = next((q for q in market.quotes if q.instrument == "EUR/USD"), None)
+            if q_eur is not None:
+                ref_price = (q_eur.bid + q_eur.ask) / Decimal("2")
+        margin_used = (
+            ((abs(qty) * ref_price) / risk_policy.leverage).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            if qty != Decimal("0")
+            else Decimal("0.00")
+        )
+        free_margin = (snap.equity - margin_used).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        unclosed_risk = qty != Decimal("0")
+        alerts: list[str] = []
+        recovery_instructions: str | None = None
+        if unclosed_risk:
+            alerts.append(
+                f"UNCLOSED_SHADOW_POSITION: quantity_eur={account['quantity_eur']} "
+                f"({qty_lots} lots), avg_entry_price={account['avg_entry_price']}, "
+                f"pending_exit_reason={account['pending_exit_reason']}, "
+                f"valuation_valid={snap.valuation_valid}"
+            )
+            recovery_instructions = (
+                f"Start EventLensQuoteBridge in cTrader and run: "
+                f".venv/bin/eventlens shadow recover --shadow-db {path.resolve()} "
+                f'--quotes-db <quotes.sqlite> --quote-bridge-dir "$HOME/cAlgo/Data/cBots/EventLensQuoteBridge"'
+            )
+        elif account["pending_exit_reason"] is not None:
+            alerts.append(
+                f"PENDING_EXIT_STATE: pending_exit_reason={account['pending_exit_reason']}"
+            )
+
+        return {
+            "readonly": True,
+            "degraded": False,
+            "status": "ok",
+            "daily_baseline_persisted": daily_persisted,
+            "scope": "shadow_ledger_only",
+            "execution_authorized": False,
+            "unclosed_risk": unclosed_risk,
+            "alerts": alerts,
+            "recovery_instructions": recovery_instructions,
+            "cost_model": effective_cost.model_dump(mode="json"),
+            "exit_policy": exit_policy.model_dump(mode="json"),
+            "risk_policy": risk_policy.model_dump(mode="json"),
+            "snapshot": snap.model_dump(mode="json"),
+            "cash_usd": account["cash_usd"],
+            "realized_pnl_usd": account["realized_pnl_usd"],
+            "total_fees_usd": account["total_fees_usd"],
+            "quantity_eur": account["quantity_eur"],
+            "quantity_lots": str(qty_lots),
+            "leverage": str(risk_policy.leverage),
+            "margin_used_usd": str(margin_used),
+            "free_margin_usd": str(free_margin),
+            "avg_entry_price": account["avg_entry_price"],
+            "opened_at": account["opened_at"],
+            "peak_favorable_mark": account["peak_favorable_mark"],
+            "pending_exit_reason": account["pending_exit_reason"],
+            "pending_exit_since": account["pending_exit_since"],
+            "receipt_count": len(receipts),
+            "order_status_counts": order_status_counts,
+            "fill_count": len(fills),
+            "fault_count": len(faults),
+            "daily_states": daily_states,
+            "receipts": receipts,
+            "fills": fills,
+            "faults": faults,
+        }
+    finally:
+        db.close()
