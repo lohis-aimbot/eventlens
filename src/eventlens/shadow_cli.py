@@ -118,11 +118,32 @@ def _build_policies(
     if getattr(args, "take_profit", None) is not None:
         tp = Decimal(str(args.take_profit))
         exit_updates["take_profit_usd"] = tp if tp > Decimal("0") else None
+    if getattr(args, "stop_loss_pips", None) is not None:
+        sl_pips = Decimal(str(args.stop_loss_pips))
+        exit_updates["stop_loss_pips"] = sl_pips if sl_pips > Decimal("0") else None
+    if getattr(args, "take_profit_pips", None) is not None:
+        tp_pips = Decimal(str(args.take_profit_pips))
+        exit_updates["take_profit_pips"] = tp_pips if tp_pips > Decimal("0") else None
+    raw_trail_act = getattr(args, "trailing_activation_pips", None)
+    raw_trail_dist = getattr(args, "trailing_distance_pips", None)
+    if raw_trail_act is not None or raw_trail_dist is not None:
+        act_val = Decimal(str(raw_trail_act)) if raw_trail_act is not None else None
+        dist_val = Decimal(str(raw_trail_dist)) if raw_trail_dist is not None else None
+        if (act_val is not None and act_val <= Decimal("0")) or (
+            dist_val is not None and dist_val <= Decimal("0")
+        ):
+            exit_updates["trailing_activation_pips"] = None
+            exit_updates["trailing_distance_pips"] = None
+        else:
+            if act_val is not None:
+                exit_updates["trailing_activation_pips"] = act_val
+            if dist_val is not None:
+                exit_updates["trailing_distance_pips"] = dist_val
 
     if risk_updates:
-        risk = risk.model_copy(update=risk_updates)
+        risk = RiskPolicy.model_validate({**risk.model_dump(), **risk_updates})
     if exit_updates:
-        exit_pol = exit_pol.model_copy(update=exit_updates)
+        exit_pol = ProtectiveExitPolicy.model_validate({**exit_pol.model_dump(), **exit_updates})
     return initial_cash, risk, exit_pol, cost_model
 
 
@@ -222,6 +243,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                     allow_commission_bearing_zero_spread=(
                         risk_policy.allow_commission_bearing_zero_spread
                     ),
+                    max_position_weight=risk_policy.max_position_weight,
                 )
                 if call_model
                 else _AbstainWithoutModelAgent()
@@ -406,6 +428,30 @@ def _add_common_db_args(p: argparse.ArgumentParser, *, suppress_defaults: bool =
         type=str,
         default=default_flag if suppress_defaults else None,
         help="Override single-position protective take-profit in USD (0 to disable)",
+    )
+    p.add_argument(
+        "--stop-loss-pips",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override position-scaled protective stop-loss in EUR/USD pips (0 to disable)",
+    )
+    p.add_argument(
+        "--take-profit-pips",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override position-scaled protective take-profit in EUR/USD pips (0 to disable)",
+    )
+    p.add_argument(
+        "--trailing-activation-pips",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override trailing profit lock activation threshold in EUR/USD pips (0 to disable trailing)",
+    )
+    p.add_argument(
+        "--trailing-distance-pips",
+        type=str,
+        default=default_flag if suppress_defaults else None,
+        help="Override trailing profit lock pullback distance in EUR/USD pips (0 to disable trailing)",
     )
     p.add_argument(
         "--max-daily-loss",

@@ -54,6 +54,7 @@ TIER1_FILTER_VERSION = "tier1-eurusd-filter-v1"
 USER_AGENT = "EventLensResearch/0.2 (+https://github.com/lohis-aimbot/eventlens; shadow-only)"
 
 INVESTINGLIVE_RSS_URL = "https://investinglive.com/feed"
+INVESTINGLIVE_CENTRALBANK_RSS_URL = "https://investinglive.com/feed/centralbank"
 ECB_PRESS_RSS_URL = "https://www.ecb.europa.eu/rss/press.html"
 ECB_STATPRESS_RSS_URL = "https://www.ecb.europa.eu/rss/statpress.html"
 FED_MONETARY_RSS_URL = "https://www.federalreserve.gov/feeds/press_monetary.xml"
@@ -150,6 +151,13 @@ DEFAULT_TIER1_STREAMS: tuple[Tier1StreamSpec, ...] = (
         stream="news/rss",
         kind="news",
         url=INVESTINGLIVE_RSS_URL,
+        min_poll_seconds=15.0,
+    ),
+    Tier1StreamSpec(
+        provider="investinglive",
+        stream="news/centralbank",
+        kind="news",
+        url=INVESTINGLIVE_CENTRALBANK_RSS_URL,
         min_poll_seconds=15.0,
     ),
     Tier1StreamSpec(
@@ -385,7 +393,7 @@ def _score_rss_item(
             return 0
         if "technical analysis" in lower_cats and "central banks" not in lower_cats:
             return 0
-        if lower_cats & _HIGH_DESK_CATEGORIES:
+        if stream == "news/centralbank" or (lower_cats & _HIGH_DESK_CATEGORIES):
             return 3
         if lower_cats & _MACRO_DESK_CATEGORIES:
             return 2
@@ -1240,6 +1248,54 @@ def _format_macro_clarity_line(rev: StoredRevision) -> str | None:
         f"Structured Values -> Actual: {actual_s} | "
         f"Consensus Forecast: {fcst_s} | Previous: {prev_s}{rev_s}"
     )
+
+
+def format_revision_marginal_delta(
+    curr: StoredRevision,
+    prior: StoredRevision | None,
+    *,
+    max_chars: int = 1800,
+) -> str | None:
+    """Extract verbatim newly added or modified lines in revision rN vs prior revision.
+
+    Every emitted body line is an exact verbatim line from ``curr.record`` so downstream
+    ``resolve_verbatim_quote`` validation against ``Event.raw_text`` remains exact.
+    """
+    if prior is None or curr.revision <= 1:
+        return None
+    prior_lines = {line.strip() for line in prior.record.text.splitlines() if line.strip()}
+    if prior.record.title.strip():
+        prior_lines.add(prior.record.title.strip())
+
+    added_lines: list[str] = []
+    curr_title = curr.record.title.strip()
+    if curr_title and curr_title not in prior_lines:
+        added_lines.append(curr_title)
+
+    for raw_line in curr.record.text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped in prior_lines or stripped in added_lines:
+            continue
+        if stripped.startswith("{") and stripped.endswith("}"):
+            continue
+        added_lines.append(stripped)
+
+    if not added_lines:
+        return None
+
+    header = (
+        f"[REVISION r{curr.revision} MARGINAL UPDATE (newly added/updated vs r{prior.revision})]"
+    )
+    selected: list[str] = []
+    used = len(header)
+    for line in added_lines:
+        if selected and used + 1 + len(line) > max_chars:
+            break
+        selected.append(line)
+        used += 1 + len(line)
+    if not selected:
+        return None
+    return header + "\n" + "\n".join(selected)
 
 
 def bundle_simultaneous_events(

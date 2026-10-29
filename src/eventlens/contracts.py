@@ -188,10 +188,28 @@ class Quote(Contract):
         )
 
 
+class PriceTrajectorySummary(Contract):
+    """Causal recent price excursion summary computed strictly from published quotes <= as_of."""
+
+    instrument: Identifier = "EUR/USD"
+    as_of: Timestamp
+    current_mid: Decimal = Field(gt=0)
+    change_1m_pips: Decimal | None = None
+    change_5m_pips: Decimal | None = None
+    change_15m_pips: Decimal | None = None
+    change_30m_pips: Decimal | None = None
+    window_15m_high_mid: Decimal | None = Field(default=None, gt=0)
+    window_15m_low_mid: Decimal | None = Field(default=None, gt=0)
+    window_30m_high_mid: Decimal | None = Field(default=None, gt=0)
+    window_30m_low_mid: Decimal | None = Field(default=None, gt=0)
+    sample_count_30m: int = Field(default=0, ge=0)
+
+
 class MarketSnapshot(Contract):
     snapshot_id: Identifier
     as_of: Timestamp
     quotes: tuple[Quote, ...]
+    price_trajectory: PriceTrajectorySummary | None = None
 
     @model_validator(mode="after")
     def valid_quotes(self) -> Self:
@@ -202,6 +220,8 @@ class MarketSnapshot(Contract):
                 raise ValueError("Market snapshot cannot contain future quote source_at")
             if quote.available_at is not None and quote.available_at > self.as_of:
                 raise ValueError("Market snapshot cannot contain future quote available_at")
+        if self.price_trajectory is not None and self.price_trajectory.as_of > self.as_of:
+            raise ValueError("Market snapshot cannot contain future price trajectory")
         instruments = [quote.instrument for quote in self.quotes]
         if len(instruments) != len(set(instruments)):
             raise ValueError("Duplicate instrument quote")

@@ -2171,16 +2171,43 @@ class ShadowRunner:
         """Scan ObserverStore for unprocessed revisions, reconcile bound/in-progress cycles, bundle simultaneous releases durably, and run cycles."""
         if self.observer_store is None:
             return ()
+        ostore = self.observer_store
         from .sources.english_tier1 import (
             EURUSDEventFilter,
             EventBundle,
             bundle_simultaneous_events,
+            format_revision_marginal_delta,
         )
         from .sources.wallstreetcn import revision_event_id
 
         now = _utc(self.clock())
+
+        async def _enrich_revision_delta(rev_item: Any, ev_item: Event) -> Event:
+            if rev_item.revision < 2 or rev_item.record.kind != "news":
+                return ev_item
+            if "[REVISION r" in ev_item.raw_text:
+                return ev_item
+            hist = await asyncio.to_thread(
+                ostore.history,
+                rev_item.record.kind,
+                rev_item.record.source_id,
+                provider=rev_item.provider,
+                basis=rev_item.basis,
+                as_of=now,
+            )
+            prior_revs = [h for h in hist if h.revision < rev_item.revision]
+            prior_rev = prior_revs[-1] if prior_revs else None
+            delta_block = format_revision_marginal_delta(rev_item, prior_rev)
+            if not delta_block:
+                return ev_item
+            return ev_item.model_copy(
+                update={
+                    "raw_text": f"{delta_block}\n\n[FULL UPDATED ARTICLE TEXT]\n{ev_item.raw_text}"
+                }
+            )
+
         revisions = await asyncio.to_thread(
-            self.observer_store.revisions,
+            ostore.revisions,
             basis=self.basis,
             as_of=now,
             limit=200,
@@ -2278,6 +2305,7 @@ class ShadowRunner:
                         reason=f_res.reason,
                     )
                 continue
+            ev = await _enrich_revision_delta(rev, ev)
             eligible_pairs.append((rev, ev))
 
         results: list[RuntimeCycleResult] = []
@@ -2367,6 +2395,8 @@ class ShadowRunner:
                     _, p_ev = active_filter.evaluate_revision(
                         revisions_by_ev_id[p_id], checked_at=_utc(self.clock())
                     )
+                    if p_ev is not None:
+                        p_ev = await _enrich_revision_delta(revisions_by_ev_id[p_id], p_ev)
                 if p_ev is None:
                     continue
                 await _execute_event_cycle(p_ev, is_bundled=has_members)
