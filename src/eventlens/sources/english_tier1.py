@@ -48,11 +48,14 @@ logger = logging.getLogger(__name__)
 
 BJT = ZoneInfo("Asia/Shanghai")
 MAX_BYTES = 1_000_000
+MAX_LIVE_HTML_BYTES = 2_500_000
 MAX_ARTICLE_CHARS = 3_800
 MAX_BUNDLE_RAW_CHARS = 14_000
 TIER1_FILTER_VERSION = "tier1-eurusd-filter-v1"
 USER_AGENT = "EventLensResearch/0.2 (+https://github.com/lohis-aimbot/eventlens; shadow-only)"
 
+INVESTINGLIVE_LIVE_FEED_URL = "https://investinglive.com/live-feed/"
+INVESTINGLIVE_CENTRALBANK_LIVE_URL = "https://investinglive.com/CentralBanks/"
 INVESTINGLIVE_RSS_URL = "https://investinglive.com/feed"
 INVESTINGLIVE_CENTRALBANK_RSS_URL = "https://investinglive.com/feed/centralbank"
 ECB_PRESS_RSS_URL = "https://www.ecb.europa.eu/rss/press.html"
@@ -143,22 +146,27 @@ class Tier1StreamSpec:
     url: str
     min_poll_seconds: float = 15.0
     enrich_live_articles: bool = False
+    feed_format: str = "rss"
 
 
 DEFAULT_TIER1_STREAMS: tuple[Tier1StreamSpec, ...] = (
     Tier1StreamSpec(
         provider="investinglive",
-        stream="news/rss",
+        stream="news/live_feed",
         kind="news",
-        url=INVESTINGLIVE_RSS_URL,
-        min_poll_seconds=15.0,
+        url=INVESTINGLIVE_LIVE_FEED_URL,
+        min_poll_seconds=10.0,
+        enrich_live_articles=True,
+        feed_format="investinglive_html",
     ),
     Tier1StreamSpec(
         provider="investinglive",
         stream="news/centralbank",
         kind="news",
-        url=INVESTINGLIVE_CENTRALBANK_RSS_URL,
+        url=INVESTINGLIVE_CENTRALBANK_LIVE_URL,
         min_poll_seconds=15.0,
+        enrich_live_articles=True,
+        feed_format="investinglive_html",
     ),
     Tier1StreamSpec(
         provider="ecb",
@@ -295,6 +303,31 @@ def extract_fed_article_text(html_doc: str, *, max_chars: int = MAX_ARTICLE_CHAR
             break
     text = html_to_plain_text(fragment)
     return text[:max_chars].strip()
+
+
+def extract_investinglive_article_text(html_doc: str, *, max_chars: int = MAX_ARTICLE_CHARS) -> str:
+    """Extract clean live article & Q&A bullets from an uncached investingLive article HTML page."""
+    match = re.search(
+        r'<div[^>]+data-ref=["\']article-body["\'][^>]*>',
+        html_doc,
+        re.IGNORECASE,
+    )
+    if match is not None:
+        fragment = html_doc[match.end() :]
+        end_match = re.search(
+            r'<div[^>]+data-zone=["\']ArticleEnd["\']|</article>',
+            fragment,
+            re.IGNORECASE,
+        )
+        if end_match is not None:
+            fragment = fragment[: end_match.start()]
+        text = html_to_plain_text(fragment)
+        return text[:max_chars].strip()
+
+    art_match = re.search(r"<article\b[^>]*>(.*?)</article>", html_doc, re.IGNORECASE | re.DOTALL)
+    if art_match is not None:
+        return html_to_plain_text(art_match.group(1))[:max_chars].strip()
+    return ""
 
 
 def _parse_feed_datetime(value: str) -> datetime:
@@ -438,18 +471,244 @@ def _rss_item_fingerprint(
     url: str,
     desc_plain: str,
     categories: tuple[str, ...],
+    modified_at: str | None = None,
 ) -> str:
-    payload = json.dumps(
-        {
-            "title": title,
-            "url": url,
-            "desc": desc_plain,
-            "categories": list(categories),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-    )
+    doc: dict[str, Any] = {
+        "title": title,
+        "url": url,
+        "desc": desc_plain,
+        "categories": list(categories),
+    }
+    if modified_at:
+        doc["modified_at"] = modified_at
+    payload = json.dumps(doc, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def parse_investinglive_live_html(
+    payload: bytes,
+    *,
+    stream: str,
+    received_at: datetime,
+    expected_hosts: frozenset[str] | None = None,
+    article_bodies: dict[str, str] | None = None,
+    out_rss_fingerprints: dict[str, str] | None = None,
+    limit: int = 40,
+) -> tuple[tuple[SourceRecord, ...], tuple[RejectedRecord, ...], str | None]:
+    """Parse uncached investingLive /live-feed/ or /CentralBanks/ HTML + RSC stream into SourceRecords."""
+    if received_at.tzinfo is None or received_at.utcoffset() is None:
+        raise ValueError("Receipt requires a timezone")
+    received_utc = received_at.astimezone(UTC)
+    html_doc = payload.decode("utf-8", errors="replace")
+
+    raw_chunks: list[str] = []
+    for m in re.finditer(
+        r'self\.__next_f\.push\(\[1,("(?:\\.|[^"\\])*")\]\)', html_doc, flags=re.DOTALL
+    ):
+        try:
+            decoded_chunk = json.loads(m.group(1))
+            if isinstance(decoded_chunk, str):
+                raw_chunks.append(decoded_chunk)
+        except json.JSONDecodeError:
+            continue
+
+    items_raw: list[dict[str, Any]] = []
+    if raw_chunks:
+        stream_text = "".join(raw_chunks)
+        decoder = json.JSONDecoder()
+        by_cid: dict[str, dict[str, Any]] = {}
+        search_from = 0
+        while True:
+            idx = stream_text.find('{"contentItemId":', search_from)
+            if idx == -1:
+                break
+            try:
+                obj, end = decoder.raw_decode(stream_text, idx)
+                search_from = end
+            except json.JSONDecodeError:
+                search_from = idx + 17
+                continue
+            if not isinstance(obj, dict) or obj.get("contentType") != "Article":
+                continue
+            if obj.get("published") is False:
+                continue
+            cid = str(obj.get("contentItemId") or "").strip()
+            if not cid:
+                continue
+            prev = by_cid.get(cid)
+            if prev is None:
+                by_cid[cid] = obj
+            else:
+                prev_exp = len(str(prev.get("expandedContent") or ""))
+                curr_exp = len(str(obj.get("expandedContent") or ""))
+                prev_mod = str(prev.get("modifiedUtc") or "")
+                curr_mod = str(obj.get("modifiedUtc") or "")
+                if (curr_mod, curr_exp) > (prev_mod, prev_exp):
+                    by_cid[cid] = obj
+        items_raw = sorted(
+            by_cid.values(),
+            key=lambda x: (
+                str(x.get("modifiedUtc") or x.get("publishedUtc") or ""),
+                str(x.get("contentItemId") or ""),
+            ),
+            reverse=True,
+        )
+
+    # Static HTML card fallback when RSC script chunks are absent
+    if not items_raw:
+        card_pattern = re.compile(
+            r'<a[^>]+ArticleSlotHeader[^>]+href=["\']([^"\']+)["\'][^>]*>\s*<h3[^>]*>(.*?)</h3>\s*</a>',
+            re.IGNORECASE | re.DOTALL,
+        )
+        for idx_card, card_match in enumerate(card_pattern.finditer(html_doc)):
+            href, raw_h3 = card_match.group(1), card_match.group(2)
+            tail_window = html_doc[card_match.end() : card_match.end() + 2500]
+            head_window = html_doc[max(0, card_match.start() - 600) : card_match.start()]
+            time_m = re.search(r'<time[^>]+dateTime=["\']([^"\']+)["\']', tail_window)
+            cat_m = re.search(r'CategoryLabelLink[^>]+title=["\']([^"\']+)["\']', head_window)
+            tldr_m = re.search(
+                r'<section[^>]+aria-label=["\']Summary["\'][^>]*>(.*?)</section>',
+                tail_window,
+                re.IGNORECASE | re.DOTALL,
+            )
+            items_raw.append(
+                {
+                    "contentItemId": f"card-{idx_card}",
+                    "displayText": raw_h3,
+                    "path": href,
+                    "publishedUtc": time_m.group(1) if time_m else "",
+                    "modifiedUtc": time_m.group(1) if time_m else "",
+                    "isSponsored": False,
+                    "category": (
+                        {"termContentItems": [{"displayText": cat_m.group(1)}]} if cat_m else {}
+                    ),
+                    "briefSummary": {"html": tldr_m.group(1) if tldr_m else ""},
+                    "summary": {"html": ""},
+                    "expandedContent": "",
+                }
+            )
+
+    if not items_raw and "<html" not in html_doc.lower():
+        return (), (), "invalid_investinglive_html"
+
+    records: list[SourceRecord] = []
+    rejected: list[RejectedRecord] = []
+    seen_ids: set[str] = set()
+    bodies = article_bodies or {}
+
+    for idx, obj in enumerate(items_raw[:limit]):
+        try:
+            title = html_to_plain_text(str(obj.get("displayText") or ""))
+            if not title:
+                raise ValueError("missing_title")
+            raw_path = str(obj.get("path") or "").strip()
+            if not raw_path:
+                raise ValueError("missing_path")
+            raw_url = (
+                raw_path
+                if raw_path.startswith(("http://", "https://"))
+                else f"https://investinglive.com/{raw_path.strip('/')}/"
+            )
+            url = _normalize_url(raw_url, expected_hosts=expected_hosts)
+            source_id = _stable_source_id("investinglive", url)
+            if source_id in seen_ids:
+                continue
+            seen_ids.add(source_id)
+
+            pub_obj = obj.get("publication")
+            raw_pub = str(
+                obj.get("publishedUtc")
+                or (pub_obj.get("publicationDateUtc") if isinstance(pub_obj, dict) else "")
+                or ""
+            ).strip()
+            displayed: datetime | None = None
+            if raw_pub:
+                parsed_pub = _parse_feed_datetime(raw_pub)
+                if parsed_pub <= received_utc:
+                    displayed = parsed_pub
+                elif parsed_pub <= received_utc + timedelta(seconds=120):
+                    displayed = received_utc
+                else:
+                    raise ValueError("publisher_display_after_receipt")
+
+            cat_items = (
+                (obj.get("category") or {}).get("termContentItems", [])
+                if isinstance(obj.get("category"), dict)
+                else []
+            )
+            cat_list = [
+                str(c.get("displayText")).strip()
+                for c in cat_items
+                if isinstance(c, dict) and str(c.get("displayText") or "").strip()
+            ]
+            if bool(obj.get("isSponsored")) and "Sponsored" not in cat_list:
+                cat_list.append("Sponsored")
+            categories = tuple(cat_list)
+
+            brief_html = (
+                str((obj.get("briefSummary") or {}).get("html") or "")
+                if isinstance(obj.get("briefSummary"), dict)
+                else ""
+            )
+            sum_html = (
+                str((obj.get("summary") or {}).get("html") or "")
+                if isinstance(obj.get("summary"), dict)
+                else ""
+            )
+            exp_html = str(obj.get("expandedContent") or "")
+            brief_plain = html_to_plain_text(f"{brief_html}\n{sum_html}")
+            preview_plain = html_to_plain_text(exp_html)
+            combined_preview = "\n".join(
+                p for p in (brief_plain, preview_plain) if p and p.lower() != title.lower()
+            ).strip()
+
+            mod_utc = str(obj.get("modifiedUtc") or "").strip() or None
+            if out_rss_fingerprints is not None:
+                out_rss_fingerprints[source_id] = _rss_item_fingerprint(
+                    title=title,
+                    url=url,
+                    desc_plain=combined_preview,
+                    categories=categories,
+                    modified_at=mod_utc,
+                )
+
+            enriched = bodies.get(source_id, "").strip()
+            header_tags = "[INVESTINGLIVE]"
+            if categories:
+                header_tags += f" [Categories: {', '.join(categories[:5])}]"
+            body_sections = [f"{header_tags} {title}"]
+            if (
+                brief_plain
+                and brief_plain.lower() != title.lower()
+                and (not enriched or brief_plain.lower() not in enriched.lower())
+            ):
+                body_sections.append(brief_plain)
+            if enriched:
+                body_sections.append(enriched)
+            elif (
+                preview_plain
+                and preview_plain.lower() != title.lower()
+                and preview_plain.lower() != brief_plain.lower()
+            ):
+                body_sections.append(preview_plain)
+            body_sections.append(f"Source URL: {url}")
+            full_text = "\n".join(body_sections).strip()
+
+            importance = _score_rss_item("investinglive", stream, title, full_text, categories)
+            records.append(
+                SourceRecord(
+                    source_id=source_id,
+                    kind="news",
+                    source_url=url,
+                    title=title,
+                    text=full_text,
+                    publisher_display_at=displayed,
+                    importance=importance,
+                )
+            )
+        except (ValueError, ValidationError) as exc:
+            rejected.append(RejectedRecord(index=idx, reason=str(exc)))
+    return tuple(records), tuple(rejected), None
 
 
 def parse_rss_capture(
@@ -665,7 +924,7 @@ class Tier1EnglishSource:
         self._in_flight_streams: set[tuple[str, str]] = set()
 
     async def _get_bytes(
-        self, url: str
+        self, url: str, *, max_bytes: int = MAX_BYTES
     ) -> tuple[bytes, dict[str, str], datetime, datetime, float, int]:
         headers = {
             "User-Agent": USER_AGENT,
@@ -686,7 +945,8 @@ class Tier1EnglishSource:
                         resp_headers = {
                             k.lower(): v
                             for k, v in resp.headers.items()
-                            if k.lower() in {"content-type", "etag", "last-modified", "date", "age"}
+                            if k.lower()
+                            in {"content-type", "etag", "last-modified", "date", "age", "x-cache"}
                         }
                         if status == 429 or 500 <= status <= 599:
                             raise CaptureError(f"transient_http_{status}")
@@ -696,7 +956,7 @@ class Tier1EnglishSource:
                         total = 0
                         async for chunk in resp.aiter_bytes():
                             total += len(chunk)
-                            if total > MAX_BYTES:
+                            if total > max_bytes:
                                 raise CaptureError("response_too_large")
                             chunks.append(chunk)
                         elapsed_ms = max(0.0, (time.monotonic() - t0) * 1000.0)
@@ -721,6 +981,16 @@ class Tier1EnglishSource:
                     await asyncio.sleep(1.0)
         raise CaptureError("unreachable_retry_exhausted")
 
+    @staticmethod
+    def _is_enrichable_live_record(spec: Tier1StreamSpec, rec: SourceRecord) -> bool:
+        if spec.provider in {"ecb", "fed"}:
+            return rec.source_url.lower().endswith((".html", ".htm"))
+        if spec.provider == "investinglive":
+            if (rec.importance or 0) < 2:
+                return False
+            return bool(_EURUSD_EN_PATTERN.search(f"{rec.title}\n{rec.text}"))
+        return False
+
     async def _enrich_articles(
         self,
         spec: Tier1StreamSpec,
@@ -731,12 +1001,13 @@ class Tier1EnglishSource:
         persisted_enrichments: dict[str, StoredEnrichment] | None = None,
         rss_fingerprints: dict[str, str] | None = None,
     ) -> tuple[dict[str, str], tuple[ArticleEnrichment, ...]]:
-        """Resolve official ECB/Fed full bodies without regression across polls.
+        """Resolve ECB/Fed/investingLive full bodies without regression across polls.
 
-        - Reuses persisted full-text bodies when an item's RSS fingerprint is unchanged.
+        - Reuses persisted full-text bodies when an item's upstream fingerprint (including
+          investingLive ``modifiedUtc``) is unchanged.
         - Fetches full HTML (preserving raw response bytes + fetch timestamps) for brand-new
           live arrivals, live arrivals whose initial HTML fetch previously failed, or items
-          whose upstream RSS fingerprint changed.
+          whose upstream fingerprint / ``modifiedUtc`` changed (e.g. live Q&A updates).
         - Never fetches historical baseline archive items.
         """
         bodies: dict[str, str] = {}
@@ -754,16 +1025,19 @@ class Tier1EnglishSource:
                     bodies[rec.source_id] = prev.extracted_text
                     continue
                 if rec.source_url == prev.source_url:
-                    # Fallback if re-fetch transiently fails, while still letting RSS revisions advance
+                    # Fallback if re-fetch transiently fails, while still letting revisions advance
                     bodies[rec.source_id] = prev.extracted_text
-                if rec.source_url.lower().endswith((".html", ".htm")):
+                if self._is_enrichable_live_record(spec, rec):
                     fetch_candidates.append(rec)
             else:
                 is_live_candidate = (rec.source_id not in known_ids) or (rec.source_id in live_seen)
-                if is_live_candidate and rec.source_url.lower().endswith((".html", ".htm")):
+                if is_live_candidate and self._is_enrichable_live_record(spec, rec):
                     fetch_candidates.append(rec)
 
-        for rec in fetch_candidates[:3]:
+        fetch_candidates.sort(key=lambda r: -(r.importance or 0))
+        article_max_bytes = MAX_LIVE_HTML_BYTES if spec.provider == "investinglive" else MAX_BYTES
+        max_fetches = 4 if spec.provider == "investinglive" else 3
+        for rec in fetch_candidates[:max_fetches]:
             try:
                 (
                     raw_html_bytes,
@@ -772,13 +1046,14 @@ class Tier1EnglishSource:
                     html_received,
                     html_elapsed_ms,
                     html_attempts,
-                ) = await self._get_bytes(rec.source_url)
+                ) = await self._get_bytes(rec.source_url, max_bytes=article_max_bytes)
                 html_doc = raw_html_bytes.decode("utf-8", errors="replace")
-                extracted = (
-                    extract_ecb_article_text(html_doc)
-                    if spec.provider == "ecb"
-                    else extract_fed_article_text(html_doc)
-                )
+                if spec.provider == "ecb":
+                    extracted = extract_ecb_article_text(html_doc)
+                elif spec.provider == "investinglive":
+                    extracted = extract_investinglive_article_text(html_doc)
+                else:
+                    extracted = extract_fed_article_text(html_doc)
                 if extracted:
                     bodies[rec.source_id] = extracted
                     fetched_enrichments.append(
@@ -812,6 +1087,9 @@ class Tier1EnglishSource:
         non_baseline_ids: set[str] | None = None,
         persisted_enrichments: dict[str, StoredEnrichment] | None = None,
     ) -> CaptureBatch:
+        stream_max_bytes = (
+            MAX_LIVE_HTML_BYTES if spec.feed_format == "investinglive_html" else MAX_BYTES
+        )
         (
             payload,
             resp_headers,
@@ -819,7 +1097,7 @@ class Tier1EnglishSource:
             received_at,
             elapsed_ms,
             attempts,
-        ) = await self._get_bytes(spec.url)
+        ) = await self._get_bytes(spec.url, max_bytes=stream_max_bytes)
         enrichments: tuple[ArticleEnrichment, ...] = ()
         if spec.kind == "calendar":
             records, rejected, error = parse_forexfactory_calendar(
@@ -828,15 +1106,25 @@ class Tier1EnglishSource:
         else:
             expected_hosts = _EXPECTED_HOSTS_BY_PROVIDER.get(spec.provider)
             rss_fps: dict[str, str] = {}
-            records, rejected, error = parse_rss_capture(
-                payload,
-                provider=spec.provider,
-                stream=spec.stream,
-                received_at=received_at,
-                expected_hosts=expected_hosts,
-                out_rss_fingerprints=rss_fps,
-                limit=limit,
-            )
+            if spec.feed_format == "investinglive_html":
+                records, rejected, error = parse_investinglive_live_html(
+                    payload,
+                    stream=spec.stream,
+                    received_at=received_at,
+                    expected_hosts=expected_hosts,
+                    out_rss_fingerprints=rss_fps,
+                    limit=limit,
+                )
+            else:
+                records, rejected, error = parse_rss_capture(
+                    payload,
+                    provider=spec.provider,
+                    stream=spec.stream,
+                    received_at=received_at,
+                    expected_hosts=expected_hosts,
+                    out_rss_fingerprints=rss_fps,
+                    limit=limit,
+                )
             if (
                 error is None
                 and spec.enrich_live_articles
@@ -856,15 +1144,25 @@ class Tier1EnglishSource:
                     if enrichments:
                         latest_enr = max(enr.fetched_at for enr in enrichments)
                         received_at = max(received_at, latest_enr, self.clock().astimezone(UTC))
-                    records, rejected, error = parse_rss_capture(
-                        payload,
-                        provider=spec.provider,
-                        stream=spec.stream,
-                        received_at=received_at,
-                        expected_hosts=expected_hosts,
-                        article_bodies=bodies,
-                        limit=limit,
-                    )
+                    if spec.feed_format == "investinglive_html":
+                        records, rejected, error = parse_investinglive_live_html(
+                            payload,
+                            stream=spec.stream,
+                            received_at=received_at,
+                            expected_hosts=expected_hosts,
+                            article_bodies=bodies,
+                            limit=limit,
+                        )
+                    else:
+                        records, rejected, error = parse_rss_capture(
+                            payload,
+                            provider=spec.provider,
+                            stream=spec.stream,
+                            received_at=received_at,
+                            expected_hosts=expected_hosts,
+                            article_bodies=bodies,
+                            limit=limit,
+                        )
 
         return CaptureBatch(
             provider=spec.provider,

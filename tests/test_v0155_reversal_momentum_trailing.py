@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import pytest
 
 from eventlens.contracts import (
@@ -34,8 +35,12 @@ from eventlens.runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeS
 from eventlens.shadow_cli import _build_policies
 from eventlens.sources.english_tier1 import (
     DEFAULT_TIER1_STREAMS,
+    INVESTINGLIVE_CENTRALBANK_LIVE_URL,
     INVESTINGLIVE_CENTRALBANK_RSS_URL,
+    INVESTINGLIVE_LIVE_FEED_URL,
     EURUSDEventFilter,
+    Tier1EnglishSource,
+    Tier1StreamSpec,
     format_revision_marginal_delta,
 )
 from eventlens.sqlite_memory import SQLiteThesisMemory
@@ -381,9 +386,13 @@ def test_causal_price_trajectory_summary_and_strict_anti_lookahead(tmp_path: Pat
 
 def test_revision_marginal_delta_in_shadow_runner_and_centralbank_dedup(tmp_path: Path) -> None:
     """ShadowRunner prepends verbatim [REVISION r2 MARGINAL UPDATE] lines on updated liveblogs, and news/centralbank deduplicates cleanly."""
-    streams = {(s.provider, s.stream): s.url for s in DEFAULT_TIER1_STREAMS}
+    streams = {(s.provider, s.stream): s for s in DEFAULT_TIER1_STREAMS}
+    assert ("investinglive", "news/live_feed") in streams
     assert ("investinglive", "news/centralbank") in streams
-    assert streams[("investinglive", "news/centralbank")] == INVESTINGLIVE_CENTRALBANK_RSS_URL
+    assert streams[("investinglive", "news/live_feed")].url == INVESTINGLIVE_LIVE_FEED_URL
+    assert streams[("investinglive", "news/centralbank")].url == INVESTINGLIVE_CENTRALBANK_LIVE_URL
+    assert streams[("investinglive", "news/live_feed")].enrich_live_articles is True
+    assert streams[("investinglive", "news/centralbank")].enrich_live_articles is True
 
     now = T0
     ostore = ObserverStore(tmp_path / "obs.sqlite", clock=lambda: now)
@@ -761,3 +770,183 @@ def test_cli_pip_and_trailing_policy_overrides() -> None:
     )
     with pytest.raises(ValueError, match="trailing_distance_pips"):
         _build_policies(ns_invalid)
+
+
+def _mock_investinglive_feed_html(items: list[dict]) -> bytes:
+    rsc_str = json.dumps({"articles": items}, ensure_ascii=False)
+    escaped = json.dumps(rsc_str, ensure_ascii=False)
+    return f"<!doctype html><html><body><script>self.__next_f.push([1,{escaped}])</script></body></html>".encode(
+        "utf-8"
+    )
+
+
+def test_uncached_investinglive_live_feed_enriches_and_re_fetches_on_modified_utc(
+    tmp_path: Path,
+) -> None:
+    """Uncached /live-feed/ skips baseline article fetches, enriches live EUR/USD macro posts, and re-fetches immediately when modifiedUtc advances during Q&A."""
+    t0 = datetime(2026, 10, 29, 13, 50, 0, tzinfo=UTC)
+    clock_now = t0
+
+    baseline_item = {
+        "contentItemId": "base-item-1",
+        "contentType": "Article",
+        "displayText": "European stock market open: Mixed session",
+        "path": "stocks/european-stock-market-open-mixed",
+        "published": True,
+        "publishedUtc": "2026-10-29T08:22:52Z",
+        "modifiedUtc": "2026-10-29T08:22:52Z",
+        "isSponsored": False,
+        "category": {"termContentItems": [{"displayText": "Stocks"}]},
+        "briefSummary": {"html": "<p>Equities mixed ahead of ECB.</p>"},
+        "summary": {"html": ""},
+        "expandedContent": "<p>Cautious tone.</p>",
+    }
+    tech_noise_item = {
+        "contentItemId": "tech-item-2",
+        "contentType": "Article",
+        "displayText": "EURUSD technical levels near 100-hour MA",
+        "path": "technical-analysis/eurusd-100ma",
+        "published": True,
+        "publishedUtc": "2026-10-29T13:52:00Z",
+        "modifiedUtc": "2026-10-29T13:52:00Z",
+        "isSponsored": False,
+        "category": {"termContentItems": [{"displayText": "Technical Analysis"}]},
+        "briefSummary": {"html": "<p>Chart levels.</p>"},
+        "summary": {"html": ""},
+        "expandedContent": "<p>Support at 1.1120.</p>",
+    }
+
+    def _lagarde_item(mod_utc: str) -> dict:
+        return {
+            "contentItemId": "ecb-lagarde-live-1",
+            "contentType": "Article",
+            "displayText": "Lagarde: Growth should be underpinned in the near term",
+            "path": "central-banks/lagarde-growth-should-be-underpinned-in-the-near-term",
+            "published": True,
+            "publishedUtc": "2026-10-29T13:53:38Z",
+            "modifiedUtc": mod_utc,
+            "isSponsored": False,
+            "category": {"termContentItems": [{"displayText": "Central Banks"}]},
+            "briefSummary": {
+                "html": "<p>Comments from the ECB President in her press conference</p>"
+            },
+            "summary": {"html": ""},
+            # Truncated preview on /live-feed/ stays identical even when Q&A is appended!
+            "expandedContent": "<ul><li>AI investment should support growth</li></ul>",
+        }
+
+    article_r1_html = b"""<!doctype html><html><body>
+    <div data-ref="article-body">
+      <ul>
+        <li>AI investment should support growth</li>
+        <li>Wages pressures remain moderate</li>
+      </ul>
+    </div>
+    <div data-zone="ArticleEnd">Footer</div>
+    </body></html>"""
+
+    article_r2_html = b"""<!doctype html><html><body>
+    <div data-ref="article-body">
+      <ul>
+        <li>AI investment should support growth</li>
+        <li>Wages pressures remain moderate</li>
+        <li>Inflation risks are to the upside</li>
+      </ul>
+      <p>Q&amp;A:</p>
+      <ul>
+        <li>There was a debate about a hike</li>
+      </ul>
+    </div>
+    <div data-zone="ArticleEnd">Footer</div>
+    </body></html>"""
+
+    stage = 0
+    requests_seen: list[str] = []
+    lagarde_url = (
+        "https://investinglive.com/central-banks/"
+        "lagarde-growth-should-be-underpinned-in-the-near-term/"
+    )
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        url = str(req.url)
+        requests_seen.append(url)
+        if url == INVESTINGLIVE_LIVE_FEED_URL:
+            if stage == 0:
+                body = _mock_investinglive_feed_html([baseline_item])
+            elif stage in (1, 2):
+                body = _mock_investinglive_feed_html(
+                    [_lagarde_item("2026-10-29T13:53:38Z"), tech_noise_item, baseline_item]
+                )
+            else:
+                body = _mock_investinglive_feed_html(
+                    [_lagarde_item("2026-10-29T14:05:12Z"), tech_noise_item, baseline_item]
+                )
+            return httpx.Response(200, content=body, headers={"x-cache": "Miss from cloudfront"})
+        if url == lagarde_url:
+            art = article_r1_html if stage < 3 else article_r2_html
+            return httpx.Response(200, content=art, headers={"x-cache": "Miss from cloudfront"})
+        return httpx.Response(404)
+
+    store = ObserverStore(tmp_path / "il_live.sqlite", clock=lambda: clock_now)
+    spec = Tier1StreamSpec(
+        provider="investinglive",
+        stream="news/live_feed",
+        kind="news",
+        url=INVESTINGLIVE_LIVE_FEED_URL,
+        min_poll_seconds=10.0,
+        enrich_live_articles=True,
+        feed_format="investinglive_html",
+    )
+    src = Tier1EnglishSource(
+        streams=(spec,),
+        transport=httpx.MockTransport(handler),
+        clock=lambda: clock_now,
+    )
+    try:
+        # Stage 0: baseline -> 0 article fetches
+        r0 = asyncio.run(src.poll_due_streams(store, force=True))
+        assert r0[0]["counts"]["baseline"] == 1
+        assert requests_seen == [INVESTINGLIVE_LIVE_FEED_URL]
+
+        # Stage 1: live arrival -> fetches ONLY Lagarde article (skips Technical Analysis noise!)
+        stage = 1
+        clock_now = t0 + timedelta(minutes=4)
+        requests_seen.clear()
+        r1 = asyncio.run(src.poll_due_streams(store, force=True))
+        assert r1[0]["counts"]["new"] == 2
+        assert requests_seen == [INVESTINGLIVE_LIVE_FEED_URL, lagarde_url]
+
+        # Stage 2: unchanged modifiedUtc -> reuses persisted enrichment, 0 article re-fetches, 0 revisions
+        stage = 2
+        clock_now = t0 + timedelta(minutes=5)
+        requests_seen.clear()
+        r2 = asyncio.run(src.poll_due_streams(store, force=True))
+        assert r2[0]["counts"]["revised"] == 0
+        assert requests_seen == [INVESTINGLIVE_LIVE_FEED_URL]
+
+        # Stage 3: author appends Q&A ("There was a debate about a hike") -> modifiedUtc advances -> immediate re-fetch & r2!
+        stage = 3
+        clock_now = t0 + timedelta(minutes=16)
+        requests_seen.clear()
+        r3 = asyncio.run(src.poll_due_streams(store, force=True))
+        assert r3[0]["counts"]["revised"] == 1
+        assert requests_seen == [INVESTINGLIVE_LIVE_FEED_URL, lagarde_url]
+
+        revs = [
+            r
+            for r in store.revisions(provider="investinglive", as_of=clock_now)
+            if "Lagarde:" in r.record.title
+        ]
+        assert [r.revision for r in revs] == [1, 2]
+        assert "There was a debate about a hike" in revs[-1].record.text
+        assert "Inflation risks are to the upside" in revs[-1].record.text
+
+        hist = store.history(
+            "news", revs[-1].record.source_id, provider="investinglive", as_of=clock_now
+        )
+        assert len(hist) == 2
+        delta = format_revision_marginal_delta(hist[1], hist[0])
+        assert delta is not None
+        assert "There was a debate about a hike" in delta
+    finally:
+        store.close()
