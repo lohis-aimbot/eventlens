@@ -5,15 +5,18 @@ import asyncio
 import json
 import logging
 import math
+import sqlite3
+from bisect import bisect_left
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal
 
 from .contracts import AgentContext, AgentDecision, MarketSnapshot
 from .deepseek import DeepSeekClient
+from .observer import APPLICATION_ID as OBSERVER_APPLICATION_ID
 from .observer import ObserverStore
-from .quotes import QuoteStore, build_market_snapshot
+from .quotes import EURUSD_PIP, QuoteStore, build_market_snapshot, compute_price_trajectory
 from .runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeStore
 from .sources.english_tier1 import EURUSDEventFilter, Tier1EnglishSource
 from .sources.wallstreetcn import WallStreetCNSource
@@ -22,6 +25,444 @@ from .trading.agent import SinglePassTradingAgent
 from .trading.execution import ProtectiveExitPolicy, ShadowCostModel, SQLiteShadowLedger
 from .trading.portfolio import LOT_UNITS_EUR, DeterministicTargetValidator
 from .trading.risk import DeterministicHardRiskEngine, RiskPolicy
+
+_DEFAULT_SHADOW_DB = Path("data/shadow-ledger.sqlite")
+_DEFAULT_MEMORY_DB = Path("data/shadow-memory.sqlite")
+_DEFAULT_OBSERVER_DB = Path("data/observer.sqlite")
+_DEFAULT_QUOTES_DB = Path("data/live-quotes.sqlite")
+
+
+def _pips_str(delta: Decimal) -> str:
+    return str((delta / EURUSD_PIP).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
+def _parse_utc(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        return None
+    return dt.astimezone(UTC)
+
+
+def _extract_headline(raw_text: str | None) -> str | None:
+    if not raw_text:
+        return None
+    lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    for ln in lines:
+        if not ln.startswith("[REVISION ") and not ln.startswith("[FULL UPDATED ARTICLE TEXT]"):
+            return ln[:160]
+    return lines[0][:160]
+
+
+def _resolve_companion_dbs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """Resolve companion DBs for read-only status/report without cross-directory contamination."""
+    shadow_db: Path = getattr(args, "shadow_db", _DEFAULT_SHADOW_DB)
+    memory_db: Path = getattr(args, "memory_db", _DEFAULT_MEMORY_DB)
+    observer_db: Path = getattr(args, "observer_db", _DEFAULT_OBSERVER_DB)
+    quotes_db: Path = getattr(args, "quotes_db", _DEFAULT_QUOTES_DB)
+    if (
+        shadow_db != _DEFAULT_SHADOW_DB
+        and shadow_db.resolve().parent != _DEFAULT_SHADOW_DB.resolve().parent
+    ):
+        base_dir = shadow_db.parent
+        if memory_db == _DEFAULT_MEMORY_DB:
+            memory_db = base_dir / "shadow-memory.sqlite"
+        if observer_db == _DEFAULT_OBSERVER_DB:
+            observer_db = base_dir / "observer.sqlite"
+        if quotes_db == _DEFAULT_QUOTES_DB:
+            quotes_db = base_dir / "live-quotes.sqlite"
+    return memory_db, observer_db, quotes_db
+
+
+def _build_objective_diagnostics(
+    *,
+    state_store: SQLiteRuntimeStore,
+    memory_db: Path,
+    observer_db: Path,
+    quotes_db: Path,
+    basis: Literal["live_poll", "synthetic_fixture"],
+    now: datetime,
+) -> dict[str, Any]:
+    """Compute unspinable window moves, post-event excursions, feed lags, and cache headers."""
+    event_rows = state_store.db.execute(
+        """SELECT event_id, state, reason, received_at, context_json, decision_json
+        FROM runtime_events
+        WHERE reason NOT LIKE 'baseline_%'
+          AND state != 'bundled'
+        ORDER BY received_at DESC, first_seen_at DESC
+        LIMIT 10"""
+    ).fetchall()
+    event_rows = list(reversed(event_rows))
+
+    mem_conn: sqlite3.Connection | None = None
+    obs_conn: sqlite3.Connection | None = None
+    try:
+        if memory_db.is_file():
+            try:
+                mem_conn = sqlite3.connect(
+                    memory_db.resolve().as_uri() + "?mode=ro",
+                    uri=True,
+                    timeout=5,
+                )
+            except sqlite3.Error:
+                mem_conn = None
+
+        if observer_db.is_file():
+            try:
+                cand_obs = sqlite3.connect(
+                    observer_db.resolve().as_uri() + "?mode=ro",
+                    uri=True,
+                    timeout=5,
+                )
+                cand_obs.row_factory = sqlite3.Row
+                app_id = cand_obs.execute("PRAGMA application_id").fetchone()[0]
+                if app_id == OBSERVER_APPLICATION_ID:
+                    obs_conn = cand_obs
+                else:
+                    cand_obs.close()
+            except sqlite3.Error:
+                obs_conn = None
+
+        parsed_events: list[dict[str, Any]] = []
+        event_anchor_times: list[datetime] = []
+        for row in event_rows:
+            ev_id = str(row["event_id"])
+            received_dt = _parse_utc(row["received_at"])
+            if received_dt is not None:
+                event_anchor_times.append(received_dt)
+            source_ts_str: str | None = None
+            raw_text_str: str | None = None
+            if row["context_json"]:
+                try:
+                    ctx_ev = json.loads(row["context_json"]).get("event") or {}
+                    source_ts_str = ctx_ev.get("source_timestamp")
+                    raw_text_str = ctx_ev.get("raw_text")
+                except (ValueError, TypeError, AttributeError):
+                    pass
+
+            if (source_ts_str is None or raw_text_str is None) and mem_conn is not None:
+                try:
+                    mem_row = mem_conn.execute(
+                        "SELECT payload FROM raw_events WHERE event_id=?",
+                        (ev_id,),
+                    ).fetchone()
+                    if mem_row is not None:
+                        raw_ev = json.loads(mem_row[0])
+                        if source_ts_str is None:
+                            source_ts_str = raw_ev.get("source_timestamp")
+                        if raw_text_str is None:
+                            raw_text_str = raw_ev.get("raw_text")
+                except (sqlite3.Error, ValueError, TypeError):
+                    pass
+
+            if (source_ts_str is None or raw_text_str is None) and obs_conn is not None:
+                parts = ev_id.split(":")
+                if len(parts) >= 4 and parts[-1].startswith("r") and parts[-1][1:].isdigit():
+                    provider, kind = parts[0], parts[1]
+                    source_id = ":".join(parts[2:-1])
+                    rev_num = int(parts[-1][1:])
+                    try:
+                        obs_row = obs_conn.execute(
+                            """SELECT record FROM observer_revisions
+                            WHERE provider=? AND basis=? AND kind=? AND source_id=? AND revision=?""",
+                            (provider, basis, kind, source_id, rev_num),
+                        ).fetchone()
+                        if obs_row is not None:
+                            rec = json.loads(obs_row["record"])
+                            if source_ts_str is None:
+                                source_ts_str = rec.get("publisher_display_at") or rec.get(
+                                    "scheduled_at"
+                                )
+                            if raw_text_str is None:
+                                raw_text_str = rec.get("title") or rec.get("text")
+                    except (sqlite3.Error, ValueError, TypeError):
+                        pass
+
+            source_dt = _parse_utc(source_ts_str)
+            if source_dt is not None:
+                event_anchor_times.append(source_dt)
+
+            portfolio_action: str | None = None
+            if row["decision_json"]:
+                try:
+                    portfolio_action = json.loads(row["decision_json"]).get("portfolio_action")
+                except (ValueError, TypeError, AttributeError):
+                    portfolio_action = None
+
+            lag_sec: float | None = None
+            if received_dt is not None and source_dt is not None:
+                lag_sec = round((received_dt - source_dt).total_seconds(), 2)
+
+            parsed_events.append(
+                {
+                    "event_id": ev_id,
+                    "headline": _extract_headline(raw_text_str),
+                    "state": str(row["state"]),
+                    "reason": str(row["reason"]),
+                    "portfolio_action": portfolio_action,
+                    "source_timestamp": source_dt.isoformat() if source_dt is not None else None,
+                    "received_at": received_dt.isoformat()
+                    if received_dt is not None
+                    else str(row["received_at"]),
+                    "receipt_lag_seconds": lag_sec,
+                    "_received_dt": received_dt,
+                    "_source_dt": source_dt,
+                }
+            )
+
+        market_window: dict[str, Any] | None = None
+        session_range: dict[str, Any] | None = None
+        all_samples: list[tuple[datetime, Decimal]] = []
+
+        if quotes_db.is_file():
+            try:
+                qstore = QuoteStore(quotes_db, readonly=True)
+            except (FileNotFoundError, ValueError, sqlite3.Error):
+                qstore = None
+            if qstore is not None:
+                try:
+                    obs = qstore.latest("EURUSD", now, basis=basis)
+                    if obs is not None:
+                        latest_sess_id = str(obs.quote.session_id)
+                        sess_row = qstore.db.execute(
+                            "SELECT start FROM quote_sessions WHERE session_id=?",
+                            (latest_sess_id,),
+                        ).fetchone()
+                        sess_start_dt = obs.received_at - timedelta(minutes=38)
+                        if sess_row is not None:
+                            try:
+                                parsed_start = _parse_utc(
+                                    json.loads(sess_row["start"]).get("started_at")
+                                )
+                                if parsed_start is not None:
+                                    sess_start_dt = parsed_start
+                            except (ValueError, TypeError):
+                                pass
+
+                        earliest_needed = min(
+                            [
+                                sess_start_dt,
+                                obs.received_at - timedelta(minutes=38),
+                                *event_anchor_times,
+                            ]
+                        )
+                        q_rows = qstore.db.execute(
+                            """SELECT session_id, received_at, quote
+                            FROM quote_observations
+                            WHERE symbol='EURUSD' AND basis=?
+                              AND available_at IS NOT NULL AND available_at <= ?
+                              AND received_at >= ?
+                            ORDER BY received_at ASC, sequence ASC""",
+                            (basis, now.isoformat(), earliest_needed.isoformat()),
+                        ).fetchall()
+
+                        sess_samples: list[tuple[datetime, Decimal]] = []
+                        for qr in q_rows:
+                            q_dt = _parse_utc(qr["received_at"])
+                            if q_dt is None:
+                                continue
+                            q_obj = json.loads(qr["quote"])
+                            mid = (
+                                Decimal(str(q_obj["bid"])) + Decimal(str(q_obj["ask"]))
+                            ) / Decimal("2")
+                            all_samples.append((q_dt, mid))
+                            if str(qr["session_id"]) == latest_sess_id:
+                                sess_samples.append((q_dt, mid))
+
+                        traj = compute_price_trajectory(
+                            all_samples,
+                            obs.received_at,
+                            instrument="EUR/USD",
+                        )
+                        if traj is not None:
+                            span_15m = (
+                                _pips_str(traj.window_15m_high_mid - traj.window_15m_low_mid)
+                                if (
+                                    traj.window_15m_high_mid is not None
+                                    and traj.window_15m_low_mid is not None
+                                )
+                                else None
+                            )
+                            span_30m = (
+                                _pips_str(traj.window_30m_high_mid - traj.window_30m_low_mid)
+                                if (
+                                    traj.window_30m_high_mid is not None
+                                    and traj.window_30m_low_mid is not None
+                                )
+                                else None
+                            )
+                            market_window = {
+                                "latest_quote_at": obs.received_at.isoformat(),
+                                "quote_age_seconds": round(
+                                    (now - obs.quote.source_at).total_seconds(), 2
+                                ),
+                                "current_bid": str(obs.quote.bid),
+                                "current_ask": str(obs.quote.ask),
+                                "current_mid": str(traj.current_mid),
+                                "change_1m_pips": str(traj.change_1m_pips)
+                                if traj.change_1m_pips is not None
+                                else None,
+                                "change_5m_pips": str(traj.change_5m_pips)
+                                if traj.change_5m_pips is not None
+                                else None,
+                                "change_15m_pips": str(traj.change_15m_pips)
+                                if traj.change_15m_pips is not None
+                                else None,
+                                "change_30m_pips": str(traj.change_30m_pips)
+                                if traj.change_30m_pips is not None
+                                else None,
+                                "window_15m_low_mid": str(traj.window_15m_low_mid)
+                                if traj.window_15m_low_mid is not None
+                                else None,
+                                "window_15m_high_mid": str(traj.window_15m_high_mid)
+                                if traj.window_15m_high_mid is not None
+                                else None,
+                                "window_15m_span_pips": span_15m,
+                                "window_30m_low_mid": str(traj.window_30m_low_mid)
+                                if traj.window_30m_low_mid is not None
+                                else None,
+                                "window_30m_high_mid": str(traj.window_30m_high_mid)
+                                if traj.window_30m_high_mid is not None
+                                else None,
+                                "window_30m_span_pips": span_30m,
+                                "sample_count_30m": traj.sample_count_30m,
+                            }
+
+                        if sess_samples:
+                            first_ts, first_mid = sess_samples[0]
+                            last_ts, last_mid = sess_samples[-1]
+                            high_ts, high_mid = first_ts, first_mid
+                            low_ts, low_mid = first_ts, first_mid
+                            for s_ts, s_mid in sess_samples[1:]:
+                                if s_mid > high_mid:
+                                    high_ts, high_mid = s_ts, s_mid
+                                if s_mid < low_mid:
+                                    low_ts, low_mid = s_ts, s_mid
+                            session_range = {
+                                "session_id": latest_sess_id,
+                                "sample_count": len(sess_samples),
+                                "first_at": first_ts.isoformat(),
+                                "first_mid": str(first_mid),
+                                "low_at": low_ts.isoformat(),
+                                "low_mid": str(low_mid),
+                                "high_at": high_ts.isoformat(),
+                                "high_mid": str(high_mid),
+                                "latest_at": last_ts.isoformat(),
+                                "latest_mid": str(last_mid),
+                                "span_pips": _pips_str(high_mid - low_mid),
+                                "net_change_pips": _pips_str(last_mid - first_mid),
+                            }
+                finally:
+                    qstore.close()
+
+        sample_times = [ts for ts, _ in all_samples]
+        recent_events_out: list[dict[str, Any]] = []
+        for item in parsed_events:
+            rx_dt: datetime | None = item.pop("_received_dt")
+            src_dt: datetime | None = item.pop("_source_dt")
+            move_before_receipt_pips: str | None = None
+            post_receipt_move: dict[str, Any] | None = None
+
+            if rx_dt is not None and all_samples:
+                rx_idx = bisect_left(sample_times, rx_dt)
+                if rx_idx < len(all_samples):
+                    sub = all_samples[rx_idx:]
+                    a_ts, a_mid = sub[0]
+                    l_ts, l_mid = sub[-1]
+                    h_ts, h_mid = a_ts, a_mid
+                    lo_ts, lo_mid = a_ts, a_mid
+                    for s_ts, s_mid in sub[1:]:
+                        if s_mid > h_mid:
+                            h_ts, h_mid = s_ts, s_mid
+                        if s_mid < lo_mid:
+                            lo_ts, lo_mid = s_ts, s_mid
+                    post_receipt_move = {
+                        "anchor_at": a_ts.isoformat(),
+                        "anchor_mid": str(a_mid),
+                        "high_at": h_ts.isoformat(),
+                        "high_mid": str(h_mid),
+                        "low_at": lo_ts.isoformat(),
+                        "low_mid": str(lo_mid),
+                        "latest_at": l_ts.isoformat(),
+                        "latest_mid": str(l_mid),
+                        "max_up_pips": _pips_str(h_mid - a_mid),
+                        "max_down_pips": _pips_str(lo_mid - a_mid),
+                        "span_pips": _pips_str(h_mid - lo_mid),
+                        "net_change_pips": _pips_str(l_mid - a_mid),
+                    }
+                    if src_dt is not None and src_dt < rx_dt:
+                        src_idx = bisect_left(sample_times, src_dt)
+                        if (
+                            src_idx < len(all_samples)
+                            and abs((all_samples[src_idx][0] - src_dt).total_seconds()) <= 30.0
+                        ):
+                            move_before_receipt_pips = _pips_str(a_mid - all_samples[src_idx][1])
+
+            item["move_before_receipt_pips"] = move_before_receipt_pips
+            item["post_receipt_move"] = post_receipt_move
+            recent_events_out.append(item)
+
+        stream_cache_headers: list[dict[str, Any]] = []
+        if obs_conn is not None:
+            try:
+                poll_rows = obs_conn.execute(
+                    """SELECT p.provider, p.stream, p.received_at, p.metadata
+                    FROM observer_polls p
+                    JOIN (
+                        SELECT provider, stream, MAX(received_at) AS max_received_at
+                        FROM observer_polls
+                        WHERE basis = ?
+                        GROUP BY provider, stream
+                    ) latest
+                      ON p.provider = latest.provider
+                     AND p.stream = latest.stream
+                     AND p.received_at = latest.max_received_at
+                    WHERE p.basis = ?
+                    ORDER BY p.provider, p.stream""",
+                    (basis, basis),
+                ).fetchall()
+                seen_streams: set[tuple[str, str]] = set()
+                for pr in poll_rows:
+                    key = (str(pr["provider"]), str(pr["stream"]))
+                    if key in seen_streams:
+                        continue
+                    seen_streams.add(key)
+                    meta = json.loads(pr["metadata"])
+                    headers = {
+                        str(k).lower(): str(v)
+                        for k, v in (meta.get("response_headers") or {}).items()
+                    }
+                    stream_cache_headers.append(
+                        {
+                            "provider": key[0],
+                            "stream": key[1],
+                            "request_url": meta.get("request_url"),
+                            "last_received_at": str(pr["received_at"]),
+                            "x_cache": headers.get("x-cache"),
+                            "cf_cache_status": headers.get("cf-cache-status"),
+                            "age": headers.get("age"),
+                        }
+                    )
+            except (sqlite3.Error, ValueError, TypeError):
+                pass
+
+        return {
+            "market_window": market_window,
+            "session_range": session_range,
+            "recent_events": recent_events_out,
+            "stream_cache_headers": stream_cache_headers,
+        }
+    finally:
+        if mem_conn is not None:
+            mem_conn.close()
+        if obs_conn is not None:
+            obs_conn.close()
 
 
 class _AbstainWithoutModelAgent:
@@ -175,28 +616,48 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             "synthetic_fixture" if raw_basis == "synthetic_fixture" else "live_poll"
         )
         if args.command == "status":
-            market = _load_latest_market(args.quotes_db, basis)
+            diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
+            market = _load_latest_market(diag_quotes_db, basis)
             snap = ledger.snapshot_sync(market=market)
             rep = ledger.report(market=market)
+            diagnostics = _build_objective_diagnostics(
+                state_store=state_store,
+                memory_db=diag_mem_db,
+                observer_db=diag_obs_db,
+                quotes_db=diag_quotes_db,
+                basis=basis,
+                now=now,
+            )
             return {
                 "scope": "shadow_only",
                 "execution_authorized": False,
                 "unclosed_risk": rep["unclosed_risk"],
                 "alerts": rep["alerts"],
                 "recovery_instructions": rep["recovery_instructions"],
+                "diagnostics": diagnostics,
                 "runner": state_store.runner_status(),
                 "portfolio": snap.model_dump(mode="json"),
             }
 
         if args.command == "report":
-            market = _load_latest_market(args.quotes_db, basis)
+            diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
+            market = _load_latest_market(diag_quotes_db, basis)
             rep = ledger.report(market=market)
+            diagnostics = _build_objective_diagnostics(
+                state_store=state_store,
+                memory_db=diag_mem_db,
+                observer_db=diag_obs_db,
+                quotes_db=diag_quotes_db,
+                basis=basis,
+                now=now,
+            )
             return {
                 "scope": "shadow_only",
                 "execution_authorized": False,
                 "unclosed_risk": rep["unclosed_risk"],
                 "alerts": rep["alerts"],
                 "recovery_instructions": rep["recovery_instructions"],
+                "diagnostics": diagnostics,
                 "ledger": rep,
                 "runtime": state_store.summary_report(),
             }

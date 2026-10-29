@@ -33,6 +33,7 @@ from eventlens.quotes import (
 )
 from eventlens.runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeStore
 from eventlens.shadow_cli import _build_policies
+from eventlens.shadow_cli import main as shadow_main
 from eventlens.sources.english_tier1 import (
     DEFAULT_TIER1_STREAMS,
     INVESTINGLIVE_CENTRALBANK_LIVE_URL,
@@ -950,3 +951,194 @@ def test_uncached_investinglive_live_feed_enriches_and_re_fetches_on_modified_ut
         assert "There was a debate about a hike" in delta
     finally:
         store.close()
+
+
+def test_shadow_cli_status_and_report_expose_objective_move_and_feed_lag_diagnostics(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """shadow status/report emit objective window ranges, per-event excursions, feed lags, and CDN headers without creating missing DBs."""
+    # 1. Missing companion DBs must never be created by read-only diagnostics
+    empty_dir = tmp_path / "empty_run"
+    shadow_main(["--shadow-db", str(empty_dir / "shadow-ledger.sqlite"), "status"])
+    empty_out = json.loads(capsys.readouterr().out)
+    assert empty_out["diagnostics"] == {
+        "market_window": None,
+        "session_range": None,
+        "recent_events": [],
+        "stream_cache_headers": [],
+    }
+    assert not (empty_dir / "shadow-memory.sqlite").exists()
+    assert not (empty_dir / "observer.sqlite").exists()
+    assert not (empty_dir / "live-quotes.sqlite").exists()
+
+    # 2. Populated sibling DBs resolve automatically and compute exact pip excursions & feed lag
+    run_dir = tmp_path / "ecb_run"
+    base_ts = (datetime.now(UTC) - timedelta(minutes=25)).replace(microsecond=0)
+    q_clock = base_ts - timedelta(minutes=1)
+    qstore = QuoteStore(run_dir / "live-quotes.sqlite", clock=lambda: q_clock)
+    ostore = ObserverStore(
+        run_dir / "observer.sqlite", clock=lambda: base_ts + timedelta(minutes=25)
+    )
+    mem = SQLiteThesisMemory(
+        run_dir / "shadow-memory.sqlite",
+        clock=lambda: base_ts + timedelta(minutes=20),
+        allow_targets=True,
+    )
+    state_store = SQLiteRuntimeStore(run_dir / "shadow-ledger.sqlite")
+    ledger = SQLiteShadowLedger(run_dir / "shadow-ledger.sqlite")
+    try:
+        qstore.start(
+            BridgeStart(
+                version=1,
+                kind="start",
+                session_id=SESSION_ID,
+                account_mode="demo",
+                running_mode="realtime",
+                symbol="EURUSD",
+                started_at=base_ts - timedelta(minutes=1),
+                sample_interval_ms=200,
+                duration_seconds=3600,
+                commission=Decimal("3"),
+                commission_type="UsdPerMillionUsdVolume",
+            ),
+            base_ts - timedelta(minutes=1),
+            basis="live_poll",
+        )
+        quote_points = [
+            (base_ts, "1.11190"),  # -25m (session low)
+            (base_ts + timedelta(minutes=10), "1.11200"),  # -15m (15m low & 15m anchor)
+            (base_ts + timedelta(minutes=13), "1.11280"),  # -12m (event source_timestamp)
+            (base_ts + timedelta(minutes=20), "1.11310"),  # -5m (event received_at)
+            (base_ts + timedelta(minutes=23), "1.11468"),  # -2m (post-event & session peak)
+            (base_ts + timedelta(minutes=24), "1.11420"),  # -1m
+            (base_ts + timedelta(minutes=25), "1.11450"),  # 0m (latest)
+        ]
+        for seq, (ts, px) in enumerate(quote_points, start=1):
+            q_clock = ts
+            qstore.record(
+                BridgeQuote(
+                    version=1,
+                    kind="quote",
+                    session_id=SESSION_ID,
+                    sequence=seq,
+                    symbol="EURUSD",
+                    source_at=ts - timedelta(milliseconds=40),
+                    bridge_at=ts - timedelta(milliseconds=15),
+                    bid=Decimal(px),
+                    ask=Decimal(px),
+                ),
+                ts,
+                '{"kind":"quote"}',
+            )
+
+        ostore.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                basis="live_poll",
+                request_url=INVESTINGLIVE_LIVE_FEED_URL,
+                request_started_at=base_ts + timedelta(minutes=20) - timedelta(milliseconds=120),
+                received_at=base_ts + timedelta(minutes=20),
+                elapsed_ms=120.0,
+                attempts=1,
+                payload=b"<html/>",
+                response_headers={"x-cache": "Miss from cloudfront", "age": "0"},
+                records=(
+                    SourceRecord(
+                        source_id="il:lagarde-qa",
+                        kind="news",
+                        source_url="https://investinglive.com/central-banks/lagarde/",
+                        title="Lagarde Q&A: There was a debate about a hike",
+                        text="There was a debate about a hike.",
+                        publisher_display_at=base_ts + timedelta(minutes=13),
+                        importance=3,
+                    ),
+                ),
+            )
+        )
+
+        # Baseline item must be excluded from recent_events
+        state_store.upsert_event_state(
+            event_id="investinglive:news:il:base:r1",
+            source_reference="https://investinglive.com/news/base/",
+            received_at=base_ts,
+            now=base_ts,
+            state="filtered_out",
+            reason="baseline_snapshot_not_live_arrival",
+        )
+
+        live_ev = Event(
+            event_id="investinglive:news:il:lagarde-qa:r1",
+            source="investinglive_news",
+            source_type="news",
+            source_reference="https://investinglive.com/central-banks/lagarde/",
+            source_timestamp=base_ts + timedelta(minutes=13),
+            received_timestamp=base_ts + timedelta(minutes=20),
+            raw_text="[INVESTINGLIVE] Lagarde Q&A: There was a debate about a hike",
+        )
+        asyncio.run(mem.record_event(live_ev))
+        state_store.upsert_event_state(
+            event_id=live_ev.event_id,
+            source_reference=live_ev.source_reference,
+            received_at=live_ev.received_timestamp,
+            now=live_ev.received_timestamp + timedelta(seconds=2),
+            state="no_target",
+            reason="portfolio_action_hold",
+            decision_json=json.dumps({"portfolio_action": "HOLD"}),
+        )
+    finally:
+        qstore.close()
+        ostore.close()
+        state_store.close()
+        ledger.close()
+
+    shadow_main(["--shadow-db", str(run_dir / "shadow-ledger.sqlite"), "status"])
+    status_out = json.loads(capsys.readouterr().out)
+    shadow_main(["--shadow-db", str(run_dir / "shadow-ledger.sqlite"), "report"])
+    report_out = json.loads(capsys.readouterr().out)
+
+    for payload in (status_out, report_out):
+        diag = payload["diagnostics"]
+        mw = diag["market_window"]
+        assert mw is not None
+        assert mw["current_mid"] == "1.11450"
+        assert mw["change_1m_pips"] == "3.0"
+        assert mw["change_5m_pips"] == "14.0"
+        assert mw["change_15m_pips"] == "25.0"
+        assert mw["window_15m_low_mid"] == "1.11200"
+        assert mw["window_15m_high_mid"] == "1.11468"
+        assert mw["window_15m_span_pips"] == "26.8"
+
+        sr = diag["session_range"]
+        assert sr is not None
+        assert sr["low_mid"] == "1.11190"
+        assert sr["high_mid"] == "1.11468"
+        assert sr["span_pips"] == "27.8"
+        assert sr["net_change_pips"] == "26.0"
+
+        assert len(diag["recent_events"]) == 1
+        ev_diag = diag["recent_events"][0]
+        assert ev_diag["event_id"] == "investinglive:news:il:lagarde-qa:r1"
+        assert ev_diag["portfolio_action"] == "HOLD"
+        assert ev_diag["receipt_lag_seconds"] == 420.0
+        assert ev_diag["move_before_receipt_pips"] == "3.0"
+        post_mv = ev_diag["post_receipt_move"]
+        assert post_mv is not None
+        assert post_mv["anchor_mid"] == "1.11310"
+        assert post_mv["high_mid"] == "1.11468"
+        assert post_mv["max_up_pips"] == "15.8"
+        assert post_mv["net_change_pips"] == "14.0"
+
+        assert diag["stream_cache_headers"] == [
+            {
+                "provider": "investinglive",
+                "stream": "news/live_feed",
+                "request_url": INVESTINGLIVE_LIVE_FEED_URL,
+                "last_received_at": (base_ts + timedelta(minutes=20)).isoformat(),
+                "x_cache": "Miss from cloudfront",
+                "cf_cache_status": None,
+                "age": "0",
+            }
+        ]
