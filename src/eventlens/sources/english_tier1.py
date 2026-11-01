@@ -5,12 +5,13 @@ All adapters are bounded, read-only public HTTP/RSS/JSON collectors with zero st
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import math
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -26,12 +27,14 @@ from pydantic import ValidationError
 
 from ..contracts import Event, FilterResult
 from ..observer import (
+    ArticleEnrichment,
     CaptureBatch,
     Kind,
     MacroValues,
     ObserverStore,
     RejectedRecord,
     SourceRecord,
+    StoredEnrichment,
     StoredRevision,
 )
 from .wallstreetcn import (
@@ -421,6 +424,26 @@ def _score_rss_item(
     return 2
 
 
+def _rss_item_fingerprint(
+    *,
+    title: str,
+    url: str,
+    desc_plain: str,
+    categories: tuple[str, ...],
+) -> str:
+    payload = json.dumps(
+        {
+            "title": title,
+            "url": url,
+            "desc": desc_plain,
+            "categories": list(categories),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def parse_rss_capture(
     payload: bytes,
     *,
@@ -429,6 +452,7 @@ def parse_rss_capture(
     received_at: datetime,
     expected_hosts: frozenset[str] | None = None,
     article_bodies: dict[str, str] | None = None,
+    out_rss_fingerprints: dict[str, str] | None = None,
     limit: int = 40,
 ) -> tuple[tuple[SourceRecord, ...], tuple[RejectedRecord, ...], str | None]:
     """Parse RSS 2.0 / RDF 1.0 XML into validated SourceRecords without failing the whole batch on one bad item."""
@@ -483,16 +507,27 @@ def parse_rss_capture(
             categories = _child_texts(item, "category")
             raw_desc = _child_text(item, ("encoded", "description", "summary", "content"))
             desc_plain = html_to_plain_text(raw_desc)
+            if out_rss_fingerprints is not None:
+                out_rss_fingerprints[source_id] = _rss_item_fingerprint(
+                    title=title,
+                    url=url,
+                    desc_plain=desc_plain,
+                    categories=categories,
+                )
             enriched = bodies.get(source_id, "").strip()
 
             header_tags = f"[{provider.upper()}]"
             if categories:
                 header_tags += f" [Categories: {', '.join(categories[:5])}]"
             body_sections = [f"{header_tags} {title}"]
+            if (
+                desc_plain
+                and desc_plain.lower() != title.lower()
+                and (not enriched or desc_plain.lower() not in enriched.lower())
+            ):
+                body_sections.append(desc_plain)
             if enriched:
                 body_sections.append(enriched)
-            elif desc_plain and desc_plain.lower() != title.lower():
-                body_sections.append(desc_plain)
             body_sections.append(f"Source URL: {url}")
             full_text = "\n".join(body_sections).strip()
 
@@ -619,6 +654,7 @@ class Tier1EnglishSource:
         self.transport = transport
         self.clock = clock
         self._last_polled_mono: dict[tuple[str, str], float] = {}
+        self._in_flight_streams: set[tuple[str, str]] = set()
 
     async def _get_bytes(
         self, url: str
@@ -682,17 +718,53 @@ class Tier1EnglishSource:
         spec: Tier1StreamSpec,
         records: tuple[SourceRecord, ...],
         known_ids: set[str],
-    ) -> dict[str, str]:
-        """Fetch full official press-release body ONLY for brand-new live ECB/Fed items."""
+        *,
+        non_baseline_ids: set[str] | None = None,
+        persisted_enrichments: dict[str, StoredEnrichment] | None = None,
+        rss_fingerprints: dict[str, str] | None = None,
+    ) -> tuple[dict[str, str], tuple[ArticleEnrichment, ...]]:
+        """Resolve official ECB/Fed full bodies without regression across polls.
+
+        - Reuses persisted full-text bodies when an item's RSS fingerprint is unchanged.
+        - Fetches full HTML (preserving raw response bytes + fetch timestamps) for brand-new
+          live arrivals, live arrivals whose initial HTML fetch previously failed, or items
+          whose upstream RSS fingerprint changed.
+        - Never fetches historical baseline archive items.
+        """
         bodies: dict[str, str] = {}
-        new_candidates = [
-            rec
-            for rec in records
-            if rec.source_id not in known_ids and rec.source_url.lower().endswith((".html", ".htm"))
-        ][:3]
-        for rec in new_candidates:
+        fetched_enrichments: list[ArticleEnrichment] = []
+        persisted = persisted_enrichments or {}
+        live_seen = non_baseline_ids or set()
+        fps = rss_fingerprints or {}
+        fetch_candidates: list[SourceRecord] = []
+
+        for rec in records:
+            prev = persisted.get(rec.source_id)
+            curr_fp = fps.get(rec.source_id)
+            if prev is not None:
+                if prev.rss_fingerprint is not None and curr_fp == prev.rss_fingerprint:
+                    bodies[rec.source_id] = prev.extracted_text
+                    continue
+                if rec.source_url == prev.source_url:
+                    # Fallback if re-fetch transiently fails, while still letting RSS revisions advance
+                    bodies[rec.source_id] = prev.extracted_text
+                if rec.source_url.lower().endswith((".html", ".htm")):
+                    fetch_candidates.append(rec)
+            else:
+                is_live_candidate = (rec.source_id not in known_ids) or (rec.source_id in live_seen)
+                if is_live_candidate and rec.source_url.lower().endswith((".html", ".htm")):
+                    fetch_candidates.append(rec)
+
+        for rec in fetch_candidates[:3]:
             try:
-                raw_html_bytes, *_ = await self._get_bytes(rec.source_url)
+                (
+                    raw_html_bytes,
+                    html_headers,
+                    html_started,
+                    html_received,
+                    html_elapsed_ms,
+                    html_attempts,
+                ) = await self._get_bytes(rec.source_url)
                 html_doc = raw_html_bytes.decode("utf-8", errors="replace")
                 extracted = (
                     extract_ecb_article_text(html_doc)
@@ -701,9 +773,25 @@ class Tier1EnglishSource:
                 )
                 if extracted:
                     bodies[rec.source_id] = extracted
+                    fetched_enrichments.append(
+                        ArticleEnrichment(
+                            provider=spec.provider,
+                            basis="live_poll",
+                            source_id=rec.source_id,
+                            source_url=rec.source_url,
+                            rss_fingerprint=fps.get(rec.source_id),
+                            request_started_at=html_started,
+                            fetched_at=html_received,
+                            elapsed_ms=html_elapsed_ms,
+                            attempts=html_attempts,
+                            response_headers=html_headers,
+                            raw_payload=raw_html_bytes,
+                            extracted_text=extracted,
+                        )
+                    )
             except Exception as exc:
                 logger.debug("article_enrichment_skipped url=%s err=%s", rec.source_url, exc)
-        return bodies
+        return bodies, tuple(fetched_enrichments)
 
     async def fetch_stream(
         self,
@@ -713,6 +801,8 @@ class Tier1EnglishSource:
         limit: int = 40,
         has_baseline: bool = False,
         known_ids: set[str] | None = None,
+        non_baseline_ids: set[str] | None = None,
+        persisted_enrichments: dict[str, StoredEnrichment] | None = None,
     ) -> CaptureBatch:
         (
             payload,
@@ -722,18 +812,21 @@ class Tier1EnglishSource:
             elapsed_ms,
             attempts,
         ) = await self._get_bytes(spec.url)
+        enrichments: tuple[ArticleEnrichment, ...] = ()
         if spec.kind == "calendar":
             records, rejected, error = parse_forexfactory_calendar(
                 payload, received_at=received_at, day=day
             )
         else:
             expected_hosts = _EXPECTED_HOSTS_BY_PROVIDER.get(spec.provider)
+            rss_fps: dict[str, str] = {}
             records, rejected, error = parse_rss_capture(
                 payload,
                 provider=spec.provider,
                 stream=spec.stream,
                 received_at=received_at,
                 expected_hosts=expected_hosts,
+                out_rss_fingerprints=rss_fps,
                 limit=limit,
             )
             if (
@@ -743,18 +836,27 @@ class Tier1EnglishSource:
                 and known_ids is not None
                 and records
             ):
-                bodies = await self._enrich_articles(spec, records, known_ids)
+                bodies, enrichments = await self._enrich_articles(
+                    spec,
+                    records,
+                    known_ids,
+                    non_baseline_ids=non_baseline_ids,
+                    persisted_enrichments=persisted_enrichments,
+                    rss_fingerprints=rss_fps,
+                )
                 if bodies:
+                    if enrichments:
+                        latest_enr = max(enr.fetched_at for enr in enrichments)
+                        received_at = max(received_at, latest_enr, self.clock().astimezone(UTC))
                     records, rejected, error = parse_rss_capture(
                         payload,
                         provider=spec.provider,
                         stream=spec.stream,
-                        received_at=self.clock().astimezone(UTC),
+                        received_at=received_at,
                         expected_hosts=expected_hosts,
                         article_bodies=bodies,
                         limit=limit,
                     )
-                    received_at = self.clock().astimezone(UTC)
 
         return CaptureBatch(
             provider=spec.provider,
@@ -770,6 +872,7 @@ class Tier1EnglishSource:
             response_headers=resp_headers,
             records=records,
             rejected=rejected,
+            enrichments=enrichments,
             parse_error=error,
         )
 
@@ -797,66 +900,97 @@ class Tier1EnglishSource:
         limit: int = 35,
         day: date | None = None,
         force: bool = False,
+        on_stream_recorded: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> list[dict[str, Any]]:
-        """Poll all due Tier-1 streams concurrently and record durably into ObserverStore."""
+        """Poll due Tier-1 streams concurrently, persisting and publishing each stream independently."""
         now_mono = time.monotonic()
-        due_specs: list[tuple[Tier1StreamSpec, bool, set[str]]] = []
+        due_specs: list[Tier1StreamSpec] = []
         for spec in self.streams:
             if kind is not None and spec.kind != kind:
                 continue
             key = (spec.provider, spec.stream)
+            if key in self._in_flight_streams:
+                continue
             last = self._last_polled_mono.get(key)
             if not force and last is not None and (now_mono - last) < spec.min_poll_seconds:
                 continue
-            has_base = await asyncio.to_thread(
-                store.has_stream_baseline, provider=spec.provider, stream=spec.stream
-            )
-            known = (
-                await asyncio.to_thread(
-                    store.known_source_ids, provider=spec.provider, kind=spec.kind
-                )
-                if (spec.enrich_live_articles and has_base)
-                else set()
-            )
-            due_specs.append((spec, has_base, known))
+            due_specs.append(spec)
 
         if not due_specs:
             return []
 
-        async def _fetch_one(
-            spec: Tier1StreamSpec, has_base: bool, known: set[str]
-        ) -> tuple[Tier1StreamSpec, CaptureBatch | None, Exception | None]:
+        async def _poll_and_persist_one(spec: Tier1StreamSpec) -> dict[str, Any]:
+            key = (spec.provider, spec.stream)
+            self._in_flight_streams.add(key)
             try:
-                batch = await self.fetch_stream(
-                    spec,
-                    day=day,
-                    limit=limit,
-                    has_baseline=has_base,
-                    known_ids=known,
+                has_base = await asyncio.to_thread(
+                    store.has_stream_baseline, provider=spec.provider, stream=spec.stream
                 )
-                return spec, batch, None
-            except Exception as exc:
-                return spec, None, exc
-
-        fetched = await asyncio.gather(*(_fetch_one(s, hb, kn) for s, hb, kn in due_specs))
-        results: list[dict[str, Any]] = []
-        completed_mono = time.monotonic()
-        for spec, batch, err in fetched:
-            self._last_polled_mono[(spec.provider, spec.stream)] = completed_mono
-            if err is not None or batch is None:
-                err_msg = str(err) if err is not None else "unknown_fetch_failure"
-                await asyncio.to_thread(store.failure, spec.provider, spec.stream, err_msg)
-                results.append(
-                    {
+                known: set[str] = set()
+                non_base: set[str] = set()
+                persisted_enr: dict[str, StoredEnrichment] = {}
+                if spec.enrich_live_articles and has_base:
+                    cutoff = self.clock().astimezone(UTC)
+                    known = await asyncio.to_thread(
+                        store.known_source_ids, provider=spec.provider, kind=spec.kind
+                    )
+                    non_base = await asyncio.to_thread(
+                        store.non_baseline_source_ids, provider=spec.provider, kind=spec.kind
+                    )
+                    persisted_enr = await asyncio.to_thread(
+                        store.latest_enrichments,
+                        provider=spec.provider,
+                        basis="live_poll",
+                        as_of=cutoff,
+                    )
+                try:
+                    batch = await self.fetch_stream(
+                        spec,
+                        day=day,
+                        limit=limit,
+                        has_baseline=has_base,
+                        known_ids=known,
+                        non_baseline_ids=non_base,
+                        persisted_enrichments=persisted_enr,
+                    )
+                except Exception as exc:
+                    self._last_polled_mono[key] = time.monotonic()
+                    err_msg = str(exc) or type(exc).__name__
+                    await asyncio.to_thread(store.failure, spec.provider, spec.stream, err_msg)
+                    res: dict[str, Any] = {
                         "provider": spec.provider,
                         "stream": spec.stream,
                         "status": "fetch_failed",
                         "error": err_msg,
                     }
-                )
-            else:
-                res = await asyncio.to_thread(store.record, batch)
-                results.append(res)
+                else:
+                    self._last_polled_mono[key] = time.monotonic()
+                    res = await asyncio.to_thread(store.record, batch)
+                if on_stream_recorded is not None:
+                    cb_out = on_stream_recorded(res)
+                    if inspect.isawaitable(cb_out):
+                        await cb_out
+                return res
+            finally:
+                self._in_flight_streams.discard(key)
+
+        tasks = [
+            asyncio.create_task(
+                _poll_and_persist_one(spec),
+                name=f"tier1-poll-{spec.provider}-{spec.stream}",
+            )
+            for spec in due_specs
+        ]
+        results: list[dict[str, Any]] = []
+        try:
+            for completed in asyncio.as_completed(tasks):
+                results.append(await completed)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
         return results
 
 

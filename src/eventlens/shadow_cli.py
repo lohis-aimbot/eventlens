@@ -227,6 +227,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 else _AbstainWithoutModelAgent()
             )
             ev_filter = EURUSDEventFilter()
+            max_quote_wait_s = float(getattr(args, "max_quote_wait_seconds", 60.0))
             runtime = IntradayEventRuntime(
                 memory=memory,
                 portfolio_state=ledger,
@@ -237,6 +238,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 shadow_executor=ledger,
                 state_store=state_store,
                 event_filter=ev_filter,
+                max_quote_wait_age=timedelta(seconds=max_quote_wait_s),
             )
 
             if args.command == "recover":
@@ -494,6 +496,12 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument("--quote-interval", type=float, default=0.5)
     start_p.add_argument("--protection-interval", type=float, default=0.5)
     start_p.add_argument("--max-quote-age", type=float, default=2.0)
+    start_p.add_argument(
+        "--max-quote-wait-seconds",
+        type=float,
+        default=60.0,
+        help="Maximum event validity window in seconds to wait for a valid quote before marking expired",
+    )
     start_p.add_argument("--max-holding-seconds", type=int, default=None)
     start_p.add_argument(
         "--exit-buffer-seconds",
@@ -570,9 +578,19 @@ def main(argv: list[str] | None = None) -> None:
         help="Request immediate protective exit on any open shadow position during recovery using a fresh quote",
     )
     recover_p.add_argument("--max-quote-age", type=float, default=2.0)
+    recover_p.add_argument(
+        "--max-quote-wait-seconds",
+        type=float,
+        default=60.0,
+        help="Maximum event validity window in seconds for events awaiting market quotes during recovery",
+    )
     recover_p.add_argument("--kill-switch", action="store_true")
 
     args = parser.parse_args(argv)
+    if hasattr(args, "max_quote_wait_seconds") and (
+        not math.isfinite(args.max_quote_wait_seconds) or args.max_quote_wait_seconds <= 0
+    ):
+        parser.error("--max-quote-wait-seconds must be a positive finite number")
     if args.command == "start":
         if not math.isfinite(args.duration) or not 0 < args.duration <= 86400:
             parser.error("--duration must be a finite number in (0, 86400] seconds")

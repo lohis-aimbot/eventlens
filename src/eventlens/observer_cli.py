@@ -40,18 +40,22 @@ async def capture(store: ObserverStore, args: argparse.Namespace) -> bool:
     if resolved_source == "tier1_english":
         tier1 = Tier1EnglishSource()
         kind_filter: Kind | None = None if args.kind == "both" else args.kind
+
+        def _emit_stream_result(res: dict[str, Any]) -> None:
+            nonlocal failed
+            failed |= res.get("status") != "ok"
+            print(json.dumps(res, ensure_ascii=False), flush=True)
+
         with store.exclusive():
             for poll in range(args.polls):
-                results = await tier1.poll_due_streams(
+                await tier1.poll_due_streams(
                     store,
                     kind=kind_filter,
                     limit=args.limit,
                     day=args.date,
                     force=True,
+                    on_stream_recorded=_emit_stream_result,
                 )
-                for res in results:
-                    failed |= res.get("status") != "ok"
-                    print(json.dumps(res, ensure_ascii=False), flush=True)
                 if poll + 1 < args.polls:
                     await asyncio.sleep(args.interval)
         return failed

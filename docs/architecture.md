@@ -13,7 +13,8 @@ configurable research choices. Existing FOMC experiments retain their original s
 | `deepseek.py` | Provider-neutral JSON client contract and DeepSeek HTTP adapter |
 | `memory.py`, `sqlite_memory.py` | Memory contract, raw event evidence, immutable revisions, atomic commits, conflict and recovery checks |
 | `reasoning.py` | Validated create/update/ignore memory decisions; no portfolio targets |
-| `observer.py` | Provider-neutral capture contracts, dedicated SQLite payload/revision storage and cutoff-aware history |
+| `observer.py` | Provider-neutral capture contracts, dedicated SQLite payload/revision/enrichment storage and strict `as_of` cutoff-aware history |
+| `sources/english_tier1.py` | Default Tier-1 English FX/macro intake (`investingLive`, `ECB`, `Fed`, `US BEA`, `Forex Factory`), independent per-stream persistence/publication, non-regressing full-text enrichment, `EURUSDEventFilter` and simultaneous event bundling |
 | `sources/wallstreetcn.py` | Bounded news/calendar website polling, normalization, rejection records and retry/pacing |
 | `quotes.py`, `quotes_cli.py` | Dedicated Demo quote store, provenance/clock preservation (`source_at`, `bridge_at`, `received_at`, `available_at`), unified `QuoteQualityPolicy` (`validate_market_quote`), quality reporting and retrospective news/quote cutoff checks |
 | `sources/ctrader_demo.py` | Fresh local-file handshake, bounded tailing and quote validation; no order methods |
@@ -21,8 +22,8 @@ configurable research choices. Existing FOMC experiments retain their original s
 | `sources/events.py` | General source/filter interfaces only |
 | `sources/fed.py` | Official Fed polling, URL validation, retry/pacing, durable inbox and optional memory reasoning |
 | `research/` | Historical ticks, source/capture provenance, cutoff selection, replay labels, fixed-position costs, opt-in model replay and durable call journal |
-| `trading/` | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`), and `SQLiteShadowLedger` (causal fills, order lifecycle, DST-aware daily close, and deferred protective exits) |
-| `runtime.py`, `shadow_cli.py` | `IntradayEventRuntime` (post-LLM market/portfolio refresh, persistent state machine, crash recovery), single-process `ShadowRunner`, and `eventlens shadow` CLI |
+| `trading/` | `SinglePassTradingAgent` (`IGNORE_EVENT`/`HOLD`/`SET_TARGET`/`CLOSE`, `QuoteUnavailableForDecisionError`), `DeterministicTargetValidator`, `DeterministicHardRiskEngine` (`hard-risk-v2`), and `SQLiteShadowLedger` (causal fills, order lifecycle, DST-aware daily close, and deferred protective exits) |
+| `runtime.py`, `shadow_cli.py` | `IntradayEventRuntime` (post-LLM market/portfolio refresh, quote-wait validity window vs model retry budget, persistent state machine, durable `runtime_event_bundles` crash recovery), decoupled single-process `ShadowRunner`, and `eventlens shadow` CLI |
 | `cli.py`, `*_cli.py` | Grouped dispatcher and existing explicit commands |
 
 Shared modules, sources and trading interfaces do not import research modules. Research
@@ -113,6 +114,22 @@ or arrival times. Publisher display time is not assumed to be first public relea
   `pending_exit_reason` and `pending_exit_since` on `shadow_account`, emits a
   `protective_exit_deferred_bad_quote` fault record, and executes the exit only when a valid
   quote arrives—never fabricating a fill on an invalid or missing quote.
+- **Durable bundle crash recovery (`v0.15.4`, `runtime_event_bundles`)**: Simultaneous macro or
+  burst news constituents are atomically bound to their `bundle:...` event before model
+  invocation or shadow execution. Post-commit crashes, partial member-marking crashes, process
+  restarts, late-arriving siblings, and subsequent `r2` member revisions never regroup already-bound
+  constituents into a new bundle or generate duplicate LLM calls, orders, or fills.
+- **Quote-waiting vs. model retry separation (`v0.15.4`)**: Missing or stale pre-LLM quotes
+  raise `QuoteUnavailableForDecisionError` and hold the event in `awaiting_market_quote` with
+  `attempts` unchanged (`increment_attempts=False`) up to `max_quote_wait_age` (`--max-quote-wait-seconds`,
+  default `60s`), transitioning to terminal `expired` without model calls if the outage outlasts
+  the event's validity window, while model timeouts and invalid outputs count toward
+  `max_reasoning_attempts` separately—without relaxing the `2.0s` quote freshness gate or
+  fabricating quotes.
+- **Decoupled fast/slow stream ingestion (`v0.15.4`)**: `Tier1EnglishSource.poll_due_streams`
+  commits and publishes each stream independently upon completion and notifies `ShadowRunner`'s
+  decoupled `_event_worker` via wakeup event while `_news_poll_worker`, `_quote_worker`, and
+  `_protection_worker` run independently.
 
 Read [shadow acceptance and forward observation](shadow-acceptance.md) for current offline
 verification and live forward observation status.
