@@ -20,7 +20,7 @@ class Event(Contract):
 
     event_id: Identifier
     source: Identifier
-    source_type: Literal["news", "social", "macro", "geopolitical", "company"]
+    source_type: Literal["news", "social", "macro", "geopolitical", "company", "internal_review"]
     source_reference: Identifier
     source_timestamp: Timestamp
     received_timestamp: Timestamp
@@ -126,6 +126,9 @@ TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS: frozenset[str] = frozenset({"ctrader_a
 TRUSTED_COMMISSION_TYPES: frozenset[str] = frozenset({"UsdPerMillionUsdVolume"})
 
 
+QuoteBasis = Literal["live_poll", "synthetic_fixture", "historical_bar_replay"]
+
+
 class Quote(Contract):
     instrument: Identifier
     source_at: Timestamp | None = None
@@ -133,11 +136,14 @@ class Quote(Contract):
     received_at: Timestamp
     available_at: Timestamp | None = None
     source_provider: Identifier | None = None
-    basis: Literal["live_poll", "synthetic_fixture"] | None = None
+    basis: QuoteBasis | None = None
     bid: Decimal = Field(gt=0)
     ask: Decimal = Field(gt=0)
     commission: Decimal | None = Field(default=None, ge=0)
     commission_type: Identifier | None = None
+    bar_interval_seconds: int | None = Field(default=None, gt=0)
+    synthetic_spread_applied: bool = False
+    simulated_receipt: bool = False
 
     @model_validator(mode="after")
     def valid_spread(self) -> Self:
@@ -155,6 +161,14 @@ class Quote(Contract):
             raise ValueError("Quote bridge_at cannot exceed received_at")
         if self.available_at is not None and self.received_at > self.available_at:
             raise ValueError("Quote received_at cannot exceed available_at")
+        if self.basis == "live_poll" and (
+            self.bar_interval_seconds is not None
+            or self.synthetic_spread_applied
+            or self.simulated_receipt
+        ):
+            raise ValueError(
+                "Historical bar, synthetic spread, or simulated receipt quotes cannot claim basis='live_poll'"
+            )
         return self
 
     @property
@@ -175,6 +189,9 @@ class Quote(Contract):
             and self.available_at is not None
             and self.source_provider is not None
             and self.basis == "live_poll"
+            and self.bar_interval_seconds is None
+            and not self.synthetic_spread_applied
+            and not self.simulated_receipt
         )
 
     @property
@@ -188,10 +205,28 @@ class Quote(Contract):
         )
 
 
+class PriceTrajectorySummary(Contract):
+    """Causal recent price excursion summary computed strictly from published quotes <= as_of."""
+
+    instrument: Identifier = "EUR/USD"
+    as_of: Timestamp
+    current_mid: Decimal = Field(gt=0)
+    change_1m_pips: Decimal | None = None
+    change_5m_pips: Decimal | None = None
+    change_15m_pips: Decimal | None = None
+    change_30m_pips: Decimal | None = None
+    window_15m_high_mid: Decimal | None = Field(default=None, gt=0)
+    window_15m_low_mid: Decimal | None = Field(default=None, gt=0)
+    window_30m_high_mid: Decimal | None = Field(default=None, gt=0)
+    window_30m_low_mid: Decimal | None = Field(default=None, gt=0)
+    sample_count_30m: int = Field(default=0, ge=0)
+
+
 class MarketSnapshot(Contract):
     snapshot_id: Identifier
     as_of: Timestamp
     quotes: tuple[Quote, ...]
+    price_trajectory: PriceTrajectorySummary | None = None
 
     @model_validator(mode="after")
     def valid_quotes(self) -> Self:
@@ -202,10 +237,45 @@ class MarketSnapshot(Contract):
                 raise ValueError("Market snapshot cannot contain future quote source_at")
             if quote.available_at is not None and quote.available_at > self.as_of:
                 raise ValueError("Market snapshot cannot contain future quote available_at")
+        if self.price_trajectory is not None and self.price_trajectory.as_of > self.as_of:
+            raise ValueError("Market snapshot cannot contain future price trajectory")
         instruments = [quote.instrument for quote in self.quotes]
         if len(instruments) != len(set(instruments)):
             raise ValueError("Duplicate instrument quote")
         return self
+
+
+class ReviewConditionEvaluation(Contract):
+    """Explicit classification of a thesis condition as executable price rule vs. non-executable prose."""
+
+    raw_condition: str = Field(min_length=1)
+    executable: bool
+    status: Literal["executable_price_rule", "unexecutable_natural_language"]
+    triggered: bool = False
+    detail: str = Field(min_length=1)
+
+
+class ReviewContext(Contract):
+    """Traceable internal re-evaluation metadata; never masquerades as a fresh news arrival."""
+
+    is_internal_review: Literal[True] = True
+    review_id: Identifier
+    trigger_kind: Literal[
+        "scheduled_review_at",
+        "structured_price_condition",
+        "price_breakout_excursion",
+        "periodic_review",
+    ]
+    trigger_detail: str = Field(min_length=1)
+    triggered_at: Timestamp
+    thesis_id: Identifier
+    thesis_revision: int = Field(ge=1)
+    origin_event_id: Identifier
+    origin_source: Identifier
+    origin_source_timestamp: Timestamp | None = None
+    origin_received_timestamp: Timestamp
+    origin_event_age_seconds: float = Field(ge=0)
+    condition_evaluations: tuple[ReviewConditionEvaluation, ...] = ()
 
 
 class AgentContext(Contract):
@@ -214,18 +284,19 @@ class AgentContext(Contract):
     portfolio: PortfolioSnapshot
     market: MarketSnapshot
     as_of: Timestamp
+    review_context: ReviewContext | None = None
 
     @model_validator(mode="after")
     def no_future_context(self) -> Self:
-        if (
-            max(
-                self.event.received_timestamp,
-                self.memory.as_of,
-                self.portfolio.as_of,
-                self.market.as_of,
-            )
-            > self.as_of
-        ):
+        latest_input = max(
+            self.event.received_timestamp,
+            self.memory.as_of,
+            self.portfolio.as_of,
+            self.market.as_of,
+        )
+        if self.review_context is not None:
+            latest_input = max(latest_input, self.review_context.triggered_at)
+        if latest_input > self.as_of:
             raise ValueError("Agent context cannot contain information from the future")
         return self
 

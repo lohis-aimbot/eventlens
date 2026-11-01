@@ -178,8 +178,11 @@ def build_thesis_changes(
     completed: datetime,
     *,
     new_thesis_id: str | None = None,
+    review_horizon: timedelta = timedelta(hours=1),
 ) -> tuple[ThesisChange, ...]:
     """Pure evidence-linked changes; caller assigns live or explicit replay clocks."""
+    if review_horizon <= timedelta(0):
+        raise ValueError("Thesis review_horizon must be positive")
     if proposal.action == "ignore":
         return ()
     assert proposal.status is not None
@@ -212,7 +215,7 @@ def build_thesis_changes(
         confidence=proposal.confidence,
         created_at=old.created_at if old else completed,
         updated_at=completed,
-        review_at=completed + timedelta(hours=1),
+        review_at=completed + review_horizon,
     )
     return (
         ThesisChange(

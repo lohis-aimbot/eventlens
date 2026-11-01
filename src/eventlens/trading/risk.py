@@ -216,6 +216,7 @@ class DeterministicHardRiskEngine:
         market: MarketSnapshot,
         *,
         prior_theses: tuple[Thesis, ...] = (),
+        source_stale_reason: str | None = None,
     ) -> RiskAssessment:
         decision = AgentDecision.model_validate_json(decision.model_dump_json())
         current = PortfolioSnapshot.model_validate_json(current.model_dump_json())
@@ -333,6 +334,8 @@ class DeterministicHardRiskEngine:
         # pending protective exits, and daily close cutoff window.
         # Purely risk-reducing actions (CLOSE or partial reduction) remain permitted.
         if increases_risk:
+            if source_stale_reason is not None:
+                reasons.append(f"stale_or_degraded_source_blocks_new_risk:{source_stale_reason}")
             if self.policy.kill_switch_active:
                 reasons.append(
                     "reversal_blocked_by_kill_switch" if has_reversal else "kill_switch_active"
