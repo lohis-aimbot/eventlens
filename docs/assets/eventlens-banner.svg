@@ -1,54 +1,120 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title description" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
-  <title id="title">EventLens — From events to decisions</title>
-  <desc id="description">A minimalist AI banner featuring a sculpted eccentric crescent lens mark, EventLens wordmark, and short subtitle.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="banner-title banner-desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="banner-title">EventLens — Turn macro events into auditable FX decisions</title>
+  <desc id="banner-desc">Apple and DeepSeek inspired minimalist hero banner featuring a precision sapphire optical lens emblem, crisp EventLens wordmark, and concise subtitle.</desc>
   <defs>
-    <clipPath id="clip">
+    <clipPath id="banner-clip">
       <rect width="1280" height="360" rx="28"/>
     </clipPath>
 
-    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="360" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#FAFBFD"/>
-      <stop offset="0.5" stop-color="#F5F8FF"/>
-      <stop offset="1" stop-color="#EEF4FF"/>
+    <linearGradient id="banner-bg" x1="0" y1="0" x2="1280" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#F8FAFF"/>
+      <stop offset="1" stop-color="#F1F6FF"/>
     </linearGradient>
 
-    <radialGradient id="glow" cx="640" cy="90" r="420" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.12"/>
-      <stop offset="0.6" stop-color="#0EA5E9" stop-opacity="0.04"/>
-      <stop offset="1" stop-color="#FAFBFD" stop-opacity="0"/>
+    <radialGradient id="hero-bloom" cx="640" cy="96" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.13"/>
+      <stop offset="0.55" stop-color="#0EA5E9" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </radialGradient>
 
-    <linearGradient id="mark-grad" x1="-34" y1="34" x2="34" y2="-34" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0F172A"/>
-      <stop offset="0.5" stop-color="#2563EB"/>
-      <stop offset="1" stop-color="#06B6D4"/>
+    <filter id="lens-drop" x="-22%" y="-18%" width="144%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#0F172A" flood-opacity="0.14"/>
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#1E3A8A" flood-opacity="0.10"/>
+    </filter>
+
+    <linearGradient id="b-titanium" x1="-52" y1="-52" x2="52" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#334155"/>
+      <stop offset="0.35" stop-color="#1E293B"/>
+      <stop offset="0.75" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#070B14"/>
     </linearGradient>
 
-    <linearGradient id="word-grad" x1="635" y1="150" x2="895" y2="235" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#1D4ED8"/>
-      <stop offset="0.5" stop-color="#4D6BFE"/>
+    <linearGradient id="b-chamfer" x1="-54" y1="-54" x2="54" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E2E8F0" stop-opacity="0.9"/>
+      <stop offset="0.45" stop-color="#4D6BFE" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#06B6D4" stop-opacity="0.75"/>
+    </linearGradient>
+
+    <radialGradient id="b-sapphire" cx="7" cy="8" r="44" fx="11" fy="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38BDF8"/>
+      <stop offset="0.28" stop-color="#4D6BFE"/>
+      <stop offset="0.6" stop-color="#1D4ED8"/>
+      <stop offset="0.84" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#060A15"/>
+    </radialGradient>
+
+    <radialGradient id="b-tl-bloom" cx="-18" cy="-19" r="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.48"/>
+      <stop offset="0.45" stop-color="#BAE6FD" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#4D6BFE" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="b-ar-cyan" cx="17" cy="18" r="24" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.72"/>
+      <stop offset="0.5" stop-color="#38BDF8" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#4D6BFE" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="b-doublet" cx="4" cy="5" r="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E3A8A"/>
+      <stop offset="0.6" stop-color="#0B132B"/>
+      <stop offset="1" stop-color="#050811"/>
+    </radialGradient>
+
+    <linearGradient id="b-glass-rim" x1="-38" y1="-38" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.65"/>
+      <stop offset="0.45" stop-color="#60A5FA" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0.65"/>
+    </linearGradient>
+
+    <clipPath id="b-glass-clip">
+      <circle cx="0" cy="0" r="38"/>
+    </clipPath>
+
+    <linearGradient id="word-grad" x1="638" y1="168" x2="882" y2="238" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2563EB"/>
+      <stop offset="0.52" stop-color="#4D6BFE"/>
       <stop offset="1" stop-color="#0891B2"/>
     </linearGradient>
   </defs>
 
-  <g clip-path="url(#clip)">
-    <rect width="1280" height="360" fill="url(#bg)"/>
-    <circle cx="640" cy="90" r="420" fill="url(#glow)"/>
+  <g clip-path="url(#banner-clip)">
+    <rect width="1280" height="360" fill="url(#banner-bg)"/>
+    <circle cx="640" cy="96" r="420" fill="url(#hero-bloom)"/>
 
-    <!-- Ultra-Minimalist Eccentric Lens Mark (only 2 pure geometric shapes) -->
-    <g transform="translate(640, 92)">
-      <path fill="url(#mark-grad)" fill-rule="evenodd"
-            d="M -34 0 A 34 34 0 1 0 34 0 A 34 34 0 1 0 -34 0 Z
-               M -17 -5.5 A 22.5 22.5 0 1 0 28 -5.5 A 22.5 22.5 0 1 0 -17 -5.5 Z"/>
-      <circle cx="7.5" cy="-7.5" r="7" fill="#2563EB"/>
+    <!-- Precision Sapphire Optical Lens Emblem -->
+    <g transform="translate(640, 96)" filter="url(#lens-drop)">
+      <circle cx="0" cy="0" r="53" fill="url(#b-titanium)"/>
+      <circle cx="0" cy="0" r="52.4" fill="none" stroke="url(#b-chamfer)" stroke-width="1.2"/>
+      <circle cx="0" cy="0" r="47.5" fill="#0B1120" stroke="#334155" stroke-opacity="0.55" stroke-width="0.9"/>
+      <circle cx="0" cy="0" r="41.5" fill="#060913" stroke="#1E293B" stroke-width="1"/>
+
+      <g clip-path="url(#b-glass-clip)">
+        <circle cx="0" cy="0" r="38" fill="url(#b-sapphire)"/>
+        <circle cx="0" cy="0" r="38" fill="url(#b-tl-bloom)"/>
+        <circle cx="17" cy="18" r="24" fill="url(#b-ar-cyan)"/>
+
+        <circle cx="0" cy="0" r="29" fill="none" stroke="#93C5FD" stroke-opacity="0.24" stroke-width="0.8"/>
+        <circle cx="0" cy="0" r="20" fill="url(#b-doublet)" stroke="#60A5FA" stroke-opacity="0.45" stroke-width="1"/>
+        <circle cx="0" cy="0" r="9.6" fill="#04070F" stroke="#38BDF8" stroke-opacity="0.4" stroke-width="0.9"/>
+        <circle cx="2.5" cy="2.5" r="3.4" fill="#2563EB" fill-opacity="0.45"/>
+
+        <ellipse cx="-17.5" cy="-18" rx="6.8" ry="4.2" transform="rotate(-42 -17.5 -18)" fill="#FFFFFF" fill-opacity="0.93"/>
+        <circle cx="-25.2" cy="-9" r="2" fill="#E0F2FE" fill-opacity="0.8"/>
+        <circle cx="14.5" cy="14.5" r="2.6" fill="#67E8F9" fill-opacity="0.58"/>
+      </g>
+
+      <circle cx="0" cy="0" r="38" fill="none" stroke="url(#b-glass-rim)" stroke-width="1.1"/>
     </g>
 
-    <!-- Crisp Minimalist Typography -->
-    <g font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
-      <text x="640" y="224" font-size="106" font-weight="700" letter-spacing="-4.5">
+    <!-- Apple / DeepSeek Clean Display Typography -->
+    <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
+      <text x="640" y="228" font-size="88" font-weight="700" letter-spacing="-3.6">
         <tspan fill="#0F172A">Event</tspan><tspan fill="url(#word-grad)">Lens</tspan>
       </text>
-      <text x="640" y="282" fill="#64748B" font-size="28" font-weight="400" letter-spacing="-0.3">From events to decisions.</text>
+      <text x="640" y="276" fill="#475569" font-size="24" font-weight="400" letter-spacing="-0.3">Turn macro events into auditable FX decisions.</text>
+      <text x="640" y="316" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1.8">REALTIME MACRO WIRE   ·   PERSISTENT THESIS MEMORY   ·   INDEPENDENT HARD RISK</text>
     </g>
   </g>
 
