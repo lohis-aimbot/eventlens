@@ -1,31 +1,83 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="960" height="440" viewBox="0 0 960 440" role="img" aria-labelledby="pipeline-title pipeline-desc">
-  <title id="pipeline-title">EventLens research workflow</title>
-  <desc id="pipeline-desc">Observe events and quotes, reason with persistent thesis memory, govern target positions with deterministic risk, and record simulated Shadow fills. Follow stages one through four in row order. Broker execution is blocked.</desc>
-  <rect x="1" y="1" width="958" height="438" rx="24" fill="#F8FAFC" stroke="#CBD5E1"/>
-  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
-    <g transform="translate(28 28)">
-      <rect width="438" height="178" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
-      <text x="26" y="42" fill="#2563EB" font-size="22" font-weight="700">01 / OBSERVE</text>
-      <text x="26" y="91" fill="#0F172A" font-size="32" font-weight="600">Events + quotes</text>
-      <text x="26" y="135" fill="#334155" font-size="24">Preserve when data arrived</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="296" viewBox="0 0 1600 296" role="img" aria-labelledby="pipe-title pipe-desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="pipe-title">EventLens Four-Stage Research Architecture</title>
+  <desc id="pipe-desc">Pure-vector four-card workflow: 01 Observe events and Demo quotes, 02 Reason with LLM and persistent thesis memory, 03 Govern via deterministic hard risk, and 04 Record in local Shadow ledger.</desc>
+
+  <!-- Outer Surface (Zero SVG filters = 100% sharp vector lines on Retina) -->
+  <rect x="0.75" y="0.75" width="1598.5" height="294.5" rx="28" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif">
+    <!-- Card 01: Observe -->
+    <g transform="translate(34, 32)">
+      <rect x="0" y="3" width="352" height="232" rx="22" fill="#0F172A" fill-opacity="0.03"/>
+      <rect width="352" height="232" rx="22" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.4"/>
+      <rect x="28" y="28" width="44" height="44" rx="12" fill="#EFF6FF"/>
+      <circle cx="50" cy="50" r="6" fill="#2563EB"/>
+      <circle cx="50" cy="50" r="13" fill="none" stroke="#2563EB" stroke-opacity="0.45" stroke-width="2"/>
+      <text x="296" y="56" fill="#94A3B8" font-size="14" font-weight="700" letter-spacing="1">01</text>
+      <text x="28" y="114" fill="#0F172A" font-size="23" font-weight="650" letter-spacing="-0.4">Observe</text>
+      <text x="28" y="148" fill="#475569" font-size="16.5" font-weight="400">Tier-1 macro releases &amp;</text>
+      <text x="28" y="173" fill="#475569" font-size="16.5" font-weight="400">headless cTrader Demo quotes</text>
+      <text x="28" y="198" fill="#64748B" font-size="14.5" font-weight="500">Strict arrival &amp; freshness clocks</text>
     </g>
-    <g transform="translate(494 28)">
-      <rect width="438" height="178" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
-      <text x="26" y="42" fill="#4F46E5" font-size="22" font-weight="700">02 / REASON</text>
-      <text x="26" y="91" fill="#0F172A" font-size="32" font-weight="600">LLM + thesis memory</text>
-      <text x="26" y="135" fill="#334155" font-size="24">Propose a target position</text>
+
+    <!-- Connector 1 -> 2 -->
+    <g stroke="#94A3B8" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="395" y1="148" x2="417" y2="148"/>
+      <path d="M 411 142.5 L 418 148 L 411 153.5"/>
     </g>
-    <g transform="translate(28 234)">
-      <rect width="438" height="178" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
-      <text x="26" y="42" fill="#0F766E" font-size="22" font-weight="700">03 / GOVERN</text>
-      <text x="26" y="91" fill="#0F172A" font-size="32" font-weight="600">Hard risk rules</text>
-      <text x="26" y="135" fill="#334155" font-size="24">Validate, limit, protect</text>
+
+    <!-- Card 02: Reason -->
+    <g transform="translate(427, 32)">
+      <rect x="0" y="3" width="352" height="232" rx="22" fill="#0F172A" fill-opacity="0.03"/>
+      <rect width="352" height="232" rx="22" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.4"/>
+      <rect x="28" y="28" width="44" height="44" rx="12" fill="#EEF2FF"/>
+      <circle cx="50" cy="50" r="12" fill="none" stroke="#4D6BFE" stroke-width="2.1"/>
+      <circle cx="50" cy="50" r="4.5" fill="#4D6BFE"/>
+      <text x="296" y="56" fill="#94A3B8" font-size="14" font-weight="700" letter-spacing="1">02</text>
+      <text x="28" y="114" fill="#0F172A" font-size="23" font-weight="650" letter-spacing="-0.4">Reason</text>
+      <text x="28" y="148" fill="#475569" font-size="16.5" font-weight="400">LLM structured proposals &amp;</text>
+      <text x="28" y="173" fill="#475569" font-size="16.5" font-weight="400">persistent SQLite thesis memory</text>
+      <text x="28" y="198" fill="#64748B" font-size="14.5" font-weight="500">Bounded price &amp; time reviews</text>
     </g>
-    <g transform="translate(494 234)">
-      <rect width="438" height="178" rx="18" fill="#FFFFFF" stroke="#CBD5E1"/>
-      <text x="26" y="42" fill="#475569" font-size="22" font-weight="700">04 / RECORD</text>
-      <text x="26" y="91" fill="#0F172A" font-size="32" font-weight="600">Shadow ledger</text>
-      <text x="26" y="135" fill="#334155" font-size="24">Simulate fills and costs</text>
+
+    <!-- Connector 2 -> 3 -->
+    <g stroke="#94A3B8" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="788" y1="148" x2="810" y2="148"/>
+      <path d="M 804 142.5 L 811 148 L 804 153.5"/>
+    </g>
+
+    <!-- Card 03: Govern -->
+    <g transform="translate(820, 32)">
+      <rect x="0" y="3" width="352" height="232" rx="22" fill="#0F172A" fill-opacity="0.03"/>
+      <rect width="352" height="232" rx="22" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.4"/>
+      <rect x="28" y="28" width="44" height="44" rx="12" fill="#F0FDFA"/>
+      <path d="M 50 37 L 60 41.5 V 50.5 C 60 56.8 55.6 61.2 50 63 C 44.4 61.2 40 56.8 40 50.5 V 41.5 Z" fill="none" stroke="#0D9488" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M 46 50 L 49 53 L 54.5 47.2" fill="none" stroke="#0D9488" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="296" y="56" fill="#94A3B8" font-size="14" font-weight="700" letter-spacing="1">03</text>
+      <text x="28" y="114" fill="#0F172A" font-size="23" font-weight="650" letter-spacing="-0.4">Govern</text>
+      <text x="28" y="148" fill="#475569" font-size="16.5" font-weight="400">Independent hard risk limits,</text>
+      <text x="28" y="173" fill="#475569" font-size="16.5" font-weight="400">stale-feed gates &amp; LLM cap</text>
+      <text x="28" y="198" fill="#64748B" font-size="14.5" font-weight="500">Model-free pip SL / TP / trailing</text>
+    </g>
+
+    <!-- Connector 3 -> 4 -->
+    <g stroke="#94A3B8" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="1181" y1="148" x2="1203" y2="148"/>
+      <path d="M 1197 142.5 L 1204 148 L 1197 153.5"/>
+    </g>
+
+    <!-- Card 04: Record -->
+    <g transform="translate(1213, 32)">
+      <rect x="0" y="3" width="352" height="232" rx="22" fill="#0F172A" fill-opacity="0.03"/>
+      <rect width="352" height="232" rx="22" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.4"/>
+      <rect x="28" y="28" width="44" height="44" rx="12" fill="#F1F5F9"/>
+      <rect x="41" y="47" width="18" height="14" rx="3" fill="none" stroke="#0F172A" stroke-width="2"/>
+      <path d="M 45 47 V 42.5 A 5 5 0 0 1 55 42.5 V 47" fill="none" stroke="#0F172A" stroke-width="2" stroke-linecap="round"/>
+      <text x="296" y="56" fill="#94A3B8" font-size="14" font-weight="700" letter-spacing="1">04</text>
+      <text x="28" y="114" fill="#0F172A" font-size="23" font-weight="650" letter-spacing="-0.4">Record</text>
+      <text x="28" y="148" fill="#475569" font-size="16.5" font-weight="400">Causal SQLite Shadow ledger</text>
+      <text x="28" y="173" fill="#475569" font-size="16.5" font-weight="400">&amp; Razor fee simulation</text>
+      <text x="28" y="198" fill="#64748B" font-size="14.5" font-weight="500">Live &amp; broker orders hard-blocked</text>
     </g>
   </g>
 </svg>
