@@ -1,0 +1,50 @@
+[Unit]
+Description=EventLens 24x5 EUR/USD Macro Event Shadow Runtime (cTrader Open API Demo)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eventlens
+Group=eventlens
+WorkingDirectory=/opt/eventlens
+EnvironmentFile=/etc/eventlens/eventlens.env
+
+# Optional: append --ctrader-demo-mirror-orders to also mirror risk-approved Shadow fills
+# onto the verified Pepperstone Demo account (login 5298703 / ctidTraderAccountId 47589006).
+ExecStart=/opt/eventlens/.venv/bin/eventlens-shadow start \
+    --continuous \
+    --shadow-db /var/lib/eventlens/data/shadow-ledger.sqlite \
+    --memory-db /var/lib/eventlens/data/shadow-memory.sqlite \
+    --observer-db /var/lib/eventlens/data/observer.sqlite \
+    --quotes-db /var/lib/eventlens/data/live-quotes.sqlite \
+    --poll-news \
+    --news-source tier1_english \
+    --supplement-calendar-actuals \
+    --call-model \
+    --ctrader-openapi \
+    --ctrader-sample-interval-ms 200 \
+    --enable-stateful-reviews \
+    --review-breakout-pips 12 \
+    --periodic-review-seconds 1800 \
+    --max-total-review-calls 500 \
+    --max-daily-llm-calls 80 \
+    --close-on-stop \
+    --exit-drain-timeout 60
+
+# Graceful drain on systemctl stop / restart: ShadowRunner traps SIGTERM,
+# flattens open shadow positions if --close-on-stop is set, and writes BridgeStop diagnostics.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+
+# Systemd sandboxing & privilege hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eventlens
+
+[Install]
+WantedBy=multi-user.target

@@ -695,7 +695,7 @@ class SQLiteRuntimeStore:
                     started_at=COALESCE(?, started_at),
                     stopped_at=CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, stopped_at) END,
                     heartbeat_at=?,
-                    duration_seconds=COALESCE(?, duration_seconds),
+                    duration_seconds=CASE WHEN ? = 1 THEN ? ELSE COALESCE(?, duration_seconds) END,
                     stop_requested=CASE WHEN ? = 1 THEN 0 ELSE stop_requested END,
                     stop_reason=CASE WHEN ? = 1 THEN NULL ELSE COALESCE(?, stop_reason) END,
                     summary_json=COALESCE(?, summary_json)
@@ -708,6 +708,8 @@ class SQLiteRuntimeStore:
                     1 if reset_stop else 0,
                     _utc(stopped_at).isoformat() if stopped_at else None,
                     _utc(now).isoformat(),
+                    1 if reset_stop else 0,
+                    duration_seconds,
                     duration_seconds,
                     1 if reset_stop else 0,
                     1 if reset_stop else 0,
@@ -715,6 +717,18 @@ class SQLiteRuntimeStore:
                     json.dumps(summary, ensure_ascii=False) if summary is not None else None,
                 ),
             )
+
+    def count_llm_calls_since(self, since_utc: datetime) -> int:
+        cutoff = _utc(since_utc).isoformat()
+        with self._lock:
+            row = self.db.execute(
+                """SELECT COUNT(*) AS cnt FROM runtime_audit_log
+                WHERE component='agent'
+                  AND outcome IN ('agent_decided', 'reasoning_failed')
+                  AND occurred_at >= ?""",
+                (cutoff,),
+            ).fetchone()
+            return int(row["cnt"]) if row is not None else 0
 
     def runner_status(self) -> dict[str, Any]:
         with self._lock:
@@ -1133,6 +1147,7 @@ class IntradayEventRuntime:
         max_recovery_event_age: timedelta = timedelta(seconds=60),
         max_quote_wait_age: timedelta = timedelta(seconds=60),
         max_actionable_event_lag_seconds: float | None = None,
+        max_daily_llm_calls: int | None = None,
         source_health_provider: Callable[[Event, datetime], str | None] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -1161,6 +1176,8 @@ class IntradayEventRuntime:
         self.max_recovery_event_age = max_recovery_event_age
         self.max_quote_wait_age = max_quote_wait_age
         self.max_actionable_event_lag_seconds = max_actionable_event_lag_seconds
+        self.max_daily_llm_calls = max_daily_llm_calls
+        self._in_memory_llm_call_times: list[datetime] = []
         self.source_health_provider = source_health_provider
         self.clock = clock
         self._lock = asyncio.Lock()
@@ -1433,6 +1450,37 @@ class IntradayEventRuntime:
             f"memory_v={memory_snap.memory_version} pre_snap={pre_portfolio.snapshot_id} pre_market={pre_market.snapshot_id}",
         )
 
+        # 5b. Daily LLM call budget circuit breaker (protects unattended 24x5 cloud cost without affecting exits)
+        if self.max_daily_llm_calls is not None and self.max_daily_llm_calls > 0:
+            day_start = pre_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            used_calls = (
+                self.state_store.count_llm_calls_since(day_start)
+                if self.state_store is not None
+                else sum(1 for ts in self._in_memory_llm_call_times if ts >= day_start)
+            )
+            if used_calls >= self.max_daily_llm_calls:
+                budget_reason = (
+                    f"daily_llm_budget_exhausted:{used_calls}/{self.max_daily_llm_calls}"
+                )
+                if self.state_store is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=event.event_id,
+                        source_reference=event.source_reference,
+                        received_at=event.received_timestamp,
+                        now=pre_now,
+                        state="expired",
+                        reason=budget_reason,
+                        context_json=context_json,
+                        increment_attempts=False,
+                    )
+                await log("runtime", "daily_llm_budget_exhausted", budget_reason)
+                return RuntimeCycleResult(
+                    event_id=event.event_id,
+                    status="expired",
+                    reason=budget_reason,
+                    audit_records=tuple(cycle_audit),
+                )
+
         # 6. Invoke LLM agent (missing/stale quotes wait without consuming retry budget;
         # model timeouts and invalid outputs count as reasoning_failed attempts separately)
         input_tokens = 0
@@ -1445,6 +1493,8 @@ class IntradayEventRuntime:
                 output_tokens = run_res.output_tokens
             else:
                 decision = await self.agent.decide(context)
+            if self.state_store is None:
+                self._in_memory_llm_call_times.append(_utc(self.clock()))
         except QuoteUnavailableForDecisionError as exc:
             if self.event_filter is not None and hasattr(self.event_filter, "unmark_seen"):
                 self.event_filter.unmark_seen(event.event_id)
@@ -2278,6 +2328,9 @@ class ShadowRunner:
         observer_store: ObserverStore | None = None,
         quote_store: QuoteStore | None = None,
         quote_bridge_dir: Path | None = None,
+        ctrader_openapi_streamer: Any = None,
+        ctrader_demo_mirror: bool = False,
+        enforce_fx_weekend_pause: bool = False,
         news_source: Any = None,
         supplemental_calendar_source: WallStreetCNSource | None = None,
         basis: Basis = "live_poll",
@@ -2306,6 +2359,14 @@ class ShadowRunner:
         self.observer_store = observer_store
         self.quote_store = quote_store
         self.quote_bridge_dir = quote_bridge_dir
+        self.ctrader_openapi_streamer = ctrader_openapi_streamer
+        self.ctrader_demo_mirror = ctrader_demo_mirror
+        self.enforce_fx_weekend_pause = enforce_fx_weekend_pause
+        if (
+            self.ctrader_openapi_streamer is not None
+            and getattr(self.ctrader_openapi_streamer, "on_quote_published", None) is None
+        ):
+            self.ctrader_openapi_streamer.on_quote_published = self._event_wakeup_safe
         self.news_source = news_source
         self.supplemental_calendar_source = supplemental_calendar_source
         self.basis: Basis = basis
@@ -2411,12 +2472,66 @@ class ShadowRunner:
         except Exception as exc:
             logger.warning("attach_active_bridge_session_skipped: %s", exc)
 
+    def _event_wakeup_safe(self) -> None:
+        try:
+            self._event_wakeup.set()
+        except Exception:
+            pass
+
+    async def _mirror_demo_fills(self, fills: Sequence[ShadowFill]) -> None:
+        if not self.ctrader_demo_mirror or self.ctrader_openapi_streamer is None:
+            return
+        from .ctrader_openapi import CTraderDemoOrderMirror
+
+        client = getattr(self.ctrader_openapi_streamer, "active_client", None)
+        spec = getattr(self.ctrader_openapi_streamer, "active_symbol_spec", None)
+        for fill in fills:
+            if fill.delta_quantity == Decimal("0"):
+                continue
+            outcome = "ctrader_demo_mirror_filled"
+            detail = ""
+            if client is None or spec is None or not client.is_connected:
+                outcome = "ctrader_demo_mirror_skipped"
+                detail = "ctrader_openapi_client_not_connected"
+            else:
+                try:
+                    mirror = CTraderDemoOrderMirror(client=client, symbol_spec=spec)
+                    res = await mirror.submit_market_delta(
+                        delta_quantity_eur=fill.delta_quantity,
+                        client_order_label=f"evl-{fill.fill_id[:16]}",
+                    )
+                    detail = f"executionType={res.get('executionType')} delta={fill.delta_quantity}"
+                except Exception as exc:
+                    outcome = "ctrader_demo_mirror_failed"
+                    detail = f"{type(exc).__name__}: {exc}"
+            if self.runtime.state_store is not None:
+                rec = AuditRecord(
+                    audit_id=str(uuid4()),
+                    occurred_at=_utc(self.clock()),
+                    component="execution",
+                    decision_id=fill.decision_id,
+                    target_id=fill.target_id,
+                    execution_id=fill.execution_id,
+                    fill_id=fill.fill_id,
+                    policy_version=self.runtime.risk_engine.policy.policy_version,
+                    cost_model_version=self.ledger.cost_model.name,
+                    outcome=outcome,
+                    detail=detail,
+                )
+                self.runtime.state_store.append_audit(rec)
+                await self.runtime.audit_sink.append(rec)
+
     def _active_stop_reason(self, now: datetime | None = None) -> str | None:
         check_now = _utc(now or self.clock())
         if self._stop_reason is not None:
             return self._stop_reason
         if self._stop_event.is_set():
             return "runner_stop_requested"
+        if self.enforce_fx_weekend_pause:
+            from .ctrader_openapi import is_fx_weekend_closed
+
+            if is_fx_weekend_closed(check_now):
+                return "fx_weekend_market_closed"
         required_window = float(self.ledger.exit_policy.max_holding_seconds) + float(
             self.exit_buffer_seconds
         )
@@ -2533,6 +2648,7 @@ class ShadowRunner:
                 )
                 self.runtime.state_store.append_audit(rec)
                 await self.runtime.audit_sink.append(rec)
+        await self._mirror_demo_fills((*exit_fills, *target_fills))
         return exit_fills, target_fills
 
     def _record_protection_check(
@@ -2634,6 +2750,7 @@ class ShadowRunner:
                 )
                 self.runtime.state_store.append_audit(rec)
                 await self.runtime.audit_sink.append(rec)
+        await self._mirror_demo_fills(exit_fills)
         return expired, exit_fills
 
     async def step_events(self) -> tuple[RuntimeCycleResult, ...]:
@@ -3213,10 +3330,10 @@ class ShadowRunner:
 
         return tuple(results)
 
-    async def run(self, *, duration_seconds: float) -> dict[str, Any]:
+    async def run(self, *, duration_seconds: float | None = None) -> dict[str, Any]:
         """Run independent news-poll, event, quote, and protection loops with two-phase protective drain shutdown."""
-        if duration_seconds <= 0:
-            raise ValueError("duration_seconds must be positive")
+        if duration_seconds is not None and duration_seconds <= 0:
+            raise ValueError("duration_seconds must be positive when specified")
         self._stop_event = asyncio.Event()
         self._drain_stop_event = asyncio.Event()
         self._event_wakeup = asyncio.Event()
@@ -3424,6 +3541,11 @@ class ShadowRunner:
                 return Decimal("0"), None
             return Decimal(row["quantity_eur"]), row["pending_exit_reason"]
 
+        streamer_task = (
+            asyncio.create_task(self.ctrader_openapi_streamer.run(), name="shadow-ctrader-openapi")
+            if self.ctrader_openapi_streamer is not None
+            else None
+        )
         protection_task = asyncio.create_task(_protection_worker(), name="shadow-protection")
         quote_task = asyncio.create_task(_quote_worker(), name="shadow-quotes")
         poll_task = asyncio.create_task(_news_poll_worker(), name="shadow-news-polls")
@@ -3435,7 +3557,10 @@ class ShadowRunner:
         protection_worker_alive_during_drain = False
         drain_elapsed_seconds = 0.0
         try:
-            await asyncio.wait_for(self._stop_event.wait(), timeout=duration_seconds)
+            if duration_seconds is None:
+                await self._stop_event.wait()
+            else:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=duration_seconds)
         except TimeoutError:
             timed_out = True
             if self._stop_reason is None:
@@ -3450,7 +3575,10 @@ class ShadowRunner:
                 and self.runtime.state_store.is_stop_requested()
             ):
                 shutdown_reason = "runner_stop_requested"
-            elif timed_out or (shutdown_now >= started_at + timedelta(seconds=duration_seconds)):
+            elif timed_out or (
+                duration_seconds is not None
+                and shutdown_now >= started_at + timedelta(seconds=duration_seconds)
+            ):
                 shutdown_reason = "runner_duration_expired"
             else:
                 shutdown_reason = "runner_stop_requested"
@@ -3541,6 +3669,11 @@ class ShadowRunner:
             for t in (protection_task, quote_task):
                 t.cancel()
             await asyncio.gather(protection_task, quote_task, return_exceptions=True)
+            if self.ctrader_openapi_streamer is not None and streamer_task is not None:
+                await self.ctrader_openapi_streamer.stop()
+                if not streamer_task.done():
+                    streamer_task.cancel()
+                await asyncio.gather(streamer_task, return_exceptions=True)
 
         open_qty, pending_exit = await asyncio.to_thread(_open_position_state)
         if open_qty == Decimal("0"):
@@ -3580,6 +3713,7 @@ class ShadowRunner:
         summary = {
             "scope": "automated_shadow_loop_only",
             "execution_authorized": False,
+            "continuous": duration_seconds is None,
             "started_at": started_at.isoformat(),
             "stopped_at": stopped_at.isoformat(),
             "duration_seconds": duration_seconds,
