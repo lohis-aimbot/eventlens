@@ -63,7 +63,7 @@ Crucially, **the LLM never holds broker credentials and never has the final say*
 
 ## How It Works
 
-A single Python process and local SQLite databases power the entire loop—no custom model training, reinforcement learning, microservices, or multi-agent frameworks are needed. Analysis and sizing currently run in one structured JSON call (comparing one-pass vs. isolated two-role LLM calls remains an open research item).
+A single Python process and local SQLite databases power the current baseline loop—no custom LLM pretraining, microservices, or multi-agent frameworks are needed. Analysis and sizing currently run in one structured JSON call (comparing one-pass vs. isolated two-role LLM calls remains an open research item).
 
 ```mermaid
 flowchart LR
@@ -203,14 +203,13 @@ EventLens keeps a clear line between **automated offline tests**, **recorded liv
 
 ### Long-Horizon Research Agenda
 
-Future extensions remain strictly subordinate to independent hard risk and must beat simpler baselines before adoption:
+Future extensions form a tight three-part loop—**hard-risk safety floor → high-fidelity market simulator → RL execution & exit refinement**—and must beat simpler deterministic baselines before adoption:
 
-| Research Pillar | Stage | Plain-Language Goal |
+| Research Pillar | Priority & Stage | Plain-Language Goal |
 |---|---|---|
-| **Neuro-Symbolic Governance & Formal Safety** | **Active pillar** | Keep stochastic LLM interpretation strictly separated from symbolic Python risk guards, extending toward stateful property testing (`Hypothesis`) and formal invariant verification (`Z3`) across outages and rollovers |
-| **Conditional Generative Market World Model** | **Medium-horizon** | Generate realistic post-event price jumps, spread widening, and liquidity droughts offline so sizing and exit rules can be stress-tested beyond scarce historical macro samples |
-| **Hawkes Microstructure Regime Detection** | **Medium-horizon** | Model clustered headline bursts and sub-second tick acceleration with Hawkes point processes to detect adverse-selection regimes and adapt execution gating |
-| **Regularized Programmatic Policy Search** | **Long-horizon** | Constrain evolutionary parameter/rule search (FunSearch / Eureka style) to bounded exit and execution policies under walk-forward validation and Deflated Sharpe Ratio checks |
+| **Neuro-Symbolic Governance & Formal Safety** | **Active foundation** | Keep LLM macro reasoning strictly separated from deterministic Python risk guards, using stateful property testing (`Hypothesis`) and formal verification (`Z3`) to prove safety across quote outages, rollovers, and shutdown drains |
+| **Conditional Generative Market World Model** | **Core research focus** | Build an offline "flight simulator" for macro releases—generating realistic post-event price jumps, spread spikes, and whipsaw liquidity droughts—to solve macro sample scarcity and stress-test sizing/exit rules |
+| **World-Model RL Execution & Exits (`FinRL`)** | **Paired frontier** | Keep macro direction with the LLM while training `FinRL` reinforcement learning agents (`PPO` / `SAC`) inside the Market World Model to optimize staged entries, dynamic trailing stops, and time-decay exits—strictly bounded by hard risk and walk-forward checks |
 
 ---
 
