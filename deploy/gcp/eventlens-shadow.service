@@ -10,8 +10,8 @@ Group=eventlens
 WorkingDirectory=/opt/eventlens
 EnvironmentFile=/etc/eventlens/eventlens.env
 
-# Optional: append --ctrader-demo-mirror-orders to also mirror risk-approved Shadow fills
-# onto the verified Pepperstone Demo account (login 5298703 / ctidTraderAccountId 47589006).
+# Shadow accounting only. Demo broker order mirroring is blocked pending
+# position-aware closes, confirmed fills, and durable reconciliation acceptance.
 ExecStart=/opt/eventlens/.venv/bin/eventlens-shadow start \
     --continuous \
     --shadow-db /var/lib/eventlens/data/shadow-ledger.sqlite \
@@ -33,7 +33,8 @@ ExecStart=/opt/eventlens/.venv/bin/eventlens-shadow start \
     --exit-drain-timeout 60
 
 # Graceful drain on systemctl stop / restart: ShadowRunner traps SIGTERM,
-# flattens open shadow positions if --close-on-stop is set, and writes BridgeStop diagnostics.
+# attempts Shadow exits with valid quotes or records a handoff when quotes are unavailable.
+# This does not close any broker positions.
 KillSignal=SIGTERM
 TimeoutStopSec=90
 Restart=always

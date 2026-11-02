@@ -2354,6 +2354,13 @@ class ShadowRunner:
         review_policy: ReviewPolicy = ReviewPolicy(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        if ctrader_demo_mirror:
+            from .ctrader_openapi import (
+                DEMO_EXECUTION_UNAVAILABLE,
+                CTraderDemoExecutionUnavailableError,
+            )
+
+            raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
         self.runtime = runtime
         self.ledger = ledger
         self.observer_store = observer_store
@@ -2479,47 +2486,16 @@ class ShadowRunner:
             pass
 
     async def _mirror_demo_fills(self, fills: Sequence[ShadowFill]) -> None:
-        if not self.ctrader_demo_mirror or self.ctrader_openapi_streamer is None:
-            return
-        from .ctrader_openapi import CTraderDemoOrderMirror
+        # Defense in depth if a caller mutates the disabled flag after startup.
+        # Never record an accepted request as a fill or infer broker flatness
+        # from the local Shadow ledger.
+        if self.ctrader_demo_mirror:
+            from .ctrader_openapi import (
+                DEMO_EXECUTION_UNAVAILABLE,
+                CTraderDemoExecutionUnavailableError,
+            )
 
-        client = getattr(self.ctrader_openapi_streamer, "active_client", None)
-        spec = getattr(self.ctrader_openapi_streamer, "active_symbol_spec", None)
-        for fill in fills:
-            if fill.delta_quantity == Decimal("0"):
-                continue
-            outcome = "ctrader_demo_mirror_filled"
-            detail = ""
-            if client is None or spec is None or not client.is_connected:
-                outcome = "ctrader_demo_mirror_skipped"
-                detail = "ctrader_openapi_client_not_connected"
-            else:
-                try:
-                    mirror = CTraderDemoOrderMirror(client=client, symbol_spec=spec)
-                    res = await mirror.submit_market_delta(
-                        delta_quantity_eur=fill.delta_quantity,
-                        client_order_label=f"evl-{fill.fill_id[:16]}",
-                    )
-                    detail = f"executionType={res.get('executionType')} delta={fill.delta_quantity}"
-                except Exception as exc:
-                    outcome = "ctrader_demo_mirror_failed"
-                    detail = f"{type(exc).__name__}: {exc}"
-            if self.runtime.state_store is not None:
-                rec = AuditRecord(
-                    audit_id=str(uuid4()),
-                    occurred_at=_utc(self.clock()),
-                    component="execution",
-                    decision_id=fill.decision_id,
-                    target_id=fill.target_id,
-                    execution_id=fill.execution_id,
-                    fill_id=fill.fill_id,
-                    policy_version=self.runtime.risk_engine.policy.policy_version,
-                    cost_model_version=self.ledger.cost_model.name,
-                    outcome=outcome,
-                    detail=detail,
-                )
-                self.runtime.state_store.append_audit(rec)
-                await self.runtime.audit_sink.append(rec)
+            raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
 
     def _active_stop_reason(self, now: datetime | None = None) -> str | None:
         check_now = _utc(now or self.clock())
@@ -3066,6 +3042,11 @@ class ShadowRunner:
             return ()
 
         market = await asyncio.to_thread(self._current_market)
+        # Fetching a snapshot advances the real clock. Validate at observation
+        # completion, while retaining the strict future/stale quote checks.
+        now = _utc(self.clock())
+        if _is_stopped(now):
+            return ()
         qc = validate_market_quote(
             market,
             as_of=now,

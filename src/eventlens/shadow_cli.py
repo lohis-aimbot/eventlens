@@ -1459,7 +1459,7 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument(
         "--ctrader-demo-mirror-orders",
         action="store_true",
-        help="Mirror risk-approved Shadow fills as market orders onto the verified cTrader Demo account (requires --ctrader-openapi)",
+        help="Unavailable: Demo broker mirroring is blocked pending position lifecycle acceptance",
     )
     start_p.add_argument(
         "--ctrader-sample-interval-ms",
@@ -1632,10 +1632,10 @@ def main(argv: list[str] | None = None) -> None:
             not math.isfinite(args.duration) or not 0 < args.duration <= 604800
         ):
             parser.error("--duration must be a finite number in (0, 604800] seconds")
-        if getattr(args, "ctrader_demo_mirror_orders", False) and not getattr(
-            args, "ctrader_openapi", False
-        ):
-            parser.error("--ctrader-demo-mirror-orders requires --ctrader-openapi")
+        if getattr(args, "ctrader_demo_mirror_orders", False):
+            from .ctrader_openapi import DEMO_EXECUTION_UNAVAILABLE
+
+            parser.error(DEMO_EXECUTION_UNAVAILABLE)
         if (
             getattr(args, "ctrader_openapi", False)
             and getattr(args, "quote_bridge_dir", None) is not None

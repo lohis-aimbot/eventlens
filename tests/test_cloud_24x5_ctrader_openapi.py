@@ -4,7 +4,7 @@ Covers:
 1. Demo-only endpoint & account hard locks (rejects live.ctraderapi.com and isLive=True accounts; masks secrets).
 2. Native 4-byte Big-Endian TLS/TCP JSON Open API protocol lifecycle, delta spot ticks, and QuoteStore provenance.
 3. Token rotation (0600 file permissions), reconnect recovery, and seamless QuoteStore session rotation.
-4. EUR-unit to Open API cent-volume conversion (1,000 EUR = 0.01 lot = 100,000) & Demo order mirror / reconciliation.
+4. EUR-unit conversion, read-only reconciliation, and rejection of unvalidated broker order mirroring.
 5. Continuous 24x5 ShadowRunner mode (clears stale bounded duration_seconds, FX weekend awareness, SIGTERM drain).
 6. Durable daily LLM call budget circuit breaker (caps model spend while keeping protective exits 100% active).
 """
@@ -87,8 +87,8 @@ class _MockOpenApiServer:
         drop_first_connection_after_ticks: int | None = None,
     ) -> None:
         self.accounts = accounts or [
-            {"ctidTraderAccountId": 47589006, "isLive": False, "traderLogin": 5298703},
-            {"ctidTraderAccountId": 34490853, "isLive": True, "traderLogin": 1152406},
+            {"ctidTraderAccountId": 12345678, "isLive": False, "traderLogin": 1234567},
+            {"ctidTraderAccountId": 87654321, "isLive": True, "traderLogin": 7654321},
         ]
         self.spot_events = spot_events or []
         self.drop_first_connection_after_ticks = drop_first_connection_after_ticks
@@ -167,7 +167,7 @@ class _MockOpenApiServer:
                                     "balance": 17621,
                                     "moneyDigits": 2,
                                     "leverageInCents": 20000,
-                                    "traderLogin": 5298703,
+                                    "traderLogin": 1234567,
                                 },
                             },
                         },
@@ -343,7 +343,7 @@ def test_ctrader_config_blocks_live_hosts_and_masks_secrets() -> None:
         client_secret="TOP_SECRET_CLIENT_KEY",
         access_token="TOP_SECRET_ACCESS_TOKEN",
         refresh_token="TOP_SECRET_REFRESH_TOKEN",
-        account_id=47589006,
+        account_id=12345678,
     )
     rendered = f"{cfg!r} {cfg}"
     assert "TOP_SECRET_CLIENT_KEY" not in rendered
@@ -364,7 +364,7 @@ def test_ctrader_openapi_blocks_live_account_id_before_account_auth() -> None:
                 client_id="cid",
                 client_secret="csec",
                 access_token="atok",
-                account_id=34490853,  # isLive=True in mock server!
+                account_id=87654321,  # isLive=True in mock server!
             )
             client = CTraderOpenApiClient(cfg)
             with pytest.raises(CTraderLiveAccountForbiddenError):
@@ -406,7 +406,7 @@ def test_ctrader_openapi_streams_verified_zero_spread_and_delta_ticks_into_quote
                 client_id="cid",
                 client_secret="csec",
                 access_token="atok",
-                account_id=47589006,
+                account_id=12345678,
             )
             streamer = CTraderOpenApiQuoteStreamer(
                 config=cfg,
@@ -494,7 +494,7 @@ def test_ctrader_openapi_token_refresh_persists_0600_and_reconnects_cleanly(
                 client_secret="csec",
                 access_token="initial_atok",
                 refresh_token="initial_rtok",
-                account_id=47589006,
+                account_id=12345678,
                 token_file=token_file,
             )
             # 1. Verify token rotation writes 0600 file
@@ -538,7 +538,7 @@ def test_ctrader_openapi_token_refresh_persists_0600_and_reconnects_cleanly(
     asyncio.run(_scenario())
 
 
-def test_ctrader_demo_order_mirror_converts_eur_units_to_protocol_cents_and_reconciles() -> None:
+def test_ctrader_demo_order_mirror_is_blocked_without_sending_broker_orders() -> None:
     assert eur_units_to_protocol_volume_cents(Decimal("1000")) == 100_000
     assert eur_units_to_protocol_volume_cents(Decimal("4000")) == 400_000
 
@@ -554,32 +554,31 @@ def test_ctrader_demo_order_mirror_converts_eur_units_to_protocol_cents_and_reco
                 client_id="cid",
                 client_secret="csec",
                 access_token="atok",
-                account_id=47589006,
+                account_id=12345678,
             )
             client = CTraderOpenApiClient(cfg)
             await client.connect_and_authenticate()
             spec = await client.fetch_symbol_spec("EURUSD")
             mirror = CTraderDemoOrderMirror(client=client, symbol_spec=spec)
 
-            exec_res = await mirror.submit_market_delta(
-                delta_quantity_eur=Decimal("-4000"),
-                client_order_label="eventlens-shadow-test",
-            )
-            assert exec_res["executionType"] == "ORDER_FILLED"
+            # Neither a first entry nor its opposite delta may be sent until
+            # position-aware closes, fill confirmation and reconciliation exist.
+            for quantity in (Decimal("4000"), Decimal("-4000")):
+                with pytest.raises(RuntimeError, match="demo_execution_unavailable"):
+                    await mirror.submit_market_delta(delta_quantity_eur=quantity)
+            with pytest.raises(RuntimeError, match="demo_execution_unavailable"):
+                await client.send_demo_market_order(
+                    symbol_id=spec.symbol_id, trade_side="BUY", volume_cents=400_000
+                )
             order_msgs = [
                 m
                 for m in srv.received_messages
                 if int(m["payloadType"]) == int(ProtoOAPayloadType.NEW_ORDER_REQ)
             ]
-            assert len(order_msgs) == 1
-            assert order_msgs[0]["payload"]["volume"] == 400_000
-            assert order_msgs[0]["payload"]["tradeSide"] == "SELL"
-            assert order_msgs[0]["payload"]["orderType"] == "MARKET"
+            assert order_msgs == []
 
-            recon = await client.reconcile()
-            assert len(recon["positions"]) == 1
-            assert recon["positions"][0]["volume_cents"] == 400_000
-            assert recon["positions"][0]["quantity_eur"] == Decimal("-4000")
+            # Read-only reconciliation and market-data access remain available.
+            assert (await client.reconcile())["is_live"] is False
             await client.close()
         finally:
             await srv.close()
@@ -655,6 +654,8 @@ def test_continuous_24x5_runner_clears_stale_duration_and_handles_fx_weekend(
                 state_store=state_store,
                 event_filter=EURUSDEventFilter(),
             )
+            with pytest.raises(RuntimeError, match="demo_execution_unavailable"):
+                ShadowRunner(runtime=runtime, ledger=ledger, ctrader_demo_mirror=True)
             runner = ShadowRunner(
                 runtime=runtime,
                 ledger=ledger,
@@ -875,14 +876,16 @@ def test_daily_llm_budget_circuit_breaker_caps_model_calls_without_blocking_prot
     asyncio.run(_scenario())
 
 
-def test_shadow_cli_continuous_and_ctrader_flag_validation(tmp_path: Path) -> None:
+def test_shadow_cli_continuous_and_ctrader_flag_validation(tmp_path: Path, capsys: Any) -> None:
     """CLI guards reject unsafe/contradictory cTrader & continuous flag combinations."""
     from eventlens.shadow_cli import main
 
-    # 1. --ctrader-demo-mirror-orders without --ctrader-openapi must fail
-    with pytest.raises(SystemExit) as exc1:
-        main(["start", "--ctrader-demo-mirror-orders", "--duration", "10"])
-    assert exc1.value.code == 2
+    # Reject before credentials, databases, network or model calls, with or without Open API.
+    for flags in ([], ["--ctrader-openapi"]):
+        with pytest.raises(SystemExit) as exc1:
+            main(["start", "--ctrader-demo-mirror-orders", "--duration", "10", *flags])
+        assert exc1.value.code == 2
+        assert "demo_execution_unavailable" in capsys.readouterr().err
 
     # 2. --ctrader-openapi and --quote-bridge-dir are mutually exclusive
     with pytest.raises(SystemExit) as exc2:

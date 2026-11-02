@@ -359,3 +359,21 @@ any prior raw evidence under `data/` or `scratch/`:
 | **Offline-verified (`离线验证`, `347` passing tests)** | `pytest -q` (`347 passed`, including `9` tests in `tests/test_v0154_audit_fixes.py`, `18` tests in `tests/test_v0155_reversal_momentum_trailing.py`, and `8` end-to-end reproduction & verification suites in `tests/test_v0156_audit_remediations.py`), `ruff check .`, `ruff format --check .`, and `mypy src scripts`. | Deterministically verifies contracts, state machines, crash recovery, provenance boundaries, read-only byte-identity invariants, 30m outage / cross-session / cutoff diagnostics, timestamp taxonomy, DOM-breakage / CDN-cache / timeout health, hard risk, and shadow ledger math using offline mocks and clocks. **Not live market or live model evidence.** |
 | **Live-observed (`真实观测`, preserved unmodified)** | Recorded under local gitignored `data/shadow-observation-*` (`2026-10-22`, `2026-10-23` PMI runs, `2026-10-27` residual recovery & `2,240.0 s` continuous window, `2026-10-29` ECB window where `investingLive` RSS `Age: 313s` lag and a mid-session quote-bridge outage were observed) plus `8` historical FOMC episodes. Separately, the `2026-10-28` 1-minute Yahoo bar replay is quarantined in [replay-errata-2026-10-28.md](replay-errata-2026-10-28.md) and **cannot** be cited as live forward fill evidence. | Establishes observed cTrader quote bridge behavior, DeepSeek adapter connectivity, protective exit accounting, and real failure modes (`Age: 313s` RSS caching and quote-bridge stoppage). `HOLD`, zero fills, or single-run PnL are never evaluated as strategy success or profitability. |
 | **Pending live forward acceptance (`待验收`)** | 1) Live forward multi-poll acceptance of the `investingLive` live HTML channel (`live_forward_acceptance_status = "pending"`) across active macro/central-bank windows;<br/>2) Live forward Shadow observation exercising `v0.15.4`–`v0.15.6` paths (independent stream capture, non-regressing enrichment, stateful reviews, pips-based trailing exits, stale-source risk gating);<br/>3) Live open-to-exit fills completed entirely within a single uninterrupted post-drain window;<br/>4) Multi-session after-cost evaluation and isolated cTrader Demo order execution adapter. | Zero paid LLM calls, live HTTP polls, broker connections, or orders were executed during the `v0.15.6` remediation. All items in this row remain explicit prerequisites before Demo order execution. |
+
+
+## November 2, 2026 — Review-clock correction and broker execution quarantine
+
+- Stateful reviews now sample the validation cutoff **after** market snapshot
+  retrieval. Regression checks cover a clock advancing on every call, actual
+  price-triggered LLM review, stale/future quote rejection, and stop requests
+  received during retrieval. Strict quote-quality rules remain enabled.
+- Demo broker order mirroring is **unavailable**, rather than merely opt-in.
+  CLI startup, `ShadowRunner`, the mirror interface and the client order method
+  refuse it. Previously, opposite market orders did not prove position closure
+  on hedged accounts, and an acknowledgement could be mislabeled as a fill.
+- Re-enabling broker execution requires position-ID-aware closes, confirmed
+  partial/full fills, persisted order recovery, restart reconciliation, and
+  verified broker-versus-Shadow divergence handling. No broker calls were made
+  to validate this change. Shadow flatness does not establish broker flatness.
+- The current offline suite contains **360 tests**. Continuous cloud operation
+  remains a pending forward acceptance milestone, not a completed live result.

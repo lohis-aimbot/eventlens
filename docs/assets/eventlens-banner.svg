@@ -1,18 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="banner-title banner-desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
-  <title id="banner-title">EventLens — Turn macro events into auditable FX decisions</title>
-  <desc id="banner-desc">Apple and DeepSeek inspired minimalist hero banner featuring a precision sapphire optical lens emblem, crisp EventLens wordmark, and concise subtitle.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="260" viewBox="0 0 960 260" role="img" aria-labelledby="banner-title banner-desc" shape-rendering="geometricPrecision" text-rendering="geometricPrecision">
+  <title id="banner-title">EventLens</title>
+  <desc id="banner-desc">A sapphire optical lens above a large EventLens wordmark. The project description is provided as selectable text in the README.</desc>
   <defs>
     <clipPath id="banner-clip">
-      <rect width="1280" height="360" rx="28"/>
+      <rect width="960" height="260" rx="28"/>
     </clipPath>
 
-    <linearGradient id="banner-bg" x1="0" y1="0" x2="1280" y2="360" gradientUnits="userSpaceOnUse">
+    <linearGradient id="banner-bg" x1="0" y1="0" x2="960" y2="260" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFFFFF"/>
       <stop offset="0.55" stop-color="#F8FAFF"/>
       <stop offset="1" stop-color="#F1F6FF"/>
     </linearGradient>
 
-    <radialGradient id="hero-bloom" cx="640" cy="96" r="420" gradientUnits="userSpaceOnUse">
+    <radialGradient id="hero-bloom" cx="480" cy="96" r="420" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4D6BFE" stop-opacity="0.13"/>
       <stop offset="0.55" stop-color="#0EA5E9" stop-opacity="0.04"/>
       <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
@@ -72,7 +72,7 @@
       <circle cx="0" cy="0" r="38"/>
     </clipPath>
 
-    <linearGradient id="word-grad" x1="638" y1="168" x2="882" y2="238" gradientUnits="userSpaceOnUse">
+    <linearGradient id="word-grad" x1="478" y1="168" x2="722" y2="238" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#2563EB"/>
       <stop offset="0.52" stop-color="#4D6BFE"/>
       <stop offset="1" stop-color="#0891B2"/>
@@ -80,11 +80,11 @@
   </defs>
 
   <g clip-path="url(#banner-clip)">
-    <rect width="1280" height="360" fill="url(#banner-bg)"/>
-    <circle cx="640" cy="96" r="420" fill="url(#hero-bloom)"/>
+    <rect width="960" height="260" fill="url(#banner-bg)"/>
+    <circle cx="480" cy="96" r="420" fill="url(#hero-bloom)"/>
 
     <!-- Precision Sapphire Optical Lens Emblem -->
-    <g transform="translate(640, 96)" filter="url(#lens-drop)">
+    <g transform="translate(480, 76)" filter="url(#lens-drop)">
       <circle cx="0" cy="0" r="53" fill="url(#b-titanium)"/>
       <circle cx="0" cy="0" r="52.4" fill="none" stroke="url(#b-chamfer)" stroke-width="1.2"/>
       <circle cx="0" cy="0" r="47.5" fill="#0B1120" stroke="#334155" stroke-opacity="0.55" stroke-width="0.9"/>
@@ -110,13 +110,11 @@
 
     <!-- Apple / DeepSeek Clean Display Typography -->
     <g font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif" text-anchor="middle">
-      <text x="640" y="228" font-size="88" font-weight="700" letter-spacing="-3.6">
+      <text x="480" y="222" font-size="88" font-weight="700" letter-spacing="-3.6">
         <tspan fill="#0F172A">Event</tspan><tspan fill="url(#word-grad)">Lens</tspan>
       </text>
-      <text x="640" y="276" fill="#475569" font-size="24" font-weight="400" letter-spacing="-0.3">Turn macro events into auditable FX decisions.</text>
-      <text x="640" y="316" fill="#94A3B8" font-size="12" font-weight="600" letter-spacing="1.8">REALTIME MACRO WIRE   ·   PERSISTENT THESIS MEMORY   ·   INDEPENDENT HARD RISK</text>
     </g>
   </g>
 
-  <rect x="0.75" y="0.75" width="1278.5" height="358.5" rx="27.25" fill="none" stroke="#E2E8F0" stroke-width="1.5"/>
+  <rect x="0.75" y="0.75" width="958.5" height="258.5" rx="27.25" fill="none" stroke="#E2E8F0" stroke-width="1.5"/>
 </svg>

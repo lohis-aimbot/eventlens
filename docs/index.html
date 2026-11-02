@@ -477,8 +477,8 @@
   <header class="hero">
     <img class="hero-lens" src="assets/eventlens-logo.svg" alt="EventLens Sapphire Optical Lens" />
     <div class="eyebrow">
-      <span data-zh>神经符号风控架构 · 24×5 无头模拟盘流</span>
-      <span data-en>Neuro-Symbolic Governance · 24×5 Headless Demo Stream</span>
+      <span data-zh>持久化假设记忆 · 独立风控 · Shadow 研究</span>
+      <span data-en>Thesis Memory · Independent Risk · Shadow Research</span>
     </div>
     <h1>
       <span data-zh>从全球宏观事件，<br />到<span class="grad">可审计的外汇决策</span>。</span>
@@ -490,7 +490,7 @@
     </p>
     <div class="cta-row">
       <a class="btn-primary" href="#quickstart">
-        <span data-zh>30 秒快速开始</span>
+        <span data-zh>快速开始</span>
         <span data-en>Get Started</span>
       </a>
       <a class="btn-secondary" href="https://github.com/lohis-aimbot/eventlens" target="_blank" rel="noopener">
@@ -534,16 +534,16 @@
           <span class="card-step">03 · GOVERN</span>
           <h3><span data-zh>确定性硬风控</span><span data-en>Hard Risk Engine</span></h3>
           <p>
-            <span data-zh>独立校验仓位上限、点差新鲜度与数据源健康度；点值止损、止盈与移动追踪完全脱离模型独立毫秒级运行。</span>
+            <span data-zh>独立校验仓位上限、点差新鲜度与数据源健康度；点值止损、止盈与移动追踪完全脱离模型独立运行。</span>
             <span data-en>Enforces sizing limits, quote freshness, and stale-feed gates while running pip SL/TP/trailing exits without the model.</span>
           </p>
         </div>
         <div class="card">
           <span class="card-step">04 · EXECUTE</span>
-          <h3><span data-zh>影子账本与模拟跟单</span><span data-en>Shadow &amp; Demo Lock</span></h3>
+          <h3><span data-zh>本地影子账本</span><span data-en>Shadow Accounting</span></h3>
           <p>
-            <span data-zh>全量因果记录本地 Shadow 成交与 Razor 佣金成本，并可选同步映射至双重硬锁保护的 Pepperstone 模拟盘。</span>
-            <span data-en>Records causal Shadow fills with Razor commission provenance and optional double-locked cTrader Demo mirroring.</span>
+            <span data-zh>记录本地 Shadow 模拟成交与佣金成本。券商下单已阻断，等待平仓、成交确认与持仓对账完成验收。</span>
+            <span data-en>Records simulated Shadow fills and commission costs. Broker orders are blocked pending position lifecycle and reconciliation acceptance.</span>
           </p>
         </div>
       </div>
@@ -551,14 +551,15 @@
   </section>
 
   <section id="cloud" class="section">
+    <p class="container"><strong><span data-zh>验收状态：多日云端无人值守运行仍待验证；当前仅支持报价接入与本地 Shadow 模拟。</span><span data-en>Acceptance pending: multi-day unattended cloud operation. Current operation supports Demo quotes and local Shadow simulation only.</span></strong></p>
     <div class="container">
       <div class="section-header">
         <h2>
-          <span data-zh>专为 24×5 云端无人值守打造</span>
-          <span data-en>Engineered for 24×5 unattended cloud operation</span>
+          <span data-zh>连续 Shadow 运行支持</span>
+          <span data-en>Continuous Shadow operation support</span>
         </h2>
         <p>
-          <span data-zh>告别本地桌面端挂机与每日手动重启，一台轻量 Linux 云主机即可全天候守护。</span>
+          <span data-zh>提供 Linux 部署与无桌面报价接入，支持持续研究；多日无人值守表现仍待前向验收。</span>
           <span data-en>No desktop GUI or manual daily restarts—deploy cleanly on a lightweight Ubuntu systemd VM.</span>
         </p>
       </div>
@@ -580,14 +581,14 @@
 
         <div class="bento-card bento-5">
           <div>
-            <div class="bento-tag"><span data-zh>双重物理级安全锁</span><span data-en>Double Demo-Only Lock</span></div>
+            <div class="bento-tag"><span data-zh>双重 Demo 校验</span><span data-en>Double Demo-Only Lock</span></div>
             <h3>
-              <span data-zh>100% 物理屏蔽实盘账户</span>
-              <span data-en>Zero live-account exposure</span>
+              <span data-zh>程序拒绝实盘账户鉴权</span>
+              <span data-en>Live account authentication blocked</span>
             </h3>
             <p>
-              <span data-zh>同时锁定服务器域名与鉴权前 isLive == False 核验；任何实盘地址或实盘 ID 均在发包前直接熔断拒绝。</span>
-              <span data-en>Blocks live hostnames and verifies isLive == False prior to account authentication—real-money accounts cannot be touched.</span>
+              <span data-zh>同时锁定服务器域名与鉴权前 isLive == False 核验；实盘服务器配置被拒绝，账户鉴权前检查账户类型。</span>
+              <span data-en>Blocks live hostnames and verifies isLive == False prior to account authentication; broker order submission is also disabled.</span>
             </p>
           </div>
         </div>
@@ -600,8 +601,8 @@
               <span data-en>Daily LLM call cap</span>
             </h3>
             <p>
-              <span data-zh>通过 --max-daily-llm-calls 锁定每日 UTC 模型调用上限；即使突发新闻刷屏触发熔断，实时报价与持仓止损保护依然 100% 运行。</span>
-              <span data-en>Caps daily UTC paid model calls while keeping live quote ingestion and protective stop-loss monitoring 100% active.</span>
+              <span data-zh>通过 --max-daily-llm-calls 锁定每日 UTC 模型调用上限；即使突发新闻刷屏触发熔断，报价和 Shadow 保护任务继续独立调度。</span>
+              <span data-en>Caps daily UTC paid model calls while keeping live quote ingestion and Shadow protective monitoring independently scheduled.</span>
             </p>
           </div>
         </div>
@@ -638,7 +639,7 @@
 
       <div class="metrics">
         <div class="metric-box">
-          <div class="metric-val">355</div>
+          <div class="metric-val">360</div>
           <div class="metric-label"><span data-zh>全量自动化测试 100% 通过</span><span data-en">Automated tests passing</span></div>
         </div>
         <div class="metric-box">

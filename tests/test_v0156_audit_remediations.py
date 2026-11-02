@@ -163,8 +163,10 @@ def test_issue1_condition_parser_separates_structured_price_rules_from_natural_l
         assert nl_res.condition is None
 
 
+@pytest.mark.parametrize("advancing_clock", [False, True])
 def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_budget_and_no_auto_trade(
     tmp_path: Path,
+    advancing_clock: bool,
 ) -> None:
     import eventlens.runtime as rt
 
@@ -174,9 +176,12 @@ def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_bu
     t0 = datetime(2026, 10, 29, 14, 0, 0, tzinfo=UTC)
     clock_now = t0
     current_mid = "1.1130"
+    clock_ticks = 0
 
     def clock() -> datetime:
-        return clock_now
+        nonlocal clock_ticks
+        clock_ticks += 1
+        return clock_now + timedelta(milliseconds=clock_ticks if advancing_clock else 0)
 
     def market_provider(as_of: datetime) -> MarketSnapshot:
         return _fresh_live_quote(current_mid, as_of)
@@ -318,7 +323,11 @@ def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_bu
         assert r_ctx["is_internal_review"] is True
         assert r_ctx["trigger_kind"] == "structured_price_condition"
         assert r_ctx["origin_event_id"] == ev1.event_id
-        assert r_ctx["origin_event_age_seconds"] == pytest.approx(180.0)
+        triggered_at = datetime.fromisoformat(r_ctx["triggered_at"])
+        assert r_ctx["origin_event_age_seconds"] == round(
+            (triggered_at - ev1.received_timestamp).total_seconds(), 3
+        )
+        assert 180.0 <= r_ctx["origin_event_age_seconds"] < 181.0
         cond_statuses = {c["raw_condition"]: c["status"] for c in r_ctx["condition_evaluations"]}
         assert cond_statuses["EUR/USD >= 1.1145"] == "executable_price_rule"
         assert cond_statuses["ECB rhetoric turns dovish in Q&A"] == "unexecutable_natural_language"
@@ -363,6 +372,64 @@ def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_bu
     finally:
         ostore.close()
         state_store.close()
+        ledger.close()
+
+
+@pytest.mark.parametrize("quote_kind", ["fresh", "future", "stale", "stop_during_fetch"])
+def test_review_observation_cutoff_preserves_quality_and_stop_guards(
+    tmp_path: Path,
+    monkeypatch: Any,
+    quote_kind: str,
+) -> None:
+    from eventlens.runtime import ReviewPolicy
+
+    now = datetime(2026, 11, 2, 14, tzinfo=UTC)
+
+    def clock() -> datetime:
+        nonlocal now
+        now += timedelta(milliseconds=1)
+        return now
+
+    memory = SQLiteThesisMemory(tmp_path / "memory.sqlite", clock=clock)
+    ledger = SQLiteShadowLedger(tmp_path / "shadow.sqlite", clock=clock)
+    memory_checks = 0
+    original_snapshot = memory.snapshot
+
+    async def counted_snapshot(*, as_of: datetime) -> Any:
+        nonlocal memory_checks
+        memory_checks += 1
+        return await original_snapshot(as_of=as_of)
+
+    monkeypatch.setattr(memory, "snapshot", counted_snapshot)
+
+    def market_provider(ts: datetime) -> MarketSnapshot:
+        if quote_kind == "stop_during_fetch":
+            runner.stop()
+        offset = {"future": 5, "stale": -5}.get(quote_kind, 0)
+        return _fresh_live_quote("1.1150", ts + timedelta(seconds=offset))
+
+    async def unexpected_model_call(*args: Any) -> Any:
+        raise AssertionError("An empty thesis memory must not invoke a model")
+
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        agent=SinglePassTradingAgent(_ScriptedModelClient(unexpected_model_call), clock=clock),
+        target_validator=DeterministicTargetValidator(),
+        risk_engine=DeterministicHardRiskEngine(RiskPolicy.pepperstone_razor_200(), clock=clock),
+        shadow_executor=ledger,
+        market_provider=market_provider,
+        clock=clock,
+    )
+    runner = ShadowRunner(
+        runtime=runtime,
+        ledger=ledger,
+        clock=clock,
+        review_policy=ReviewPolicy(enabled=True),
+    )
+    try:
+        assert asyncio.run(runner.step_reviews()) == ()
+        assert memory_checks == (1 if quote_kind == "fresh" else 0)
+    finally:
         ledger.close()
 
 

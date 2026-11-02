@@ -1,4 +1,4 @@
-"""Headless Python cTrader Open API Demo client, QuoteStore streamer, and Demo order mirror.
+"""Headless Python cTrader Open API Demo market-data client and QuoteStore streamer.
 
 Hard safety invariants:
 1. Endpoint lock: Only `demo.ctraderapi.com` (or explicit loopback `127.0.0.1`/`localhost` for unit tests)
@@ -40,10 +40,19 @@ _SPOT_PRICE_SCALE = Decimal("100000")
 _PRECISE_COMMISSION_SCALE = Decimal("100000")
 _VOLUME_CENTS_PER_EUR_UNIT = Decimal("100")
 _MAX_FRAME_BYTES = 4 * 1024 * 1024
+DEMO_EXECUTION_UNAVAILABLE = (
+    "demo_execution_unavailable: broker order mirroring is disabled pending "
+    "position-aware closes, confirmed fills, durable recovery and reconciliation; "
+    "use Shadow accounting with Demo quotes instead"
+)
 
 
 class CTraderOpenApiError(RuntimeError):
     """Base error for cTrader Open API transport, auth, or protocol faults."""
+
+
+class CTraderDemoExecutionUnavailableError(CTraderOpenApiError):
+    """Broker execution is unavailable until its position lifecycle is validated."""
 
 
 class CTraderLiveEndpointForbiddenError(PermissionError):
@@ -512,25 +521,8 @@ class CTraderOpenApiClient:
         volume_cents: int,
         label: str = "eventlens-demo",
     ) -> dict[str, Any]:
-        acct_id = self._require_demo_account()
-        side_norm = trade_side.upper()
-        if side_norm not in {"BUY", "SELL"}:
-            raise ValueError(f"Unsupported trade_side: {trade_side!r}")
-        if volume_cents <= 0:
-            raise ValueError("volume_cents must be positive")
-        res = await self._rpc(
-            ProtoOAPayloadType.NEW_ORDER_REQ,
-            {
-                "ctidTraderAccountId": acct_id,
-                "symbolId": symbol_id,
-                "orderType": "MARKET",
-                "tradeSide": side_norm,
-                "volume": volume_cents,
-                "label": label[:100],
-            },
-            expected_type=ProtoOAPayloadType.EXECUTION_EVENT,
-        )
-        return dict(res.get("payload", {}))
+        """Retained for compatibility; never send an unvalidated broker order."""
+        raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
 
     async def close(self) -> None:
         self._closed_event.set()
@@ -667,7 +659,7 @@ class CTraderOpenApiClient:
 
 
 class CTraderDemoOrderMirror:
-    """Strictly downstream Demo-only order mirror for already risk-approved ShadowFill deltas."""
+    """Disabled compatibility interface; a reverse order is not a position close."""
 
     def __init__(self, *, client: CTraderOpenApiClient, symbol_spec: CTraderSymbolSpec) -> None:
         self.client = client
@@ -679,28 +671,7 @@ class CTraderDemoOrderMirror:
         delta_quantity_eur: Decimal,
         client_order_label: str = "eventlens-shadow-mirror",
     ) -> dict[str, Any]:
-        vol_cents = eur_units_to_protocol_volume_cents(delta_quantity_eur)
-        if vol_cents < self.symbol_spec.min_volume_cents:
-            raise ValueError(
-                f"Volume {vol_cents} cents below symbol minVolume {self.symbol_spec.min_volume_cents}"
-            )
-        if vol_cents > self.symbol_spec.max_volume_cents:
-            raise ValueError(
-                f"Volume {vol_cents} cents exceeds symbol maxVolume {self.symbol_spec.max_volume_cents}"
-            )
-        if (
-            vol_cents - self.symbol_spec.min_volume_cents
-        ) % self.symbol_spec.step_volume_cents != 0:
-            raise ValueError(
-                f"Volume {vol_cents} cents violates stepVolume {self.symbol_spec.step_volume_cents}"
-            )
-        trade_side = "BUY" if delta_quantity_eur > Decimal("0") else "SELL"
-        return await self.client.send_demo_market_order(
-            symbol_id=self.symbol_spec.symbol_id,
-            trade_side=trade_side,
-            volume_cents=vol_cents,
-            label=client_order_label,
-        )
+        raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
 
 
 class CTraderOpenApiQuoteStreamer:

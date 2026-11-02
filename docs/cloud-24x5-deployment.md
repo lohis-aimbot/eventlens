@@ -1,6 +1,6 @@
-# Cloud 24×5 Unattended Shadow Deployment (GCP Ubuntu + cTrader Open API Demo)
+# Continuous Shadow Deployment (GCP Ubuntu + cTrader Demo Quotes)
 
-This guide covers deploying EventLens on an Ubuntu 24.04 LTS Linux VM (e.g. Google Cloud `e2-small`) so it runs **24×5 unattended** without requiring a local Mac/Windows cTrader desktop app or manual cBot restarts.
+This guide covers deploying EventLens on an Ubuntu 24.04 LTS Linux VM (e.g. Google Cloud `e2-small`) for continuous Shadow research without a local cTrader desktop application. Deployment support and offline checks are implemented; **multi-day unattended forward acceptance remains pending**.
 
 ---
 
@@ -12,11 +12,11 @@ This guide covers deploying EventLens on an Ubuntu 24.04 LTS Linux VM (e.g. Goog
   1. **Endpoint Lock (`CTraderLiveEndpointForbiddenError`)**: `CTraderOpenApiConfig` rejects any host containing `"live"` (only `demo.ctraderapi.com` or local loopback test mocks are permitted).
   2. **Pre-Auth Account Lock (`CTraderLiveAccountForbiddenError`)**: Before sending `ProtoOAAccountAuthReq (2102)`, `CTraderOpenApiClient` queries `ProtoOAGetAccountListByAccessTokenReq (2149)` and verifies the target `ctidTraderAccountId` exists and explicitly reports `isLive == False`.
 - **Risk Gate Integrity**:
-  Shadow accounting (`SQLiteShadowLedger`) and `DeterministicHardRiskEngine` remain the sole authority for sizing, leverage, cooldowns, and protective exits. Optional Demo order mirroring (`--ctrader-demo-mirror-orders`, disabled by default) only mirrors already-approved Shadow fills downstream.
+  Shadow accounting (`SQLiteShadowLedger`) and `DeterministicHardRiskEngine` remain the sole authority for sizing, leverage, cooldowns, and protective exits. **Broker order mirroring is blocked**, including `--ctrader-demo-mirror-orders`. The former delta-to-market-order implementation did not establish position-aware closes, confirmed fills, or durable broker reconciliation. Shadow flatness must never be used to infer broker flatness.
 - **24×5 Continuous Safeguards**:
   - **FX Weekend Auto-Pause**: Automatically pauses news polling during FX weekend market closure (`America/New_York` Friday `17:00` → Sunday `17:00`, DST-aware) so weekend noise never wastes LLM calls or expires against closed markets.
   - **Daily LLM Budget Circuit Breaker (`--max-daily-llm-calls 80`)**: Caps paid DeepSeek invocations per UTC day while keeping `QuoteStore` ingestion and `ProtectiveExitPolicy` stop-loss/take-profit monitoring 100% active.
-  - **Graceful `SIGTERM` Drain**: `systemctl stop` / `restart` triggers `ShadowRunner.stop()`, draining open shadow positions cleanly within `--exit-drain-timeout 60` before closing SQLite WAL files.
+  - **Graceful `SIGTERM` Drain**: `systemctl stop` / `restart` triggers `ShadowRunner.stop()`, attempting Shadow exits with valid quotes within `--exit-drain-timeout 60`, or recording a handoff when exits cannot complete. Inspect the drain result; shutdown does not guarantee flatness and does not close broker positions.
 
 ---
 
@@ -27,7 +27,7 @@ Once Spotware emails approval for your application at https://openapi.ctrader.co
 1. Open your approved app on https://openapi.ctrader.com/apps and click **View** / **Credentials** to note:
    - `Client ID`
    - `Client Secret`
-2. Click **Playground** (or open the token generator for your app), sign in with your Spotware cTID, ensure your **Pepperstone Demo** account (`login 5298703`, `ctidTraderAccountId = 47589006`) is checked, and generate initial tokens:
+2. Click **Playground** (or open the token generator for your app), sign in with your Spotware cTID, ensure your **Demo** account (verify its `ctidTraderAccountId`; this differs from the app login number) is checked, and generate initial tokens:
    - `Access Token`
    - `Refresh Token`
 
@@ -55,7 +55,7 @@ sudo bash deploy/gcp/setup_ubuntu.sh
 
 ## 4. Step 3 — Configure `/etc/eventlens/eventlens.env` & Start `systemd`
 
-Edit `/etc/eventlens/eventlens.env` (`CTRADER_ACCOUNT_ID=47589006` is already pre-filled for Pepperstone Demo `5298703`):
+Edit `/etc/eventlens/eventlens.env`. The account field is a placeholder; set your own Demo `ctidTraderAccountId`:
 
 ```bash
 sudo nano /etc/eventlens/eventlens.env
@@ -67,6 +67,7 @@ Fill in:
 - `CTRADER_CLIENT_SECRET`
 - `CTRADER_ACCESS_TOKEN`
 - `CTRADER_REFRESH_TOKEN`
+- `CTRADER_ACCOUNT_ID` (numeric Demo `ctidTraderAccountId`, not the app login)
 
 Start and enable the service on boot:
 
@@ -93,8 +94,14 @@ sudo systemctl status eventlens-shadow
   sudo -u eventlens /opt/eventlens/.venv/bin/eventlens-shadow report \
     --shadow-db /var/lib/eventlens/data/shadow-ledger.sqlite
   ```
-- **Optional Demo Account Paper-Order Mirroring**:
-  If you also want risk-approved Shadow fills mirrored onto Pepperstone Demo `5298703` so positions appear inside your cTrader mobile/desktop app, add `--ctrader-demo-mirror-orders` to `ExecStart` in `/etc/systemd/system/eventlens-shadow.service`, then run:
-  ```bash
-  sudo systemctl daemon-reload && sudo systemctl restart eventlens-shadow
-  ```
+- **Broker execution is unavailable**:
+  `--ctrader-demo-mirror-orders` is rejected before startup, and the client order
+  interface also refuses order submission. Use the local Shadow ledger to inspect
+  simulated positions. Existing broker positions, if any, require separate manual
+  inspection; disabling mirroring does not close them.
+
+## Acceptance still required
+
+Before describing this service as proven unattended operation, record a multi-day
+forward run with reconnects, token refresh, quote gaps, process restarts and stop/drain
+outcomes. Keep this evidence separate from loopback protocol tests and historical replay.
