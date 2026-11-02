@@ -122,7 +122,9 @@ class PortfolioSnapshot(Contract):
     valuation_reason: str = "flat_no_quote_needed"
 
 
-TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS: frozenset[str] = frozenset({"ctrader_algo"})
+TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS: frozenset[str] = frozenset(
+    {"ctrader_algo", "ctrader_openapi"}
+)
 TRUSTED_COMMISSION_TYPES: frozenset[str] = frozenset({"UsdPerMillionUsdVolume"})
 
 

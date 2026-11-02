@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import signal
 import sqlite3
 from bisect import bisect_left, bisect_right
 from datetime import UTC, datetime, timedelta
@@ -1037,11 +1038,13 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
         args.memory_db.parent.mkdir(parents=True, exist_ok=True)
         memory = SQLiteThesisMemory(args.memory_db, allow_targets=True)
         quote_bridge_dir: Path | None = getattr(args, "quote_bridge_dir", None)
-        if quote_bridge_dir is not None:
+        use_ctrader_openapi = bool(getattr(args, "ctrader_openapi", False))
+        writable_quotes = quote_bridge_dir is not None or use_ctrader_openapi
+        if writable_quotes:
             args.quotes_db.parent.mkdir(parents=True, exist_ok=True)
         qstore = (
-            QuoteStore(args.quotes_db, readonly=quote_bridge_dir is None)
-            if (args.quotes_db.is_file() or quote_bridge_dir is not None)
+            QuoteStore(args.quotes_db, readonly=not writable_quotes)
+            if (args.quotes_db.is_file() or writable_quotes)
             else None
         )
         if getattr(args, "poll_news", False):
@@ -1089,6 +1092,10 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             max_actionable_lag_s: float | None = (
                 float(raw_max_lag) if raw_max_lag is not None and float(raw_max_lag) > 0 else None
             )
+            raw_daily_llm = getattr(args, "max_daily_llm_calls", None)
+            max_daily_llm: int | None = (
+                int(raw_daily_llm) if raw_daily_llm is not None and int(raw_daily_llm) > 0 else None
+            )
             runtime = IntradayEventRuntime(
                 memory=memory,
                 portfolio_state=ledger,
@@ -1101,6 +1108,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 event_filter=ev_filter,
                 max_quote_wait_age=timedelta(seconds=max_quote_wait_s),
                 max_actionable_event_lag_seconds=max_actionable_lag_s,
+                max_daily_llm_calls=max_daily_llm,
             )
 
             if args.command == "recover":
@@ -1178,12 +1186,28 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 max_reviews_per_thesis=int(getattr(args, "max_reviews_per_thesis", 3)),
                 max_total_review_calls=int(getattr(args, "max_total_review_calls", 10)),
             )
+            openapi_streamer: Any = None
+            if use_ctrader_openapi:
+                from .ctrader_openapi import CTraderOpenApiConfig, CTraderOpenApiQuoteStreamer
+
+                assert qstore is not None
+                oa_cfg = CTraderOpenApiConfig.from_environment()
+                openapi_streamer = CTraderOpenApiQuoteStreamer(
+                    config=oa_cfg,
+                    quote_store=qstore,
+                    basis=basis,
+                    sample_interval_ms=int(getattr(args, "ctrader_sample_interval_ms", 200)),
+                )
+            continuous_mode = bool(getattr(args, "continuous", False))
             runner = ShadowRunner(
                 runtime=runtime,
                 ledger=ledger,
                 observer_store=ostore,
                 quote_store=qstore,
                 quote_bridge_dir=quote_bridge_dir,
+                ctrader_openapi_streamer=openapi_streamer,
+                ctrader_demo_mirror=bool(getattr(args, "ctrader_demo_mirror_orders", False)),
+                enforce_fx_weekend_pause=continuous_mode or use_ctrader_openapi,
                 news_source=active_news_source,
                 supplemental_calendar_source=supplemental_cal,
                 basis=basis,
@@ -1205,7 +1229,31 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 review_policy=review_policy,
             )
             runner_ref.append(runner)
-            return await runner.run(duration_seconds=args.duration)
+            loop = asyncio.get_running_loop()
+            installed_signals: list[signal.Signals] = []
+
+            def _handle_stop_signal(reason_name: str) -> None:
+                runner.stop(reason=reason_name)
+
+            for sig, sig_name in (
+                (signal.SIGTERM, "signal_sigterm"),
+                (signal.SIGINT, "signal_sigint"),
+            ):
+                try:
+                    loop.add_signal_handler(sig, _handle_stop_signal, sig_name)
+                    installed_signals.append(sig)
+                except (NotImplementedError, RuntimeError):
+                    pass
+            try:
+                return await runner.run(
+                    duration_seconds=None if continuous_mode else float(args.duration)
+                )
+            finally:
+                for sig in installed_signals:
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except Exception:
+                        pass
         finally:
             if qstore is not None:
                 qstore.close()
@@ -1350,7 +1398,12 @@ def main(argv: list[str] | None = None) -> None:
         "--duration",
         type=float,
         default=30.0,
-        help="Bounded runtime duration in seconds (0 < duration <= 86400)",
+        help="Bounded runtime duration in seconds (0 < duration <= 604800; ignored when --continuous is set)",
+    )
+    start_p.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run unattended 24x5 loop continuously until `eventlens shadow stop` or SIGTERM/SIGINT",
     )
     start_p.add_argument(
         "--basis",
@@ -1397,6 +1450,28 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         default=None,
         help="Optional EventLensQuoteBridge sandbox directory to tail live Demo EUR/USD quotes",
+    )
+    start_p.add_argument(
+        "--ctrader-openapi",
+        action="store_true",
+        help="Stream live Demo EUR/USD quotes directly from headless cTrader Open API (demo.ctraderapi.com:5036)",
+    )
+    start_p.add_argument(
+        "--ctrader-demo-mirror-orders",
+        action="store_true",
+        help="Mirror risk-approved Shadow fills as market orders onto the verified cTrader Demo account (requires --ctrader-openapi)",
+    )
+    start_p.add_argument(
+        "--ctrader-sample-interval-ms",
+        type=int,
+        default=200,
+        help="cTrader Open API tick sampling throttle in ms (default: 200; positive-spread ticks always flush immediately)",
+    )
+    start_p.add_argument(
+        "--max-daily-llm-calls",
+        type=int,
+        default=None,
+        help="Optional daily UTC cap on paid LLM invocations as a cloud cost circuit breaker (e.g. 80)",
     )
     start_p.add_argument("--news-interval", type=float, default=20.0)
     start_p.add_argument("--event-interval", type=float, default=1.0)
@@ -1553,8 +1628,23 @@ def main(argv: list[str] | None = None) -> None:
     ):
         parser.error("--max-quote-wait-seconds must be a positive finite number")
     if args.command == "start":
-        if not math.isfinite(args.duration) or not 0 < args.duration <= 86400:
-            parser.error("--duration must be a finite number in (0, 86400] seconds")
+        if not getattr(args, "continuous", False) and (
+            not math.isfinite(args.duration) or not 0 < args.duration <= 604800
+        ):
+            parser.error("--duration must be a finite number in (0, 604800] seconds")
+        if getattr(args, "ctrader_demo_mirror_orders", False) and not getattr(
+            args, "ctrader_openapi", False
+        ):
+            parser.error("--ctrader-demo-mirror-orders requires --ctrader-openapi")
+        if (
+            getattr(args, "ctrader_openapi", False)
+            and getattr(args, "quote_bridge_dir", None) is not None
+        ):
+            parser.error("--ctrader-openapi and --quote-bridge-dir are mutually exclusive")
+        if getattr(args, "max_daily_llm_calls", None) is not None and args.max_daily_llm_calls < 1:
+            parser.error("--max-daily-llm-calls must be >= 1")
+        if getattr(args, "ctrader_sample_interval_ms", 200) < 0:
+            parser.error("--ctrader-sample-interval-ms must be >= 0")
         if args.poll_news and args.news_interval < 10.0:
             parser.error("--news-interval must be at least 10 seconds when polling live news")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)

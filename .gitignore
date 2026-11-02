@@ -25,3 +25,5 @@ logs/
 *.db-shm
 *.feed.lock
 *.observer.lock
+*ctrader_tokens*.json
+deploy/gcp/eventlens.env

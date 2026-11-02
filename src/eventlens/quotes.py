@@ -14,6 +14,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from .contracts import (
+    TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS,
     Contract,
     Identifier,
     MarketSnapshot,
@@ -34,6 +35,7 @@ class BridgeStart(Contract):
     started_at: Timestamp
     sample_interval_ms: int = Field(strict=True, ge=100, le=10000)
     duration_seconds: int = Field(strict=True, ge=10, le=86400)
+    source_provider: Literal["ctrader_algo", "ctrader_openapi"] = "ctrader_algo"
     digits: int | None = Field(default=None, strict=True, ge=0, le=10)
     pip_size: Decimal | None = Field(default=None, gt=0)
     commission: Decimal | None = Field(default=None, ge=0)
@@ -304,6 +306,7 @@ class QuoteStore:
                 return None
             start = BridgeStart.model_validate_json(row["session_start"])
             return QuoteObservation(
+                provider=start.source_provider,
                 basis=row["basis"],
                 quote=BridgeQuote.model_validate_json(row["quote"]),
                 received_at=row["received_at"],
@@ -542,7 +545,7 @@ def align_news(
         allow_commission_bearing_zero_spread
         and quote is not None
         and quote.basis == "live_poll"
-        and quote.provider == "ctrader_algo"
+        and quote.provider in TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS
         and quote.commission is not None
         and quote.commission > Decimal("0")
         and quote.commission_type == "UsdPerMillionUsdVolume"
@@ -687,7 +690,10 @@ class QuoteQualityPolicy(Contract):
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
     allow_commission_bearing_zero_spread: bool = False
-    trusted_commission_providers: tuple[Identifier, ...] = ("ctrader_algo",)
+    trusted_commission_providers: tuple[Identifier, ...] = (
+        "ctrader_algo",
+        "ctrader_openapi",
+    )
     trusted_commission_types: tuple[Identifier, ...] = ("UsdPerMillionUsdVolume",)
     require_verified_provenance: bool = False
 
