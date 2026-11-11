@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Spotware cTrader.Automate 1.0.21 packager requires net6.0 (rejects net8.0 with CT0004); built via .NET 8 SDK -->
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>EventLensCliBridge</AssemblyName>
+    <RootNamespace>cAlgo.Robots</RootNamespace>
+    <Deterministic>true</Deterministic>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <AlgoBuild>true</AlgoBuild>
+    <AlgoPublish>false</AlgoPublish>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="cTrader.Automate" Version="[1.0.21]" />
+  </ItemGroup>
+
+  <Target Name="PinEventLensAlgoFileName" BeforeTargets="_ExtractMetadata">
+    <PropertyGroup>
+      <_AlgoFileName>$(AssemblyName).algo</_AlgoFileName>
+      <_AlgoFilePath>$(OutDir)$(_AlgoFileName)</_AlgoFilePath>
+      <_AlgoMetadataFileName>$(_AlgoFileName).metadata</_AlgoMetadataFileName>
+      <_AlgoMetadataFilePath>$(OutDir)$(_AlgoMetadataFileName)</_AlgoMetadataFilePath>
+    </PropertyGroup>
+  </Target>
+</Project>

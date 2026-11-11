@@ -27,3 +27,7 @@ logs/
 *.observer.lock
 *ctrader_tokens*.json
 deploy/gcp/eventlens.env
+*.pwd
+*.algo
+ctrader/**/bin/
+ctrader/**/obj/

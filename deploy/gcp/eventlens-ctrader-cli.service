@@ -1,0 +1,23 @@
+[Unit]
+Description=EventLens Headless cTrader CLI Bridge Container (EURUSD Demo)
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/eventlens
+# Interpolate CTRADER_* CLI arguments on the host via `--env-file` without passing
+# DEEPSEEK_API_KEY or Open API secrets into the ctrader-console container environment.
+# `--abort-on-container-exit --exit-code-from ctrader-cli-bridge` + `Restart=on-failure`
+# ensure a safety Stop() (`--exit-on-stop` -> exit 0) terminates cleanly instead of hanging or looping.
+ExecStart=/usr/bin/docker compose --env-file /etc/eventlens/eventlens.env -f /opt/eventlens/deploy/gcp/docker-compose.ctrader-cli.yml up --no-build --remove-orphans --abort-on-container-exit --exit-code-from ctrader-cli-bridge
+ExecStop=/usr/bin/docker compose --env-file /etc/eventlens/eventlens.env -f /opt/eventlens/deploy/gcp/docker-compose.ctrader-cli.yml stop -t 30
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

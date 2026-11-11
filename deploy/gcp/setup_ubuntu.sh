@@ -15,10 +15,12 @@ APP_DIR="/opt/eventlens"
 STATE_DIR="/var/lib/eventlens"
 CONF_DIR="/etc/eventlens"
 ENV_FILE="${CONF_DIR}/eventlens.env"
+PWD_FILE="${CONF_DIR}/ctrader-cli.pwd"
 
 echo "[1/6] Installing system packages..."
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+  acl \
   ca-certificates \
   git \
   python3 \
@@ -35,6 +37,15 @@ fi
 install -d -m 0755 -o eventlens -g eventlens "${APP_DIR}"
 install -d -m 0750 -o eventlens -g eventlens "${STATE_DIR}"
 install -d -m 0750 -o eventlens -g eventlens "${STATE_DIR}/data"
+install -d -m 0755 -o eventlens -g eventlens "${STATE_DIR}/algo"
+# Official `ghcr.io/spotware/ctrader-console:latest` has empty `Config.User` (defaults to container root;
+# non-root runtime override is not verified). Setgid + default ACLs for `eventlens` ensure files created
+# inside /bridge remain readable/writable by the host `eventlens` Python process without world/other access
+# or unrelated UID grants.
+install -d -m 2770 -o eventlens -g eventlens "${STATE_DIR}/bridge"
+setfacl -b "${STATE_DIR}/bridge" || true
+setfacl -m u:eventlens:rwX -m g:eventlens:rwX "${STATE_DIR}/bridge"
+setfacl -d -m u:eventlens:rwX -m g:eventlens:rwX "${STATE_DIR}/bridge"
 install -d -m 0750 -o root -g eventlens "${CONF_DIR}"
 
 echo "[3/6] Syncing EventLens repository to ${APP_DIR}..."
@@ -65,20 +76,43 @@ else
   echo "Preserved existing ${ENV_FILE} (verified 0600 permissions)."
 fi
 
-echo "[6/6] Installing systemd unit eventlens-shadow.service..."
+if [[ ! -f "${PWD_FILE}" ]]; then
+  install -m 0600 -o root -g root /dev/null "${PWD_FILE}"
+  echo "replace_with_ctid_password" > "${PWD_FILE}"
+  chmod 0600 "${PWD_FILE}"
+  setfacl -b "${PWD_FILE}" || true
+  echo "Created placeholder ${PWD_FILE} (root:root, mode 0600, no ACLs). Replace with single-line cTID password."
+else
+  chown root:root "${PWD_FILE}"
+  chmod 0600 "${PWD_FILE}"
+  setfacl -b "${PWD_FILE}" || true
+  echo "Preserved existing ${PWD_FILE} (enforced root:root, mode 0600, stripped ACLs)."
+fi
+
+echo "[6/6] Installing systemd units..."
 install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-shadow.service" \
   /etc/systemd/system/eventlens-shadow.service
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-ctrader-cli.service" \
+  /etc/systemd/system/eventlens-ctrader-cli.service
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-shadow-cli.service" \
+  /etc/systemd/system/eventlens-shadow-cli.service
 systemctl daemon-reload
 
 cat <<EOF
 
-Setup complete! Next steps:
-  1. Edit credentials (never paste secrets into chat):
+Setup complete! Next steps (Docker cTrader CLI recommended mode):
+  1. Ensure Docker Engine + Compose plugin are installed on this x86_64 VM, then build
+     EventLensCliBridge.algo via official .NET 8 SDK container:
+       sudo bash ${APP_DIR}/deploy/gcp/build_ctrader_algo.sh
+  2. Edit credentials (never paste secrets into chat):
        sudo nano ${ENV_FILE}
-  2. Enable and start 24x5 continuous service:
-       sudo systemctl enable --now eventlens-shadow
-  3. Watch live logs:
-       sudo journalctl -u eventlens-shadow -f
-  4. Check read-only status / report anytime:
+       sudo nano ${PWD_FILE}
+  3. Enable and start headless Docker cTrader CLI + EventLens 24x5 Shadow runtime:
+       sudo systemctl enable --now eventlens-ctrader-cli
+       sudo systemctl enable --now eventlens-shadow-cli
+  4. Verify Demo bridge health and read-only reconciliation before any Demo order test:
+       sudo -u eventlens ${APP_DIR}/.venv/bin/eventlens-shadow demo-reconcile --quote-bridge-dir ${STATE_DIR}/bridge --shadow-db ${STATE_DIR}/data/shadow-ledger.sqlite
        sudo -u eventlens ${APP_DIR}/.venv/bin/eventlens-shadow status --shadow-db ${STATE_DIR}/data/shadow-ledger.sqlite
+  5. Optional supervised bounded Demo smoke test (after setting CTRADER_ALLOW_DEMO_ORDERS=true and restarting eventlens-ctrader-cli):
+       sudo -u eventlens ${APP_DIR}/.venv/bin/eventlens-shadow demo-smoke --quote-bridge-dir ${STATE_DIR}/bridge --shadow-db ${STATE_DIR}/data/shadow-ledger.sqlite --expected-demo-account-number <DEMO_ACCOUNT_NUMBER> --confirm-demo-execution --volume-units 1000
 EOF

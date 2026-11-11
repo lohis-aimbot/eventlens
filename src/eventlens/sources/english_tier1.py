@@ -36,6 +36,7 @@ from ..observer import (
     SourceRecord,
     StoredEnrichment,
     StoredRevision,
+    analyze_macro_semantics,
 )
 from .wallstreetcn import (
     CaptureError,
@@ -412,21 +413,74 @@ def _child_texts(elem: ElementTree.Element, local_name: str) -> tuple[str, ...]:
     return tuple(out)
 
 
+_RSC_REF_TOKEN_RE = re.compile(r"^\$(?:[A-Za-z@]?([0-9a-fA-F]{1,8})|undefined)$")
+_RSC_BYTE_TEXT_CHUNK_RE = re.compile(rb"([0-9a-fA-F]{1,8}):T([0-9a-fA-F]{1,8}),")
+
+
+def _extract_rsc_text_chunks(stream_text: str) -> dict[str, str]:
+    """Extract Next.js RSC Flight ``<hex_id>:T<hex_utf8_byte_len>,<payload>`` text chunks."""
+    if not stream_text:
+        return {}
+    stream_bytes = stream_text.encode("utf-8")
+    total_len = len(stream_bytes)
+    chunks: dict[str, str] = {}
+    pos = 0
+    while pos < total_len:
+        match = _RSC_BYTE_TEXT_CHUNK_RE.search(stream_bytes, pos)
+        if match is None:
+            break
+        # Ensure chunk header is not mid-token inside an identifier
+        if match.start() > 0 and chr(stream_bytes[match.start() - 1]).isalnum():
+            pos = match.start() + 1
+            continue
+        ref_id = match.group(1).decode("ascii")
+        byte_len = int(match.group(2), 16)
+        payload_start = match.end()
+        payload_end = payload_start + byte_len
+        if payload_end > total_len:
+            pos = match.end()
+            continue
+        chunks[ref_id] = stream_bytes[payload_start:payload_end].decode("utf-8", errors="replace")
+        pos = payload_end
+    return chunks
+
+
+def _deref_rsc_string(value: Any, rsc_chunks: dict[str, str]) -> str:
+    """Resolve Next.js RSC ``$xx`` string pointers; strip unresolved pointer tokens."""
+    raw = str(value or "")
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    ref_match = _RSC_REF_TOKEN_RE.match(stripped)
+    if ref_match is not None:
+        ref_id = ref_match.group(1)
+        return rsc_chunks.get(ref_id, "") if ref_id else ""
+    return raw
+
+
 def _score_rss_item(
     provider: str,
     stream: str,
     title: str,
     body: str,
     categories: tuple[str, ...],
+    *,
+    url: str = "",
 ) -> int:
     lower_cats = {c.lower() for c in categories}
     lower_title = title.lower()
+    lower_url = url.lower()
     if provider == "investinglive":
         if lower_cats and lower_cats.issubset(_TECHNICAL_CATEGORIES):
             return 0
         if "technical analysis" in lower_cats and "central banks" not in lower_cats:
             return 0
-        if stream == "news/centralbank" or (lower_cats & _HIGH_DESK_CATEGORIES):
+        is_cb_url = "/central-banks/" in lower_url or "/centralbank/" in lower_url
+        if (
+            (lower_cats & _HIGH_DESK_CATEGORIES)
+            or is_cb_url
+            or (stream == "news/centralbank" and not lower_url)
+        ):
             return 3
         if lower_cats & _MACRO_DESK_CATEGORIES:
             return 2
@@ -513,8 +567,10 @@ def parse_investinglive_live_html(
             continue
 
     items_raw: list[dict[str, Any]] = []
+    rsc_chunks: dict[str, str] = {}
     if raw_chunks:
         stream_text = "".join(raw_chunks)
+        rsc_chunks = _extract_rsc_text_chunks(stream_text)
         decoder = json.JSONDecoder()
         by_cid: dict[str, dict[str, Any]] = {}
         search_from = 0
@@ -539,8 +595,8 @@ def parse_investinglive_live_html(
             if prev is None:
                 by_cid[cid] = obj
             else:
-                prev_exp = len(str(prev.get("expandedContent") or ""))
-                curr_exp = len(str(obj.get("expandedContent") or ""))
+                prev_exp = len(_deref_rsc_string(prev.get("expandedContent"), rsc_chunks))
+                curr_exp = len(_deref_rsc_string(obj.get("expandedContent"), rsc_chunks))
                 prev_mod = str(prev.get("modifiedUtc") or "")
                 curr_mod = str(obj.get("modifiedUtc") or "")
                 if (curr_mod, curr_exp) > (prev_mod, prev_exp):
@@ -649,18 +705,18 @@ def parse_investinglive_live_html(
             categories = tuple(cat_list)
 
             brief_html = (
-                str((obj.get("briefSummary") or {}).get("html") or "")
+                _deref_rsc_string((obj.get("briefSummary") or {}).get("html"), rsc_chunks)
                 if isinstance(obj.get("briefSummary"), dict)
                 else ""
             )
             sum_html = (
-                str((obj.get("summary") or {}).get("html") or "")
+                _deref_rsc_string((obj.get("summary") or {}).get("html"), rsc_chunks)
                 if isinstance(obj.get("summary"), dict)
                 else ""
             )
-            exp_html = str(obj.get("expandedContent") or "")
+            exp_html = _deref_rsc_string(obj.get("expandedContent"), rsc_chunks)
             brief_plain = html_to_plain_text(f"{brief_html}\n{sum_html}")
-            preview_plain = html_to_plain_text(exp_html)
+            preview_plain = html_to_plain_text(exp_html)[:MAX_ARTICLE_CHARS].strip()
             combined_preview = "\n".join(
                 p for p in (brief_plain, preview_plain) if p and p.lower() != title.lower()
             ).strip()
@@ -706,7 +762,9 @@ def parse_investinglive_live_html(
             body_sections.append(f"Source URL: {url}")
             full_text = "\n".join(body_sections).strip()
 
-            importance = _score_rss_item("investinglive", stream, title, full_text, categories)
+            importance = _score_rss_item(
+                "investinglive", stream, title, full_text, categories, url=url
+            )
             records.append(
                 SourceRecord(
                     source_id=source_id,
@@ -826,7 +884,7 @@ def parse_rss_capture(
             body_sections.append(f"Source URL: {url}")
             full_text = "\n".join(body_sections).strip()
 
-            importance = _score_rss_item(provider, stream, title, full_text, categories)
+            importance = _score_rss_item(provider, stream, title, full_text, categories, url=url)
             records.append(
                 SourceRecord(
                     source_id=source_id,
@@ -1572,14 +1630,26 @@ def _format_macro_clarity_line(rev: StoredRevision) -> str | None:
             return empty_label
         return f"{val}{unit}" if unit and not val.endswith(unit) else val
 
+    sem = analyze_macro_semantics(rev.record.title, macro, raw_text=rev.record.text)
     actual_s = _fmt(macro.actual, "UNRELEASED")
-    fcst_s = _fmt(macro.reported_forecast, "MISSING (no consensus forecast reported)")
     prev_s = _fmt(macro.previous, "MISSING")
     rev_s = (
         f" (Revised Prior: {_fmt(macro.revised_previous, 'MISSING')})"
         if macro.revised_previous is not None
         else ""
     )
+    if sem is not None and sem.semantics_status in {
+        "preliminary_as_forecast_or_previous",
+        "cross_source_conflict",
+        "ambiguous",
+    }:
+        prelim_s = _fmt(sem.preliminary or macro.reported_forecast, "UNKNOWN")
+        return (
+            f"Structured Values -> Actual: {actual_s} | "
+            f"Consensus Forecast: AMBIGUOUS (Preliminary={prelim_s}; Surprise=UNKNOWN) | "
+            f"Previous: {prev_s}{rev_s}"
+        )
+    fcst_s = _fmt(macro.reported_forecast, "MISSING (no consensus forecast reported)")
     return (
         f"Structured Values -> Actual: {actual_s} | "
         f"Consensus Forecast: {fcst_s} | Previous: {prev_s}{rev_s}"
@@ -1708,6 +1778,28 @@ def bundle_simultaneous_events(
                 block += f"\n{clarity}"
             sections.append(block)
 
+        sched_times = [pair[1].scheduled_at for pair in ordered if pair[1].scheduled_at is not None]
+        pub_times = [
+            pair[1].publication_at for pair in ordered if pair[1].publication_at is not None
+        ]
+        receipt_times = [pair[1].receipt_at or pair[1].received_timestamp for pair in ordered]
+        avail_times = [pair[1].available_at or pair[1].received_timestamp for pair in ordered]
+        ambig_sem = next(
+            (
+                pair[1].macro_semantics
+                for pair in ordered
+                if pair[1].macro_semantics is not None
+                and not pair[1].macro_semantics.allows_confirmed_shock_risk
+            ),
+            None,
+        )
+        chosen_sem = ambig_sem or next(
+            (pair[1].macro_semantics for pair in ordered if pair[1].macro_semantics is not None),
+            None,
+        )
+        poll_gaps = [
+            pair[1].poll_gap_seconds for pair in ordered if pair[1].poll_gap_seconds is not None
+        ]
         composite = Event(
             event_id=bundle_id,
             source=ordered[0][1].source,
@@ -1716,6 +1808,19 @@ def bundle_simultaneous_events(
             source_timestamp=min_source_ts,
             received_timestamp=max_received_ts,
             raw_text="\n\n".join(sections)[:MAX_BUNDLE_RAW_CHARS],
+            scheduled_at=min(sched_times) if sched_times else None,
+            publication_at=min(pub_times) if pub_times else None,
+            receipt_at=max(receipt_times) if receipt_times else max_received_ts,
+            available_at=max(avail_times) if avail_times else max_received_ts,
+            timestamp_source=ordered[0][1].timestamp_source,
+            publication_time_status=(
+                "unknown"
+                if any(pair[1].publication_time_status == "unknown" for pair in ordered)
+                else ordered[0][1].publication_time_status
+            ),
+            poll_gap_seconds=max(poll_gaps) if poll_gaps else None,
+            is_delayed_catchup=any(pair[1].is_delayed_catchup for pair in ordered),
+            macro_semantics=chosen_sem,
         )
         bundles.append(EventBundle(event=composite, constituents=tuple(ordered)))
 

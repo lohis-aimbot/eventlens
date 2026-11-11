@@ -1,0 +1,51 @@
+[Unit]
+Description=EventLens 24x5 EUR/USD Macro Event Runtime (Docker cTrader CLI Bridge + Optional Demo Orders)
+After=network-online.target eventlens-ctrader-cli.service
+Wants=network-online.target eventlens-ctrader-cli.service
+
+[Service]
+Type=simple
+User=eventlens
+Group=eventlens
+WorkingDirectory=/opt/eventlens
+EnvironmentFile=/etc/eventlens/eventlens.env
+
+# Default safe startup: tails 12h-rotated EURUSD Demo quotes from /var/lib/eventlens/bridge
+# with 2% q-dependent ex-ante risk-budget sizing (--max-risk-per-trade-pct 0.02).
+# To opt in to Demo broker order submission on the cloud VM after verifying demo-reconcile,
+# append ` --ctrader-cli-demo-orders --confirm-demo-execution` via EXTRA_SHADOW_ARGS in /etc/eventlens/eventlens.env.
+ExecStart=/bin/sh -ec 'exec /opt/eventlens/.venv/bin/eventlens-shadow start \
+    --continuous \
+    --account-profile pepperstone_razor_200 \
+    --max-risk-per-trade-pct 0.02 \
+    --shadow-db /var/lib/eventlens/data/shadow-ledger.sqlite \
+    --memory-db /var/lib/eventlens/data/shadow-memory.sqlite \
+    --observer-db /var/lib/eventlens/data/observer.sqlite \
+    --quotes-db /var/lib/eventlens/data/live-quotes.sqlite \
+    --quote-bridge-dir /var/lib/eventlens/bridge \
+    --poll-news \
+    --news-source tier1_english \
+    --supplement-calendar-actuals \
+    --call-model \
+    --enable-stateful-reviews \
+    --review-breakout-pips 12 \
+    --periodic-review-seconds 1800 \
+    --max-total-review-calls 500 \
+    --max-daily-llm-calls 80 \
+    --close-on-stop \
+    --exit-drain-timeout 60 \
+    ${EXTRA_SHADOW_ARGS:-}'
+
+KillSignal=SIGTERM
+TimeoutStopSec=90
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eventlens
+
+[Install]
+WantedBy=multi-user.target

@@ -7,6 +7,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -42,7 +43,13 @@ from .trading.agent import (
     SinglePassTradingAgent,
     TradingAgent,
 )
-from .trading.execution import APPLICATION_ID, ShadowExecutor, ShadowFill, SQLiteShadowLedger
+from .trading.execution import (
+    APPLICATION_ID,
+    ShadowExecutor,
+    ShadowFill,
+    SQLiteShadowLedger,
+    build_shadow_audit_metrics,
+)
 from .trading.portfolio import (
     DeterministicTargetValidator,
     PortfolioState,
@@ -1571,13 +1578,65 @@ class IntradayEventRuntime:
         # 7. Structural target check against pre-LLM portfolio before committing memory
         effective = _effective_theses(memory_snap, decision)
         if decision.target is not None:
+            pre_portfolio_for_val = pre_portfolio
+            allow_pending_reduction_pre = False
+            if pre_portfolio.pending_order_ids and hasattr(
+                self.shadow_executor, "has_matching_pending_target"
+            ):
+                pos_t_pre = next(
+                    (p for p in decision.target.positions if p.instrument == "EUR/USD"), None
+                )
+                w_pre = pos_t_pre.weight if pos_t_pre is not None else Decimal("0")
+                curr_p_pre = next(
+                    (p for p in pre_portfolio.positions if p.instrument == "EUR/USD"), None
+                )
+                curr_q_pre = curr_p_pre.quantity if curr_p_pre is not None else Decimal("0")
+                if decision.portfolio_action == "CLOSE" or w_pre == Decimal("0"):
+                    allow_pending_reduction_pre = True
+                elif curr_q_pre != Decimal("0") and (
+                    (curr_q_pre > Decimal("0") and w_pre > Decimal("0"))
+                    or (curr_q_pre < Decimal("0") and w_pre < Decimal("0"))
+                ):
+                    q_mkt_pre = next(
+                        (q for q in context.market.quotes if q.instrument == "EUR/USD"), None
+                    )
+                    mid_pre = (
+                        (q_mkt_pre.bid + q_mkt_pre.ask) / Decimal("2")
+                        if q_mkt_pre is not None
+                        else Decimal("1.0")
+                    )
+                    pol_pre = getattr(self.risk_engine, "policy", None)
+                    ck_pre = (
+                        pol_pre.classify_exposure_change(
+                            curr_q_pre, pre_portfolio.equity, mid_pre, w_pre
+                        )
+                        if pol_pre is not None and hasattr(pol_pre, "classify_exposure_change")
+                        else classify_exposure_change(
+                            curr_q_pre, pre_portfolio.equity, mid_pre, w_pre
+                        )
+                    )
+                    allow_pending_reduction_pre = ck_pre == "risk_reducing"
+                if not allow_pending_reduction_pre and await asyncio.to_thread(
+                    getattr(self.shadow_executor, "has_matching_pending_target"),
+                    decision.target,
+                ):
+                    pre_portfolio_for_val = pre_portfolio.model_copy(
+                        update={"pending_order_ids": ()}
+                    )
             try:
+                val_kwargs: dict[str, Any] = {
+                    "theses": effective,
+                    "as_of": decision.completed_at,
+                    "portfolio_action": decision.portfolio_action,
+                }
+                if allow_pending_reduction_pre and isinstance(
+                    self.target_validator, DeterministicTargetValidator
+                ):
+                    val_kwargs["allow_pending_risk_reduction"] = True
                 self.target_validator.validate(
                     decision.target,
-                    pre_portfolio,
-                    theses=effective,
-                    as_of=decision.completed_at,
-                    portfolio_action=decision.portfolio_action,
+                    pre_portfolio_for_val,
+                    **val_kwargs,
                 )
             except ValueError as exc:
                 reason = str(exc) or "target_validation_failed"
@@ -1875,6 +1934,142 @@ class IntradayEventRuntime:
                 audit_records=tuple(cycle_audit),
             )
 
+        # Determine whether the proposed target increases or reduces risk relative to current holdings
+        pos_target_chk = next(
+            (p for p in decision.target.positions if p.instrument == "EUR/USD"), None
+        )
+        weight_chk = pos_target_chk.weight if pos_target_chk is not None else Decimal("0")
+        curr_pos_chk = next(
+            (p for p in post_portfolio.positions if p.instrument == "EUR/USD"), None
+        )
+        curr_qty_chk = curr_pos_chk.quantity if curr_pos_chk is not None else Decimal("0")
+        if decision.portfolio_action == "CLOSE" or weight_chk == Decimal("0"):
+            increases_risk_post = False
+        elif (
+            curr_qty_chk == Decimal("0")
+            or (curr_qty_chk > Decimal("0") and weight_chk < Decimal("0"))
+            or (curr_qty_chk < Decimal("0") and weight_chk > Decimal("0"))
+        ):
+            increases_risk_post = True
+        else:
+            q_eur_chk = next((q for q in post_market.quotes if q.instrument == "EUR/USD"), None)
+            mid_chk = (
+                (q_eur_chk.bid + q_eur_chk.ask) / Decimal("2")
+                if q_eur_chk is not None
+                else Decimal("1.0")
+            )
+            policy_chk = getattr(self.risk_engine, "policy", None)
+            ck_post = (
+                policy_chk.classify_exposure_change(
+                    curr_qty_chk, post_portfolio.equity, mid_chk, weight_chk
+                )
+                if policy_chk is not None and hasattr(policy_chk, "classify_exposure_change")
+                else classify_exposure_change(
+                    curr_qty_chk, post_portfolio.equity, mid_chk, weight_chk
+                )
+            )
+            increases_risk_post = ck_post in ("risk_increasing", "reversal_risk_increasing")
+
+        cleared_pending_for_risk_reduction = False
+        if post_portfolio.pending_order_ids and hasattr(
+            self.shadow_executor, "cancel_risk_increasing_pending_orders"
+        ):
+            if not increases_risk_post:
+                cancelled_for_close = await asyncio.to_thread(
+                    getattr(self.shadow_executor, "cancel_risk_increasing_pending_orders"),
+                    now=post_now,
+                    reason="cancelled_by_risk_reducing_decision",
+                )
+                if cancelled_for_close:
+                    if self.state_store is not None:
+                        for c_item in cancelled_for_close:
+                            self.state_store.mark_order_cancelled(
+                                c_item["execution_id"], c_item["reason"], post_now
+                            )
+                    await log(
+                        "execution",
+                        "pending_cancelled_for_risk_reduction",
+                        f"cancelled={len(cancelled_for_close)}",
+                        decision=decision,
+                    )
+                    post_portfolio = await self._snapshot_portfolio(post_market)
+                    cleared_pending_for_risk_reduction = not bool(post_portfolio.pending_order_ids)
+                    curr_pos_after = next(
+                        (p for p in post_portfolio.positions if p.instrument == "EUR/USD"), None
+                    )
+                    curr_qty_after = (
+                        curr_pos_after.quantity if curr_pos_after is not None else Decimal("0")
+                    )
+                    if (
+                        cleared_pending_for_risk_reduction
+                        and curr_qty_after == Decimal("0")
+                        and weight_chk == Decimal("0")
+                    ):
+                        flat_reason = "pending_risk_increasing_order_cancelled_to_flat"
+                        if self.state_store is not None:
+                            self.state_store.upsert_event_state(
+                                event_id=event.event_id,
+                                source_reference=event.source_reference,
+                                received_at=event.received_timestamp,
+                                now=post_now,
+                                state="completed",
+                                reason=flat_reason,
+                                decision_id=decision.decision_id,
+                                decision_json=decision.model_dump_json(),
+                                memory_version=committed_version,
+                            )
+                        return RuntimeCycleResult(
+                            event_id=event.event_id,
+                            status="no_target",
+                            reason=flat_reason,
+                            recovered=recovered,
+                            decision=decision,
+                            committed_memory_version=committed_version,
+                            audit_records=tuple(cycle_audit),
+                        )
+                    if cleared_pending_for_risk_reduction and decision.target is not None:
+                        realigned_target = decision.target.model_copy(
+                            update={"based_on_snapshot_id": post_portfolio.snapshot_id}
+                        )
+                        decision = decision.model_copy(
+                            update={
+                                "based_on_snapshot_id": post_portfolio.snapshot_id,
+                                "target": realigned_target,
+                            }
+                        )
+            elif (
+                decision.target is not None
+                and hasattr(self.shadow_executor, "has_matching_pending_target")
+                and await asyncio.to_thread(
+                    getattr(self.shadow_executor, "has_matching_pending_target"),
+                    decision.target,
+                )
+            ):
+                dup_reason = "duplicate_pending_target_already_queued"
+                if self.state_store is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=event.event_id,
+                        source_reference=event.source_reference,
+                        received_at=event.received_timestamp,
+                        now=post_now,
+                        state="target_rejected",
+                        reason=dup_reason,
+                        decision_id=decision.decision_id,
+                        decision_json=decision.model_dump_json(),
+                        memory_version=committed_version,
+                    )
+                await log("runtime", "target_rejected", dup_reason, decision=decision)
+                return RuntimeCycleResult(
+                    event_id=event.event_id,
+                    status="target_rejected",
+                    reason=dup_reason,
+                    recovered=recovered,
+                    decision=decision,
+                    committed_memory_version=committed_version,
+                    audit_records=tuple(cycle_audit),
+                )
+        assert decision.target is not None
+
         # Check if portfolio snapshot, positions, or pending orders changed during inference / before recovery
         state_changed = (
             post_portfolio.snapshot_id != decision.based_on_snapshot_id
@@ -1883,7 +2078,10 @@ class IntradayEventRuntime:
                 pre_portfolio is not None
                 and (
                     post_portfolio.positions != pre_portfolio.positions
-                    or post_portfolio.pending_order_ids != pre_portfolio.pending_order_ids
+                    or (
+                        post_portfolio.pending_order_ids != pre_portfolio.pending_order_ids
+                        and not cleared_pending_for_risk_reduction
+                    )
                 )
             )
         )
@@ -1973,12 +2171,23 @@ class IntradayEventRuntime:
                         f"event_receipt_lag_{round(lag_s, 1)}s_exceeds_"
                         f"{self.max_actionable_event_lag_seconds}s"
                     )
+        assess_kwargs: dict[str, Any] = {
+            "prior_theses": prior_theses,
+            "source_stale_reason": stale_source_reason,
+        }
+        try:
+            sig_params = inspect.signature(self.risk_engine.assess).parameters
+            if "event" in sig_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig_params.values()
+            ):
+                assess_kwargs["event"] = event
+        except (TypeError, ValueError):
+            pass
         assessment = await self.risk_engine.assess(
             decision,
             post_portfolio,
             post_market,
-            prior_theses=prior_theses,
-            source_stale_reason=stale_source_reason,
+            **assess_kwargs,
         )
         if self.state_store is not None:
             self.state_store.upsert_event_state(
@@ -2330,6 +2539,7 @@ class ShadowRunner:
         quote_bridge_dir: Path | None = None,
         ctrader_openapi_streamer: Any = None,
         ctrader_demo_mirror: bool = False,
+        ctrader_cli_demo_adapter: Any = None,
         enforce_fx_weekend_pause: bool = False,
         news_source: Any = None,
         supplemental_calendar_source: WallStreetCNSource | None = None,
@@ -2351,6 +2561,8 @@ class ShadowRunner:
         strict_window_coverage: bool = False,
         close_on_stop: bool = False,
         confirm_handoff: bool = False,
+        open_position_quote_outage_alert_seconds: float = 60.0,
+        reconcile_fills_before_events: bool | None = None,
         review_policy: ReviewPolicy = ReviewPolicy(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -2368,6 +2580,7 @@ class ShadowRunner:
         self.quote_bridge_dir = quote_bridge_dir
         self.ctrader_openapi_streamer = ctrader_openapi_streamer
         self.ctrader_demo_mirror = ctrader_demo_mirror
+        self.ctrader_cli_demo_adapter = ctrader_cli_demo_adapter
         self.enforce_fx_weekend_pause = enforce_fx_weekend_pause
         if (
             self.ctrader_openapi_streamer is not None
@@ -2395,6 +2608,17 @@ class ShadowRunner:
         self.strict_window_coverage = strict_window_coverage
         self.close_on_stop = close_on_stop
         self.confirm_handoff = confirm_handoff
+        self.open_position_quote_outage_alert_seconds = open_position_quote_outage_alert_seconds
+        self.reconcile_fills_before_events = (
+            reconcile_fills_before_events
+            if reconcile_fills_before_events is not None
+            else (
+                quote_store is not None
+                or quote_bridge_dir is not None
+                or ctrader_openapi_streamer is not None
+                or ctrader_cli_demo_adapter is not None
+            )
+        )
         self.review_policy = ReviewPolicy.model_validate_json(review_policy.model_dump_json())
         self.clock = clock
         self._thesis_ref_mids: dict[tuple[str, int], Decimal] = {}
@@ -2415,6 +2639,7 @@ class ShadowRunner:
         self._protection_checks_unavailable_while_open = 0
         self._active_outage: dict[str, Any] | None = None
         self._outage_intervals: list[dict[str, Any]] = []
+        self._outage_alerts: list[dict[str, Any]] = []
         self._quote_tail: Any = None
         self._quote_collector: Any = None
         self._quote_bridge_lock = threading.Lock()
@@ -2425,7 +2650,7 @@ class ShadowRunner:
             "rejected": 0,
         }
         if self.quote_bridge_dir is not None and self.quote_store is not None:
-            from .quotes import BridgeStart
+            from .quotes import BridgeQuote, BridgeStart
             from .sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
 
             now_init = _utc(self.clock())
@@ -2434,11 +2659,32 @@ class ShadowRunner:
                 self.quote_store,
                 now_init,
                 allow_multiple_sessions=True,
+                allow_unclean_session_rollover=True,
+                max_start_handshake_age_seconds=30.0,
             )
-            self._attach_active_bridge_session(now_init, BridgeStart)
+            self._attach_active_bridge_session(now_init, BridgeStart, BridgeQuote)
         self.ledger.stop_reason_provider = self._active_stop_reason
+        self.demo_execution_engine: Any = None
+        if self.ctrader_cli_demo_adapter is not None and bool(
+            getattr(self.ctrader_cli_demo_adapter, "allow_orders", False)
+        ):
+            from .trading.ctrader_cli_broker import CTraderCliDemoExecutionEngine
 
-    def _attach_active_bridge_session(self, now: datetime, start_cls: Any) -> None:
+            self.demo_execution_engine = CTraderCliDemoExecutionEngine(
+                adapter=self.ctrader_cli_demo_adapter,
+                risk_policy=self.runtime.risk_engine.policy,
+                exit_policy=self.ledger.exit_policy,
+                fallback_initial_equity_usd=self.ledger.initial_cash_usd,
+                market_provider=lambda _ts: self._current_market(),
+                stop_reason_provider=self._active_stop_reason,
+                clock=self.clock,
+            )
+            self.runtime.portfolio_state = self.demo_execution_engine
+            self.runtime.shadow_executor = self.demo_execution_engine
+
+    def _attach_active_bridge_session(
+        self, now: datetime, start_cls: Any, quote_cls: Any = None
+    ) -> None:
         if (
             self.quote_bridge_dir is None
             or self.quote_store is None
@@ -2448,12 +2694,30 @@ class ShadowRunner:
             return
         candidates = sorted(
             self.quote_bridge_dir.resolve().glob("quotes-*.jsonl"),
-            key=lambda p: p.stat().st_mtime,
+            key=lambda p: (p.stat().st_mtime_ns, p.name),
             reverse=True,
         )
         if not candidates:
             return
-        newest = candidates[0]
+        newest: Path | None = None
+        for cand in candidates:
+            try:
+                cand_lines = cand.read_bytes().split(b"\n")
+                cand_lines.pop()
+                if not cand_lines:
+                    continue
+                if json.loads(cand_lines[0].decode("utf-8")).get("kind") != "start":
+                    continue
+                if any(
+                    json.loads(ln.decode("utf-8")).get("kind") == "stop" for ln in cand_lines if ln
+                ):
+                    continue
+                newest = cand
+                break
+            except Exception:
+                continue
+        if newest is None:
+            return
         try:
             stat = newest.stat()
             raw_bytes = newest.read_bytes()
@@ -2472,10 +2736,29 @@ class ShadowRunner:
             self._quote_tail.ignored.discard(newest)
             consumed_offset = len(raw_bytes) - len(remainder)
             self._quote_tail.files[newest] = (stat.st_ino, consumed_offset, remainder)
-            self.quote_store.start(start_item, now, basis="live_poll")
+            already_exists = self.quote_store.has_session(str(start_item.session_id))
+            if not already_exists:
+                self.quote_store.start(start_item, now, basis="live_poll")
+                self._quote_bridge_counts["start"] += 1
             self._quote_collector.session = start_item
             self._quote_collector.stopped = False
-            self._quote_bridge_counts["start"] += 1
+            if quote_cls is not None and len(lines) > 1:
+                last_seq = self.quote_store.last_sequence(str(start_item.session_id))
+                for raw_ln_b in lines[1:]:
+                    if not raw_ln_b:
+                        continue
+                    raw_ln = raw_ln_b.decode("utf-8")
+                    obj = json.loads(raw_ln)
+                    if obj.get("kind") != "quote":
+                        continue
+                    seq_val = int(obj.get("sequence", 0))
+                    if seq_val <= last_seq:
+                        continue
+                    q_item = quote_cls.model_validate(obj)
+                    if now - q_item.source_at <= timedelta(seconds=5):
+                        self.quote_store.record(q_item, now, raw_ln)
+                        self._quote_bridge_counts["quote"] += 1
+                        last_seq = seq_val
         except Exception as exc:
             logger.warning("attach_active_bridge_session_skipped: %s", exc)
 
@@ -2503,6 +2786,12 @@ class ShadowRunner:
             return self._stop_reason
         if self._stop_event.is_set():
             return "runner_stop_requested"
+        if self.ctrader_cli_demo_adapter is not None:
+            halted = getattr(self.ctrader_cli_demo_adapter, "halted_reason", None)
+            if halted:
+                return f"demo_broker_reconcile_halted:{halted}"
+            if bool(getattr(self.ctrader_cli_demo_adapter, "manual_unlock_required", False)):
+                return "demo_broker_manual_unlock_required"
         if self.enforce_fx_weekend_pause:
             from .ctrader_openapi import is_fx_weekend_closed
 
@@ -2544,13 +2833,22 @@ class ShadowRunner:
         self._stop_event.set()
         if self.runtime.state_store is not None:
             self.runtime.state_store.request_stop(now, reason=reason)
-        cancelled = self.ledger.cancel_risk_increasing_pending_orders(
-            now=now, reason=f"cancelled_on_{reason}"
-        )
-        if self.close_on_stop:
-            self.ledger.request_protective_exit_on_stop(
-                now=now, reason=f"protective_exit_on_{reason}"
+        if self.demo_execution_engine is not None:
+            cancelled = self.demo_execution_engine.cancel_risk_increasing_pending_orders(
+                now=now, reason=f"cancelled_on_{reason}"
             )
+            if self.close_on_stop:
+                self.demo_execution_engine.request_protective_exit_on_stop(
+                    now=now, reason=f"protective_exit_on_{reason}"
+                )
+        else:
+            cancelled = self.ledger.cancel_risk_increasing_pending_orders(
+                now=now, reason=f"cancelled_on_{reason}"
+            )
+            if self.close_on_stop:
+                self.ledger.request_protective_exit_on_stop(
+                    now=now, reason=f"protective_exit_on_{reason}"
+                )
         if self.runtime.state_store is not None:
             for item in cancelled:
                 ev_id = self.runtime.state_store.mark_order_cancelled(
@@ -2599,13 +2897,22 @@ class ShadowRunner:
             )
             if qc.valid:
                 self._event_wakeup.set()
-        exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
-        target_fills = await asyncio.to_thread(
-            self.ledger.fill_pending,
-            market,
-            risk_policy=self.runtime.risk_engine.policy,
-            stop_reason=stop_reason,
-        )
+        if self.demo_execution_engine is not None:
+            exit_fills, target_fills = await asyncio.to_thread(
+                self.demo_execution_engine.step_broker_events_and_protection,
+                market,
+                stop_reason=stop_reason,
+            )
+            cost_ver = "ctrader_cli_demo_confirmed"
+        else:
+            exit_fills = await asyncio.to_thread(self.ledger.evaluate_protective_exits, market)
+            target_fills = await asyncio.to_thread(
+                self.ledger.fill_pending,
+                market,
+                risk_policy=self.runtime.risk_engine.policy,
+                stop_reason=stop_reason,
+            )
+            cost_ver = self.ledger.cost_model.name
         if self.runtime.state_store is not None:
             for fill in (*exit_fills, *target_fills):
                 self.runtime.state_store.mark_fill_completed(fill)
@@ -2618,7 +2925,7 @@ class ShadowRunner:
                     execution_id=fill.execution_id,
                     fill_id=fill.fill_id,
                     policy_version=self.runtime.risk_engine.policy.policy_version,
-                    cost_model_version=self.ledger.cost_model.name,
+                    cost_model_version=cost_ver,
                     outcome=fill.kind,
                     detail=f"reason={fill.reason} delta={fill.delta_quantity} price={fill.fill_price}",
                 )
@@ -2635,6 +2942,7 @@ class ShadowRunner:
             as_of=now,
             policy=self.ledger.exit_policy.quote_quality_policy("EUR/USD"),
         )
+        alert_to_persist: tuple[str, str] | None = None
         with self._protection_lock:
             self._protection_checks_total += 1
             if quote_check.valid:
@@ -2663,9 +2971,38 @@ class ShadowRunner:
                         "started_dt": now,
                         "reason": quote_check.reason,
                         "position_open": position_open,
+                        "alert_emitted": False,
                     }
                 elif position_open:
                     self._active_outage["position_open"] = True
+                if (
+                    self._active_outage is not None
+                    and self._active_outage.get("position_open")
+                    and not self._active_outage.get("alert_emitted")
+                ):
+                    outage_dur = max(0.0, (now - self._active_outage["started_dt"]).total_seconds())
+                    if outage_dur >= float(self.open_position_quote_outage_alert_seconds):
+                        self._active_outage["alert_emitted"] = True
+                        detail = (
+                            f"outage_seconds={round(outage_dur, 3)} "
+                            f"started_at={self._active_outage['started_at']} "
+                            f"quote_reason={quote_check.reason}"
+                        )
+                        self._outage_alerts.append(
+                            {
+                                "emitted_at": now.isoformat(),
+                                "outage_seconds": round(outage_dur, 4),
+                                "quote_reason": quote_check.reason,
+                            }
+                        )
+                        alert_to_persist = ("open_position_quote_outage_alert", detail)
+        if alert_to_persist is not None:
+            self.ledger.record_fault(
+                stage="protection_monitor",
+                reason=alert_to_persist[0],
+                detail=alert_to_persist[1],
+                now=now,
+            )
 
     def _finalize_protection_coverage(self, stopped_at: datetime) -> dict[str, Any]:
         with self._protection_lock:
@@ -2700,8 +3037,38 @@ class ShadowRunner:
     async def step_protection(self) -> tuple[int, tuple[ShadowFill, ...]]:
         """Execute one timer-driven order expiry and protective exit check without acquiring the LLM lock."""
         now = _utc(self.clock())
-        expired = await asyncio.to_thread(self.ledger.expire_pending_orders, now=now)
         market = await asyncio.to_thread(self._current_market)
+        if self.demo_execution_engine is not None:
+            open_qty = await asyncio.to_thread(self.demo_execution_engine.open_quantity_eur)
+            pos_open = open_qty != Decimal("0")
+            check_now = _utc(self.clock())
+            self._record_protection_check(check_now, market, position_open=pos_open)
+            exit_fills, target_fills = await asyncio.to_thread(
+                self.demo_execution_engine.step_broker_events_and_protection,
+                market,
+                stop_reason=self._stop_reason,
+            )
+            if self.runtime.state_store is not None:
+                for fill in (*exit_fills, *target_fills):
+                    self.runtime.state_store.mark_fill_completed(fill)
+                    rec = AuditRecord(
+                        audit_id=str(uuid4()),
+                        occurred_at=fill.filled_at,
+                        component="execution",
+                        decision_id=fill.decision_id,
+                        target_id=fill.target_id,
+                        execution_id=fill.execution_id,
+                        fill_id=fill.fill_id,
+                        policy_version=self.runtime.risk_engine.policy.policy_version,
+                        cost_model_version="ctrader_cli_demo_confirmed",
+                        outcome=fill.kind,
+                        detail=f"reason={fill.reason} delta={fill.delta_quantity} price={fill.fill_price}",
+                    )
+                    self.runtime.state_store.append_audit(rec)
+                    await self.runtime.audit_sink.append(rec)
+            return 0, exit_fills
+
+        expired = await asyncio.to_thread(self.ledger.expire_pending_orders, now=now)
         acct = await asyncio.to_thread(
             lambda: self.ledger.db.execute(
                 "SELECT quantity_eur FROM shadow_account WHERE id=1"
@@ -2727,6 +3094,8 @@ class ShadowRunner:
                 self.runtime.state_store.append_audit(rec)
                 await self.runtime.audit_sink.append(rec)
         await self._mirror_demo_fills(exit_fills)
+        if self.ctrader_cli_demo_adapter is not None:
+            await asyncio.to_thread(self.ctrader_cli_demo_adapter.reconcile)
         return expired, exit_fills
 
     async def step_events(self) -> tuple[RuntimeCycleResult, ...]:
@@ -2874,6 +3243,13 @@ class ShadowRunner:
 
         async def _execute_event_cycle(ev_obj: Event, *, is_bundled: bool) -> None:
             active_filter.unmark_seen(ev_obj.event_id)
+            if self.reconcile_fills_before_events:
+                # Reconcile pending fills and protective exits BEFORE assembling AgentContext so newly
+                # fillable orders do not look stale/pending to the next event cycle.
+                try:
+                    await self.step_quotes_and_fills(stop_reason=self._stop_reason)
+                except Exception as exc:
+                    logger.warning("pre_event_quote_fill_reconcile_warning: %s", exc)
             try:
                 cycle_res = await asyncio.wait_for(
                     self.runtime.run_cycle(ev_obj),
@@ -3515,6 +3891,11 @@ class ShadowRunner:
                     await asyncio.gather(stop_w, wake_w, return_exceptions=True)
 
         def _open_position_state() -> tuple[Decimal, str | None]:
+            if self.demo_execution_engine is not None:
+                return (
+                    self.demo_execution_engine.open_quantity_eur(),
+                    self.demo_execution_engine._stop_exit_reason,
+                )
             row = self.ledger.db.execute(
                 "SELECT quantity_eur, pending_exit_reason FROM shadow_account WHERE id=1"
             ).fetchone()
@@ -3541,7 +3922,23 @@ class ShadowRunner:
             if duration_seconds is None:
                 await self._stop_event.wait()
             else:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=duration_seconds)
+                wall_deadline = started_at + timedelta(seconds=duration_seconds)
+                mono_deadline = time.monotonic() + duration_seconds
+                while not self._stop_event.is_set():
+                    rem_wall = (wall_deadline - _utc(self.clock())).total_seconds()
+                    rem_mono = mono_deadline - time.monotonic()
+                    rem = min(rem_wall, rem_mono)
+                    if rem <= 0.0:
+                        timed_out = True
+                        if self._stop_reason is None:
+                            self._stop_reason = "runner_duration_expired"
+                        self._stop_event.set()
+                        break
+                    sleep_chunk = min(1.0, max(0.01, rem))
+                    try:
+                        await asyncio.wait_for(self._stop_event.wait(), timeout=sleep_chunk)
+                    except TimeoutError:
+                        pass
         except TimeoutError:
             timed_out = True
             if self._stop_reason is None:
@@ -3581,17 +3978,30 @@ class ShadowRunner:
             quote_worker_alive_during_drain = not quote_task.done()
             protection_worker_alive_during_drain = not protection_task.done()
 
-            cancelled_orders = await asyncio.to_thread(
-                self.ledger.cancel_risk_increasing_pending_orders,
-                now=_utc(self.clock()),
-                reason=f"cancelled_on_{shutdown_reason}",
-            )
-            if self.close_on_stop:
-                await asyncio.to_thread(
-                    self.ledger.request_protective_exit_on_stop,
+            if self.demo_execution_engine is not None:
+                cancelled_orders = await asyncio.to_thread(
+                    self.demo_execution_engine.cancel_risk_increasing_pending_orders,
                     now=_utc(self.clock()),
-                    reason=f"protective_exit_on_{shutdown_reason}",
+                    reason=f"cancelled_on_{shutdown_reason}",
                 )
+                if self.close_on_stop:
+                    await asyncio.to_thread(
+                        self.demo_execution_engine.request_protective_exit_on_stop,
+                        now=_utc(self.clock()),
+                        reason=f"protective_exit_on_{shutdown_reason}",
+                    )
+            else:
+                cancelled_orders = await asyncio.to_thread(
+                    self.ledger.cancel_risk_increasing_pending_orders,
+                    now=_utc(self.clock()),
+                    reason=f"cancelled_on_{shutdown_reason}",
+                )
+                if self.close_on_stop:
+                    await asyncio.to_thread(
+                        self.ledger.request_protective_exit_on_stop,
+                        now=_utc(self.clock()),
+                        reason=f"protective_exit_on_{shutdown_reason}",
+                    )
             if self.runtime.state_store is not None:
                 for item in cancelled_orders:
                     ev_id = self.runtime.state_store.mark_order_cancelled(
@@ -3666,14 +4076,26 @@ class ShadowRunner:
         else:
             shutdown_status = "unclosed_risk_requires_recovery"
             unclosed_risk = True
-            await asyncio.to_thread(
-                self.ledger.mark_shutdown_unclosed_risk,
-                now=_utc(self.clock()),
-                reason=(
-                    f"exit_timeout_on_{shutdown_reason}_open_qty_{open_qty}"
-                    f"_pending_{pending_exit or 'none'}"
-                ),
-            )
+            if self.demo_execution_engine is not None:
+                await asyncio.to_thread(
+                    self.ledger.record_fault,
+                    stage="demo_shutdown",
+                    reason="demo_unclosed_risk_on_shutdown",
+                    detail=(
+                        f"exit_timeout_on_{shutdown_reason}_open_demo_qty_{open_qty}"
+                        f"_pending_{pending_exit or 'none'}"
+                    ),
+                    now=_utc(self.clock()),
+                )
+            else:
+                await asyncio.to_thread(
+                    self.ledger.mark_shutdown_unclosed_risk,
+                    now=_utc(self.clock()),
+                    reason=(
+                        f"exit_timeout_on_{shutdown_reason}_open_qty_{open_qty}"
+                        f"_pending_{pending_exit or 'none'}"
+                    ),
+                )
 
         stopped_at = _utc(self.clock())
         protection_coverage = self._finalize_protection_coverage(stopped_at)
@@ -3686,14 +4108,36 @@ class ShadowRunner:
             )
         market = await asyncio.to_thread(self._current_market)
         ledger_rep = await asyncio.to_thread(self.ledger.report, market=market)
+        ledger_rep["audit_metrics"] = build_shadow_audit_metrics(
+            fills=ledger_rep["fills"],
+            faults=ledger_rep["faults"],
+            receipts=ledger_rep["receipts"],
+            realized_pnl_usd=Decimal(str(ledger_rep["realized_pnl_usd"])),
+            total_fees_usd=Decimal(str(ledger_rep["total_fees_usd"])),
+            unclosed_risk=unclosed_risk,
+            max_holding_seconds=self.ledger.exit_policy.max_holding_seconds,
+            protection_coverage=protection_coverage,
+            started_at=started_at.isoformat(),
+            stopped_at=stopped_at.isoformat(),
+            configured_duration_seconds=duration_seconds,
+            exit_drain_timeout_seconds=self.exit_drain_timeout_seconds,
+        )
+        demo_rep: dict[str, Any] | None = None
+        if self.demo_execution_engine is not None:
+            demo_rep = await asyncio.to_thread(self.demo_execution_engine.report, market=market)
         runtime_rep = (
             self.runtime.state_store.summary_report()
             if self.runtime.state_store is not None
             else {}
         )
+        active_rep = demo_rep if demo_rep is not None else ledger_rep
         summary = {
-            "scope": "automated_shadow_loop_only",
-            "execution_authorized": False,
+            "scope": (
+                "ctrader_cli_demo_execution"
+                if demo_rep is not None
+                else "automated_shadow_loop_only"
+            ),
+            "execution_authorized": demo_rep is not None,
             "continuous": duration_seconds is None,
             "started_at": started_at.isoformat(),
             "stopped_at": stopped_at.isoformat(),
@@ -3701,12 +4145,12 @@ class ShadowRunner:
             "stop_reason": shutdown_reason,
             "shutdown_status": shutdown_status,
             "unclosed_risk": unclosed_risk,
-            "open_quantity_eur": ledger_rep["quantity_eur"],
-            "open_quantity_lots": ledger_rep["quantity_lots"],
-            "pending_exit_reason": ledger_rep["pending_exit_reason"],
-            "pending_order_ids": ledger_rep["snapshot"]["pending_order_ids"],
-            "alerts": ledger_rep["alerts"],
-            "recovery_instructions": ledger_rep["recovery_instructions"],
+            "open_quantity_eur": active_rep["quantity_eur"],
+            "open_quantity_lots": active_rep["quantity_lots"],
+            "pending_exit_reason": active_rep["pending_exit_reason"],
+            "pending_order_ids": active_rep["snapshot"]["pending_order_ids"],
+            "alerts": active_rep["alerts"],
+            "recovery_instructions": active_rep["recovery_instructions"],
             "protection_coverage": protection_coverage,
             "worker_shutdown_verification": {
                 "event_worker_stopped_before_drain": event_worker_stopped_before_drain,
@@ -3729,6 +4173,7 @@ class ShadowRunner:
             "quote_bridge_counts": (
                 dict(self._quote_bridge_counts) if self.quote_bridge_dir is not None else None
             ),
+            "demo_broker": demo_rep,
             "ledger": ledger_rep,
             "runtime": runtime_rep,
         }

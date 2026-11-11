@@ -119,6 +119,24 @@ class ReplayJSONClient(JSONModelClient, Protocol):
     def request_settings(self) -> JSONRequestSettings: ...
 
 
+_V012_EVENT_FIELDS = frozenset(
+    {
+        "event_id",
+        "source",
+        "source_type",
+        "source_reference",
+        "source_timestamp",
+        "received_timestamp",
+        "raw_text",
+        "author",
+    }
+)
+
+
+def v012_event_exclude_fields() -> set[str]:
+    return set(Event.model_fields) - _V012_EVENT_FIELDS
+
+
 def freeze_manifest(
     case: ReplayInferenceCase,
     config: ReplayInferenceConfig = ReplayInferenceConfig(),
@@ -127,9 +145,13 @@ def freeze_manifest(
     case = ReplayInferenceCase.model_validate_json(case.model_dump_json())
     config = ReplayInferenceConfig.model_validate_json(config.model_dump_json())
     protocol = DecisionReplayProtocol.model_validate_json(protocol.model_dump_json())
+    event_exclude = v012_event_exclude_fields()
+    case_json = case.model_dump_json(
+        exclude={"archived_events": {"__all__": event_exclude}} if event_exclude else None
+    )
     return InferenceManifest(
         run_id=case.run_id,
-        case_id=digest(case.model_dump_json()),
+        case_id=digest(case_json),
         protocol_id=protocol.protocol_id,
         config=config,
         memory_prompt_hash=digest(MEMORY_PROMPT),

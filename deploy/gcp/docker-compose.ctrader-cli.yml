@@ -1,0 +1,71 @@
+# Headless Docker Compose stack for Spotware cTrader CLI (`EventLensCliBridge`) on GCP Ubuntu x86_64
+# Requires:
+#   1. /etc/eventlens/eventlens.env on the HOST ONLY (eventlens:eventlens, mode 0600, passed to
+#      `docker compose --env-file /etc/eventlens/eventlens.env` for CLI argument interpolation ONLY;
+#      NEVER attached via `env_file:` so DEEPSEEK_API_KEY and Open API tokens never enter this container)
+#   2. /etc/eventlens/ctrader-cli.pwd (root:root, mode 0600, zero ACLs — single-line cTID password, never passed via CLI string)
+#   3. /var/lib/eventlens/algo/EventLensCliBridge.algo (TargetFramework=net6.0, built via
+#      deploy/gcp/build_ctrader_algo.sh using pinned mcr.microsoft.com/dotnet/sdk@sha256:1b955f179b02df4f0eb5fadedaa898cbe44d620a64aab52eec72c8e91d1355b5)
+#
+# Container runtime user, environment isolation, & clean Stop() exit notes:
+#   - Verified on GCP VM (`cTrader CLI 5.10.6.0`, `ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad`):
+#     upstream `Config.User` is empty (`""`) so it defaults to container `root`. Inside the image, user `app` (`1654:1654`)
+#     owns `/home/app` (`0750`), and explicit `--user 1654:1654` WITHOUT overriding `HOME` passes air-gapped `--version`
+#     and `metadata` checks.
+#   - Distinction: air-gapped `--version`/`metadata` != real Demo account runtime (`run /algo/EventLensCliBridge.algo ...`
+#     with `--pwd-file` and `/bridge` I/O). Non-root real-account execution is NOT yet verified/accepted,
+#     so default Compose leaves `user:` unset (image default) and `/etc/eventlens/ctrader-cli.pwd` remains
+#     `root:root` `0600` with zero ACL grants on the host.
+#   - Never redefine `HOME` and never attach `env_file:`; restrict container `environment:` strictly to dedicated
+#     `DOTNET_CLI_HOME`, `NUGET_PACKAGES`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `DOTNET_CLI_TELEMETRY_OPTOUT`.
+#   - Clean safety Stop() exit: `--exit-on-stop` terminates `ctrader-console` when `EventLensCliBridge` calls
+#     `Timer.Stop()` + `Stop()`; `init: true` reaps child processes cleanly, and `restart: on-failure:5` prevents
+#     respawning on a clean `exit 0` safety stop.
+
+services:
+  ctrader-cli-bridge:
+    image: "${CTRADER_CONSOLE_IMAGE:-ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad}"
+    platform: linux/amd64
+    container_name: eventlens-ctrader-cli
+    init: true
+    stop_grace_period: 30s
+    restart: on-failure:5
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DOTNET_CLI_HOME: /tmp/ctrader-cli-dotnet
+      NUGET_PACKAGES: /tmp/ctrader-cli-nuget
+      XDG_CONFIG_HOME: /tmp/ctrader-cli-xdg-config
+      XDG_DATA_HOME: /tmp/ctrader-cli-xdg-data
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    volumes:
+      - /var/lib/eventlens/algo:/algo:ro
+      - /var/lib/eventlens/bridge:/bridge
+      - /etc/eventlens/ctrader-cli.pwd:/run/secrets/ctrader_cli_pwd:ro
+    command:
+      - run
+      - /algo/EventLensCliBridge.algo
+      - --ctid
+      - "${CTRADER_CTID:?CTRADER_CTID is required}"
+      - --pwd-file
+      - /run/secrets/ctrader_cli_pwd
+      - --account
+      - "${CTRADER_DEMO_ACCOUNT_NUMBER:?CTRADER_DEMO_ACCOUNT_NUMBER is required}"
+      - --symbol
+      - EURUSD
+      - --period
+      - "${CTRADER_PERIOD:-t1}"
+      - --full-access
+      - --exit-on-stop
+      - "--BridgeDir=/bridge"
+      - "--SampleIntervalMilliseconds=200"
+      - "--RotationIntervalSeconds=43200"
+      - "--AllowDemoOrders=${CTRADER_ALLOW_DEMO_ORDERS:-false}"
+      - "--ExpectedDemoAccountNumber=${CTRADER_DEMO_ACCOUNT_NUMBER:?CTRADER_DEMO_ACCOUNT_NUMBER is required}"
+      - "--ExpectedAccountCurrency=${CTRADER_EXPECTED_ACCOUNT_CURRENCY:-USD}"
+      - "--ReconcileIntervalSeconds=15"
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "4"
