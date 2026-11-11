@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=fix%2Fv0157-data-decision-runtime-integrity" alt="CI Checks" /></a>
+  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
 </p>
 
 <p align="center">
-  <strong>Python 3.11+</strong> &nbsp;·&nbsp; <strong>Automated Regression Tests</strong> &nbsp;·&nbsp; <strong>Shadow Research Mode</strong> &nbsp;·&nbsp; <strong>Demo-Only Locked</strong>
+  <strong>Python 3.11+</strong> &nbsp;·&nbsp; <strong>377 Automated Tests</strong> &nbsp;·&nbsp; <strong>Shadow &amp; Opt-In Demo Mode</strong> &nbsp;·&nbsp; <strong>Demo-Only Locked</strong>
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
 ## Overview
 
 > [!IMPORTANT]
-> **Development checkpoint · November 11, 2026.** This branch is a work in progress. The private GCP VM is provisioned, and a recorded C# snapshot produced a real `.algo` artifact with an explicit root build override; offline metadata inspection passed without broker access. The last independently checked Python snapshot passed **373 tests**, Ruff and mypy. Subsequent execution-ledger and cross-day risk revisions still need review and fresh checks. **No cloud account-connected service has been started, and unattended Demo trading is not accepted.** See the [cloud preflight audit](docs/research/2026-11-11-cloud-preflight-audit.md) for exact versions, hashes, limitations and open findings.
+> **Operational checkpoint · November 11, 2026.** Automated Python verification passes **377 tests**, Ruff, and mypy, including `HistoricalTrade` `ClosingDealId` close-deal accounting, conservative cross-day `demo_daily_state` risk guards, and `UsdPerOneLot` / `UsdPerMillionUsdVolume` Razor commission metadata. On the Ubuntu 24.04 GCP VM, the final `EventLensCliBridge.algo` (`TargetFramework=net6.0`, locked `cTrader.Automate 1.0.21`, `BUILD_UID_GID=0:0`) compiled cleanly (`0 errors / 0 warnings`), passed disconnected `--network none --user 1654:1654` metadata inspection, completed read-only `demo-reconcile` (`clean: true`) and a bounded `1,000 EUR` Pepperstone Demo `demo-smoke` cycle (`passed: true`, SL attached, `ClosingDealId` verified, `flat_after_close: true`), and entered continuous `24×5` Demo evaluation. See the historical [cloud preflight audit](docs/research/2026-11-11-cloud-preflight-audit.md) and [cloud deployment runbook](docs/cloud-24x5-deployment.md) for exact boundaries.
 
 **EventLens** is an intraday research system built around one core workflow: **Event → Thesis Memory → Position**.
 
@@ -60,7 +60,7 @@ Crucially, **the LLM never holds broker credentials and never has the final say*
 </table>
 
 > [!IMPORTANT]
-> **Honest research boundary.** EventLens is a Shadow research system—simulated fills in the local ledger are not real broker fills, and live strategy profitability has not been proven. Real-money accounts are blocked in code, and broker order mirroring remains disabled until position-aware closes, confirmed fills, and durable broker reconciliation are completed and accepted.
+> **Honest research boundary.** EventLens defaults to local Shadow simulation (`CTRADER_ALLOW_DEMO_ORDERS=false`), and CLI Demo order execution requires explicit opt-in (`--ctrader-cli-demo-orders --confirm-demo-execution`) on a verified `!Account.IsLive` Demo account. Passing bounded Demo operational smoke verifies end-to-end execution plumbing—**after-cost strategy profitability and multi-day unattended stability remain under forward evaluation, not proven**. Real-money Live accounts and legacy `--ctrader-demo-mirror-orders` remain physically blocked in code.
 
 ---
 
@@ -77,7 +77,7 @@ flowchart LR
     Risk --> Ledger["Local Shadow Ledger"]
     Monitor["Model-Free Exit Monitor"] --> Ledger
     Ledger -. "Position state" .-> Agent
-    Risk -. "Blocked pending lifecycle acceptance" .-> Broker["cTrader Demo Orders"]
+    Risk -. "Opt-in CLI Demo only (Live blocked)" .-> Broker["cTrader Demo Orders"]
 ```
 
 - **Target response window:** `30–60 seconds` from first verified public release to decision workflow under healthy conditions (a design target, not a guaranteed SLA).
@@ -93,9 +93,9 @@ Every layer separates **what the AI thinks** from **what the system can verify**
 |---|---|---|
 | **Information Intake** | Default **Tier-1 English stack** (`investingLive` live HTML streams + Q&A enrichment, official `ECB`, `Federal Reserve`, `US BEA`, and `Forex Factory` weekly calendar) plus legacy `WallStreetCN`; simultaneous multi-indicator release bundling (`--bundle-events`) | Separates `scheduled_at`, `original_published_at`, `publisher_display_at`, `modified_at`, `received_at`, and `available_at` (unknown release times stay unknown); flags `Consensus Forecast: MISSING` explicitly; evaluates 4D feed health (`http_transport`, `cache_observation`, `content_activity`, `verifiable_lag`) |
 | **LLM & Thesis Memory** | `DeepSeek` structured JSON adapter; single-pass thesis updates + portfolio actions (`IGNORE_EVENT`, `HOLD`, `SET_TARGET`, `CLOSE`) with atomic thesis reversal and causal price trajectory context; optional **stateful thesis reviews** (`ReviewPolicy`) on `review_at`, periodic timers, breakout excursions, or structured price rules | Immutable SQLite thesis revisions (`sqlite_memory.py`); crash-safe `runtime_event_bundles` recovery without duplicate model calls; single-clause price triggers (`EUR/USD >= 1.1145`) strictly separated from non-executable natural language; review cooldowns and call caps (`runtime_reviews`) |
-| **Quotes & Cost Policy** | Headless Python **cTrader Open API Demo streamer** (`demo.ctraderapi.com:5036` over TLS/TCP) + local cTrader Desktop cBot bridge (`10–86400s`) + offline Bid/Ask tools; Razor commission metadata (`$30` per `$1M` USD volume) | Base policy rejects zero spread; default `pepperstone_razor_200` allows `0.0 pip` spreads only for verified commission-bearing Demo sources (`--no-allow-commission-zero-spread` disables it); strictly separates `live_poll`, `synthetic_fixture`, and `historical_bar_replay` provenance |
-| **Hard Risk & Exits** | `DeterministicTargetValidator` and `DeterministicHardRiskEngine` governing leverage, max weight, quote-wait windows (`awaiting_market_quote` → `expired`, separated from model retries), and `--max-daily-llm-calls` UTC budget caps | Stale or degraded feeds block opening/increasing risk while always permitting `CLOSE` and protective exits; pips-based stop-loss, take-profit, trailing stops, max-holding timers, entry cutoff guards, and two-phase shutdown drain run without the LLM |
-| **Shadow Ledger & CLI** | Local `SQLiteShadowLedger` accounting; configurable simulation profiles (`pepperstone_razor_200` at `$200` / `200x` default; `--account-profile institutional_10k` at `$10,000` / `1x`); historical anti-lookahead replay (`scripts/run_historical_bar_replay.py`) | `shadow status` and `shadow report` open SQLite in strict read-only mode (`?mode=ro`) with bounded-anchor objective window diagnostics; results from different sizing profiles are never combined; live endpoints/accounts and `--ctrader-demo-mirror-orders` are hard-blocked |
+| **Quotes & Cost Policy** | Docker **`cTrader CLI` Demo bridge** (`EventLensCliBridge`, `12h` rotating streams) + headless Python **cTrader Open API Demo streamer** (`demo.ctraderapi.com:5036` over TLS/TCP) + local cTrader Desktop cBot bridge (`10–86400s`) + offline Bid/Ask tools; Razor commission metadata (`$30` per `$1M` USD volume via `UsdPerMillionUsdVolume` and `$3` per standard lot per side via `UsdPerOneLot`) | Base policy rejects zero spread; default `pepperstone_razor_200` allows `0.0 pip` spreads only for verified commission-bearing Demo sources (`--no-allow-commission-zero-spread` disables it); strictly separates `live_poll`, `synthetic_fixture`, and `historical_bar_replay` provenance |
+| **Hard Risk & Exits** | `DeterministicTargetValidator` and `DeterministicHardRiskEngine` governing leverage, max weight, `q`-dependent ex-ante trade risk budgets, conservative cross-day `demo_daily_state` loss guards, quote-wait windows (`awaiting_market_quote` → `expired`), and `--max-daily-llm-calls` UTC budget caps | Stale or degraded feeds block opening/increasing risk while always permitting `CLOSE` and protective exits; pips-based stop-loss, take-profit, trailing stops, max-holding timers, entry cutoff guards, and two-phase shutdown drain run without the LLM |
+| **Shadow & Demo Ledger** | Local `SQLiteShadowLedger` accounting + opt-in `CTraderCliDemoExecutionEngine` (`ClosingDealId`-verified fills and `position_closed_unpriced` guards); configurable simulation profiles (`pepperstone_razor_200` at `$200` / `200x` default; `--account-profile institutional_10k` at `$10,000` / `1x`); historical anti-lookahead replay (`scripts/run_historical_bar_replay.py`) | `shadow status` and `shadow report` open SQLite in strict read-only mode (`?mode=ro`) with bounded-anchor objective window diagnostics; results from different sizing profiles are never combined; live endpoints/accounts and `--ctrader-demo-mirror-orders` are hard-blocked |
 
 ---
 
@@ -124,7 +124,7 @@ eventlens research series plan examples/synthetic-series-plan.json
 | Command Group | What It Does |
 |---|---|
 | `eventlens observe …` | Capture live Tier-1 English macro feeds (`capture`), view upcoming macro windows (`schedule`), and audit feed timing (`report`) |
-| `eventlens shadow …` | Run or inspect the automated Shadow loop (`start`, `stop`, `status`, `report`, `recover`) in bounded or `--continuous` mode |
+| `eventlens shadow …` | Run or inspect the automated Shadow / opt-in CLI Demo loop (`start`, `stop`, `status`, `report`, `recover`, `demo-reconcile`, `demo-smoke`, `demo-unlock`) in bounded or `--continuous` mode |
 | `eventlens memory …` | Inspect persistent thesis revisions, supporting evidence, and standalone memory reasoning |
 | `eventlens source fed …` | Run the dedicated Federal Reserve polling collector |
 | `eventlens research …` | Run historical cutoffs, anti-lookahead bar replays, cost-floor checks, and opt-in historical LLM inference |
@@ -153,16 +153,19 @@ eventlens observe report
 
 EventLens includes a headless Linux deployment bundle (`deploy/gcp/`) so continuous `24×5` operation on an `x86_64` Ubuntu 24.04 VM does not depend on keeping a local Mac/Windows cTrader desktop window open:
 
-- **Primary Docker `cTrader CLI` bridge (`ctrader/EventLensCliBridge/` + `eventlens-ctrader-cli.service`):** Builds `EventLensCliBridge.algo` (`TargetFramework=net6.0`, required by `cTrader.Automate 1.0.21`) via Microsoft's `.NET 8 SDK` container (`mcr.microsoft.com/dotnet/sdk:8.0`) and runs it inside Spotware's official console image (`ghcr.io/spotware/ctrader-console:latest`, `linux/amd64`), streaming `12h`-rotated `EURUSD` Demo quotes (`quotes-<session>.jsonl`), session-scoped `(bridge_session_id, event_seq)` `reconcile_snapshot` events, and opt-in position-ID-aware Demo execution (`CTraderCliDemoExecutionEngine` + `CTraderCliDemoBrokerAdapter`, plus bounded `eventlens-shadow demo-smoke` and `demo-unlock`) behind `!Account.IsLive` + `DeterministicHardRiskEngine` approval.
+- **Primary Docker `cTrader CLI` bridge (`ctrader/EventLensCliBridge/` + `eventlens-ctrader-cli.service`):** Builds `EventLensCliBridge.algo` (`TargetFramework=net6.0`, required by `cTrader.Automate 1.0.21`) via Microsoft's pinned `.NET 8 SDK` container (`mcr.microsoft.com/dotnet/sdk@sha256:1b955f179b02df4f0eb5fadedaa898cbe44d620a64aab52eec72c8e91d1355b5`) and runs it inside Spotware's pinned console image (`ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad`, `linux/amd64`, isolated from `DEEPSEEK_API_KEY`), streaming `12h`-rotated `EURUSD` Demo quotes (`quotes-<session>.jsonl`), session-scoped `(bridge_session_id, event_seq)` `reconcile_snapshot` events, and opt-in position-ID & `ClosingDealId`-verified Demo execution (`CTraderCliDemoExecutionEngine` + `CTraderCliDemoBrokerAdapter`, plus bounded `eventlens-shadow demo-smoke` and `demo-unlock`) behind `!Account.IsLive` + `DeterministicHardRiskEngine` approval.
 - **Alternative native TLS/TCP Demo quote stream (`ctrader_openapi.py`):** Connects directly to `demo.ctraderapi.com:5036` for Demo quotes only (`CTraderLiveEndpointForbiddenError` + `CTraderLiveAccountForbiddenError`; legacy `--ctrader-demo-mirror-orders` remains blocked).
-- **24×5 continuous safeguards:** `q`-dependent ex-ante risk-budget sizing (`--max-risk-per-trade-pct 0.02`), FX weekend auto-pause (`America/New_York` Friday `17:00` → Sunday `17:00`, DST-aware), UTC daily LLM call caps (`--max-daily-llm-calls`), wall-clock deadline guards, and `SIGTERM` shutdown drain.
-- **Current boundary:** A recorded repository snapshot compiled on the cloud VM using `BUILD_UID_GID=0:0`, and its metadata passed inspection with networking disabled and UID `1654:1654`. The default arbitrary non-root build UID failed NuGet initialization. Final ledger/risk changes require another exact-snapshot build and test run; **authenticated broker runtime, actual Demo order lifecycle and unattended forward operation remain unverified**. The [preflight audit](docs/research/2026-11-11-cloud-preflight-audit.md) records this distinction.
+- **24×5 continuous safeguards:** `q`-dependent ex-ante risk-budget sizing (`--max-risk-per-trade-pct 0.02`), conservative cross-day `demo_daily_state` baseline guards across outages/restarts, FX weekend auto-pause (`America/New_York` Friday `17:00` → Sunday `17:00`, DST-aware), UTC daily LLM call caps (`--max-daily-llm-calls`), wall-clock deadline guards, and `SIGTERM` shutdown drain.
+- **Current boundary:** On the Ubuntu 24.04 (`x86_64`) GCP VM, the final `EventLensCliBridge.algo` compiled cleanly with `BUILD_UID_GID=0:0` (`.algo` SHA-256 `24d5b3996d783ccafa91109e3b7d137993897eda86128ee3`), passed air-gapped `--network none --user 1654:1654` metadata inspection, completed Phase 1 read-only `demo-reconcile` (`clean: true`) and Phase 2 bounded `1,000 EUR` Pepperstone Demo `demo-smoke` (`passed: true`, SL attached, `ClosingDealId` verified, `flat_after_close: true`), and launched continuous `24×5` evaluation (`eventlens-ctrader-cli.service` + `eventlens-shadow-cli.service`). Arbitrary non-root build UIDs and non-root authenticated `ctrader-console` runtime are not accepted (container runs as upstream default root with setgid + ACLs on `/var/lib/eventlens/bridge`), and **multi-day unattended uptime and after-cost strategy profitability remain under forward evaluation**. See the historical [preflight audit](docs/research/2026-11-11-cloud-preflight-audit.md) and [runbook](docs/cloud-24x5-deployment.md).
 
 ```bash
-# Build validation on a prepared x86_64 Ubuntu 24.04 VM; does not log in or trade.
+# 1. Host provisioning & locked air-gapped-metadata .algo build on Ubuntu 24.04 (x86_64)
 sudo bash deploy/gcp/setup_ubuntu.sh
 sudo env BUILD_UID_GID=0:0 bash /opt/eventlens/deploy/gcp/build_ctrader_algo.sh
-# Account-connected startup is a separate, pending Demo acceptance stage; see the runbook.
+
+# 2. Read-only Demo reconcile (Phase 1) and opt-in bounded 1,000 EUR smoke check (Phase 2)
+sudo -u eventlens /opt/eventlens/.venv/bin/eventlens-shadow demo-reconcile --ctrader-cli-bridge-dir /var/lib/eventlens/bridge
+# See docs/cloud-24x5-deployment.md Section 5 for Phase 2 demo-smoke and 24×5 systemd operation.
 ```
 
 Full cloud setup & Demo acceptance runbook → **[docs/cloud-24x5-deployment.md](docs/cloud-24x5-deployment.md)**
@@ -175,8 +178,9 @@ EventLens keeps a clear line between **automated offline tests**, **recorded liv
 
 | Record | What Was Observed | What It Means (and Its Limits) |
 |---|---|---|
-| **Cloud preflight · Nov 11, 2026** | Private Ubuntu VM verified; real `.algo` compilation and disconnected metadata inspection passed for the [recorded snapshot](docs/research/2026-11-11-cloud-preflight-audit.md); 373 Python tests passed before further revisions | Confirms deployment feasibility. Open ledger/risk findings, final-source rebuild, authenticated Demo runtime and forward performance remain unaccepted |
-| **Offline test suite · Nov 2, 2026** | **360 passing tests** (`pytest`, `ruff`, `mypy` on Python 3.11/3.12) | Verifies state machines, risk gates, Open API framing, Demo locks, advancing-clock reviews, and broker-mirror blocking under deterministic mocks |
+| **Cloud CLI Demo smoke & 377-test suite · Nov 11, 2026** | Final `EventLensCliBridge.algo` (`net6.0`, `cTrader.Automate 1.0.21`) compiled (`0 errors / 0 warnings`) and passed air-gapped metadata check; **377 Python tests**, Ruff, and mypy passed; Pepperstone Demo `demo-reconcile` (`clean: true`) and bounded `1,000 EUR` `demo-smoke` (`passed: true`, SL attached, `HistoricalTrade.ClosingDealId` verified, `flat_after_close: true`) completed ahead of `24×5` launch | Verifies end-to-end headless CLI Demo execution, Razor `UsdPerOneLot` zero-spread commission gating, and causal close-deal reconciliation—does **not** establish multi-day uptime or strategy alpha |
+| **Cloud preflight · Nov 11, 2026** | Private Ubuntu VM verified; initial `.algo` compilation and disconnected metadata inspection passed for the [recorded preflight snapshot](docs/research/2026-11-11-cloud-preflight-audit.md); `373` Python tests passed prior to final close-deal and `UsdPerOneLot` fixes | Preserved preflight baseline documenting container digests, `BUILD_UID_GID=0:0` requirement, and pre-launch audit findings |
+| **Offline test suite · Nov 11, 2026** | **377 passing tests** (`pytest`, `ruff`, `mypy` on Python 3.11/3.12) | Verifies state machines, risk gates, `UsdPerOneLot` & `UsdPerMillionUsdVolume` Razor metadata, snapshot-vs-`order_event` close race guards, `ClosingDealId` deal accounting, cross-day `demo_daily_state` guards, and live-account blocking |
 | **Live Shadow · Oct 23, 2026** | **1,786 Demo quotes**, 6 LLM cycles, 5 memory versions, **2 Shadow entries** (`4.974 s` and `14.151 s` receipt-to-fill), 1 timed exit | First live EUR/USD France/Germany Flash PMI runs; predates two-phase drain (~5-minute gap occurred between the two sessions while a position was open) |
 | **Live Recovery & Continuous Window · Oct 27, 2026** | Both Oct 23 residual positions closed on fresh live quotes (`unclosed_risk = false`), followed by a **2,240.0 s uninterrupted session** (`3,517` valid quotes, `0` rejected, **10,761 protection checks**, `84` events persisted: `77` filtered, `5` `IGNORE_EVENT`, `2` stale-quote rejections) | Verified live crash recovery without historical price backfilling, zero protection blind spots while holding risk, honest retention of ignored events, and clean `flat_completed` drain |
 | **Live Failure Audit · Oct 29, 2026** | Observed `investingLive` RSS CloudFront `Age: 313s` lag and a mid-session local quote-bridge outage during the ECB window | Proved that HTTP `200` does not guarantee fresh news (motivating the switch to live HTML streams and 4D source health gating) |
@@ -187,9 +191,9 @@ EventLens keeps a clear line between **automated offline tests**, **recorded liv
 | Status | Scope Today |
 |---|---|
 | **Implemented (`已实现`)** | Tier-1 English intake, `MacroSemantics` & delayed-catchup guards, `single-pass-agent-v3.1` evidence verification, `q`-dependent ex-ante risk-budget sizing, Docker `cTrader CLI` bridge (`EventLensCliBridge`) + `CTraderCliDemoExecutionEngine` / `CTraderCliDemoBrokerAdapter`, native Open API quote streamer, and `status`/`report`/`demo-reconcile`/`demo-smoke`/`demo-unlock` CLIs |
-| **Offline-Verified (`离线验证`)** | Automated `pytest`, `ruff`, and `mypy` checks covering the Nov 4 overnight fault sequence, `12h` bridge rotation (`>4` files), wall-clock expiry, runtime→CLI Demo confirmed fills, `(bridge_session_id, event_seq)` restarts, UTC intent TTL, partial-line/outbox/`unknown_execution` safety, live-account blocks, and ledger PnL accounting identities |
-| **Live-Observed (`真实观测`)** | Oct 22–Nov 6, 2026 local SQLite/JSONL captures preserved unmodified under gitignored `data/` ([acceptance report](docs/shadow-acceptance.md); [Nov 4 overnight audit](docs/research/overnight-20261104-shadow-audit-and-prompt-draft.md)). The ad-hoc Oct 28 1-minute Yahoo bar replay is [explicitly quarantined](docs/replay-errata-2026-10-28.md) as bar-level analysis only |
-| **Pending Acceptance (`待验收`)** | Final revised-source Python checks and locked C# rebuild; resolution of execution-ledger and cross-day risk findings; authenticated `ctrader-console` runtime; Cloud Demo `demo-smoke`; multi-day forward observation and after-cost strategy evaluation |
+| **Offline-Verified (`离线验证`)** | **377 passing tests** (`pytest`, `ruff`, and `mypy`) covering the Nov 4 overnight fault sequence, `12h` bridge rotation (`>4` files), wall-clock expiry, `UsdPerOneLot` Razor commission metadata, causal snapshot-vs-`order_event` close reconciliation, `ClosingDealId` deal accounting, conservative cross-day `demo_daily_state` guards, `(bridge_session_id, event_seq)` restarts, UTC intent TTL, partial-line/outbox/`unknown_execution` safety, and live-account blocks |
+| **Live-Observed (`真实观测`)** | Nov 11, 2026 Ubuntu 24.04 GCP `EventLensCliBridge` Pepperstone Demo `demo-reconcile` (`clean: true`), bounded `1,000 EUR` `demo-smoke` (`passed: true`), and active `24×5` cloud observation; plus Oct 22–Nov 6, 2026 local SQLite/JSONL captures preserved unmodified under gitignored `data/` ([acceptance report](docs/shadow-acceptance.md); [Nov 4 overnight audit](docs/research/overnight-20261104-shadow-audit-and-prompt-draft.md)). The ad-hoc Oct 28 1-minute Yahoo bar replay is [explicitly quarantined](docs/replay-errata-2026-10-28.md) as bar-level analysis only |
+| **Pending Acceptance (`待验收`)** | Multi-day unattended `24×5` cloud forward window, cross-weekend reconnect observation, non-root authenticated `ctrader-console` runtime (currently upstream default root), and multi-window after-cost strategy evaluation |
 | **Unavailable (`已阻断`)** | Real-money Live trading (`!Account.IsLive` / `LiveAccountForbiddenError`) and legacy Open API delta mirroring (`--ctrader-demo-mirror-orders`) |
 
 ---
@@ -199,9 +203,9 @@ EventLens keeps a clear line between **automated offline tests**, **recorded liv
 - [x] **Foundation** — Typed contracts, immutable SQLite evidence & thesis memory, and JSON model adapter.
 - [x] **Historical Tools** — Strict `as_of` anti-lookahead replay, cost accounting, and restart-safe experiments.
 - [x] **Modular Architecture** — Clean separation across `sources/`, `trading/`, and `research/` with backward-compatible CLIs.
-- [ ] **Realtime Observer** — Multi-source capture, Razor commission provenance, and headless Open API quote streaming implemented; multi-day forward observation pending.
-- [ ] **Shadow Loop & Protection** — Hard risk, pips SL/TP/trailing exits, live recovery, and a `2,240 s` continuous window recorded; broader multi-session cycle coverage pending.
-- [ ] **cTrader Demo Execution** — Isolated `positionId`-aware Demo execution and broker position reconciliation after live Shadow acceptance passes.
+- [ ] **Realtime Observer** — Multi-source capture, Razor commission provenance, and headless Demo quote streaming implemented; multi-day forward observation in progress.
+- [ ] **Shadow Loop & Protection** — Hard risk, pips SL/TP/trailing exits, live recovery, and a `2,240 s` continuous window recorded; broader multi-session cycle coverage in progress.
+- [ ] **cTrader Demo Execution** — Opt-in Docker `cTrader CLI` `positionId` & `ClosingDealId` execution and bounded Cloud `demo-smoke` verified; multi-day forward window pending.
 
 **Next acceptance gate:** sustain uninterrupted quotes and independent protection across multi-day cloud sessions, document every exit or explicit handoff, and retain every ignored, rejected, and failed event alongside executed Shadow decisions.
 
@@ -222,7 +226,7 @@ Future extensions form a tight three-part loop—**hard-risk safety floor → hi
 | Guide | What You Will Find |
 |---|---|
 | **[Architecture & Module Map](docs/architecture.md)** | Data contracts, runtime state machines, and risk governance boundaries |
-| **[Continuous Cloud Deployment](docs/cloud-24x5-deployment.md)** | Ubuntu 24.04 `systemd` setup, `cTrader Open API` Demo tokens, weekend sleep, and daily caps |
+| **[Continuous Cloud Deployment](docs/cloud-24x5-deployment.md)** | Ubuntu 24.04 `systemd` + Docker `cTrader CLI` Demo bridge, `demo-reconcile`/`demo-smoke`, weekend sleep, and daily caps |
 | **[Observer & Feed Timing](docs/observer.md)** | Source collection, publication vs. arrival timestamps, and 4D stream health ([acceptance](docs/observer-acceptance.md)) |
 | **[Live Quotes & Cost Policy](docs/live-quotes.md)** | Bid/Ask freshness, Razor zero-spread commission policy, and alignment ([acceptance](docs/live-quotes-acceptance.md)) |
 | **[Memory & Reasoning](docs/memory.md)** | Thesis lifecycle, revision rules, and [LLM reasoning setup](docs/reasoning.md) |
@@ -239,23 +243,23 @@ eventlens/
 ├── src/eventlens/
 │   ├── ctrader_openapi.py  Headless TLS/TCP cTrader Open API Demo quote streamer (execution blocked)
 │   ├── runtime.py          Intraday event runtime, stateful thesis reviews & continuous ShadowRunner
-│   ├── shadow_cli.py       Shadow CLI (start / stop / status / report / recover)
+│   ├── shadow_cli.py       Shadow & Demo CLI (start / stop / status / report / recover / demo-*)
 │   ├── observer.py         Immutable feed captures, revisions, enrichments & 4D stream health
 │   ├── quotes.py           QuoteStore, causal as-of alignment & Razor commission policy
 │   ├── sqlite_memory.py    Durable SQLite thesis memory & revision history
 │   ├── deepseek.py         Replaceable structured JSON LLM adapter
 │   ├── contracts.py        Typed Pydantic contracts & UTC clock validation
 │   ├── sources/            Tier-1 English, Fed, cTrader Demo & WallStreetCN adapters
-│   ├── trading/            SinglePassTradingAgent, sizing, hard risk & Shadow ledger
+│   ├── trading/            SinglePassTradingAgent, sizing, hard risk, Shadow & CLI Demo broker
 │   └── research/           Anti-lookahead historical replay, cost floors & series runner
-├── deploy/gcp/             Ubuntu 24.04 provisioning script, env template & systemd unit
-├── ctrader/                Local cTrader Desktop quote bridge & tick probe
+├── deploy/gcp/             Ubuntu 24.04 provisioning, Docker cTrader CLI compose & systemd units
+├── ctrader/                EventLensCliBridge (net6.0 Docker cBot) & Desktop quote bridges
 ├── configs/                Pinned research & replay assumption manifests
 ├── scripts/                Historical bar replay & FOMC window audit scripts
 ├── notebooks/              Data-quality & cost-path diagnostic notebooks
 ├── examples/               Offline synthetic inputs & JSON schemas
 ├── docs/                   Technical guides, acceptance reports & pure-vector brand assets
-├── tests/                  360 unit, integration & protocol tests
+├── tests/                  377 unit, integration & protocol tests
 └── data/                   Local gitignored runtime SQLite databases (never committed)
 ```
 

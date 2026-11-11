@@ -2875,3 +2875,1109 @@ def test_stage_f_expected_demo_account_string_int64_precision_and_csproj_pin(
         assert ad_mis.get_intent("intent-mis-1")["status"] == "submitted"  # type: ignore[index]
     finally:
         ad_mis.close()
+
+
+def _make_approved_demo_pair(
+    *,
+    decision_id: str,
+    snapshot_id: str,
+    now: datetime,
+    side: str = "buy",
+    units: int = 2000,
+    weight_abs: str = "0.20",
+) -> tuple[AgentDecision, RiskAssessment]:
+    signed_weight = Decimal(weight_abs) if side == "buy" else -Decimal(weight_abs)
+    signed_units = Decimal(units) if side == "buy" else -Decimal(units)
+    dec = AgentDecision(
+        decision_id=decision_id,
+        event_id=f"ev-{decision_id}",
+        based_on_memory_version=1,
+        based_on_snapshot_id=snapshot_id,
+        provider="deepseek",
+        model_version="deepseek-chat",
+        prompt_version=SINGLE_PASS_PROMPT_VERSION,
+        started_at=now,
+        completed_at=now,
+        valid_until=now + timedelta(minutes=5),
+        portfolio_action="SET_TARGET",
+        target=TargetPortfolio(
+            target_id=f"tgt-{decision_id}",
+            based_on_snapshot_id=snapshot_id,
+            rationale=f"Approved Demo order {decision_id}",
+            positions=(
+                TargetPosition(
+                    instrument="EUR/USD",
+                    weight=signed_weight,
+                    thesis_ids=("t1",),
+                ),
+            ),
+        ),
+        rationale=f"Approved Demo order {decision_id}",
+    )
+    app = RiskAssessment(
+        assessment_id=f"app-{decision_id}",
+        decision_id=decision_id,
+        target_id=f"tgt-{decision_id}",
+        checked_snapshot_id=snapshot_id,
+        policy_version="test",
+        checked_at=now,
+        valid_until=now + timedelta(minutes=5),
+        outcome="approve",
+        reasons=("within_risk_limits",),
+        approved_quantity_eur=signed_units,
+    )
+    return dec, app
+
+
+def test_stage_f_close_deal_history_accounting_delayed_partial_multideal_sltp_and_restart_idempotency(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1 close-deal accounting & 3 deployment details regression guard:
+    1. Deployment & C# static checks:
+       - `EventLensCliBridge.cs` uses `ClosingDealId` / `HistoricalTrade`, emits `position_closed_unpriced`
+         when `History` is missing/incomplete, never substitutes `Symbol.Bid`/`Symbol.Ask` in `ExecuteCloseIntent`,
+         and stops `Timer` on safety `Stop()`.
+       - `docker-compose.ctrader-cli.yml` omits `env_file:` (never leaking `DEEPSEEK_API_KEY` into
+         `ctrader-console`), pins overridable verified `@sha256:...` digest, and configures `init: true`,
+         `stop_grace_period: 30s`, `restart: on-failure:5`, and `--exit-on-stop`.
+       - `build_ctrader_algo.sh` pins both SDK & runtime verified `@sha256:...` digests and defaults
+         `BUILD_UID_GID=0:0`.
+    2. Delayed `History` on close -> `position_closed_unpriced` (`realized_pnl_usd=None`, zero `ShadowFill`,
+       `blocks_new_risk=True`, immune to live `Bid`/`Ask` drift) -> backfill on `reconcile_snapshot.closed_deals`.
+    3. Staged partial closes (`分批平仓`) -> prior partial-close `ClosingDealId` is NEVER reused to price a
+       subsequent unpriced close leg on the same `PositionId`.
+    4. Multi-deal close (`多笔 deal`) + swap + `close_event` vs `reconcile_snapshot` deduplication +
+       unrelated Demo history isolation.
+    5. Autonomous broker SL/TP closes (both delayed `History` -> `position_closed_unpriced` and immediate
+       `History` -> real `closing_deal_id` fill, never fabricating `entry_price` / `1000` units / `0` PnL).
+    6. Cross-restart idempotency (`重启幂等`) & post-broker close crash recovery."""
+    cs_src = Path("ctrader/EventLensCliBridge/EventLensCliBridge.cs").read_text(encoding="utf-8")
+    compose_yml = Path("deploy/gcp/docker-compose.ctrader-cli.yml").read_text(encoding="utf-8")
+    cli_service = Path("deploy/gcp/eventlens-ctrader-cli.service").read_text(encoding="utf-8")
+    build_sh = Path("deploy/gcp/build_ctrader_algo.sh").read_text(encoding="utf-8")
+
+    # Static C# & deployment hardening assertions
+    assert "ClosingDealId" in cs_src
+    assert "SerializeHistoricalTrade" in cs_src
+    assert "position_closed_unpriced" in cs_src
+    assert "closed_deals = closedDeals" in cs_src
+    assert "Timer.Stop();" in cs_src
+    exec_close_slice = cs_src.split("private void ExecuteCloseIntent", 1)[1].split(
+        "private void ExecuteModifyProtectionIntent", 1
+    )[0]
+    assert "Symbol.Bid" not in exec_close_slice
+    assert "Symbol.Ask" not in exec_close_slice
+
+    compose_non_comment = "\n".join(
+        ln for ln in compose_yml.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert re.search(r"^\s*env_file\s*:", compose_non_comment, re.MULTILINE) is None
+    assert "DEEPSEEK_API_KEY" not in compose_non_comment
+    assert "eventlens.env" not in compose_non_comment
+    assert (
+        "ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad"
+        in compose_yml
+    )
+    assert "CTRADER_CONSOLE_IMAGE:-" in compose_yml
+    assert "init: true" in compose_yml
+    assert "stop_grace_period: 30s" in compose_yml
+    assert "restart: on-failure:5" in compose_yml
+    assert "restart: unless-stopped" not in compose_yml
+    assert "--exit-on-stop" in compose_yml
+
+    assert "--env-file /etc/eventlens/eventlens.env" in cli_service
+    assert "--abort-on-container-exit" in cli_service
+    assert "--exit-code-from ctrader-cli-bridge" in cli_service
+    assert "Restart=on-failure" in cli_service
+    assert "Restart=always" not in cli_service
+
+    assert (
+        "DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk@sha256:1b955f179b02df4f0eb5fadedaa898cbe44d620a64aab52eec72c8e91d1355b5"
+        in build_sh
+    )
+    assert (
+        "CTRADER_CONSOLE_IMAGE:-ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad"
+        in build_sh
+    )
+    assert 'RUN_UID_GID="${BUILD_UID_GID:-0:0}"' in build_sh
+
+    t_now = [datetime(2026, 11, 11, 14, 0, 0, tzinfo=UTC)]
+    bridge_dir = tmp_path / "deal_bridge"
+    state_db = tmp_path / "deal_state.sqlite"
+    risk_pol = RiskPolicy.pepperstone_razor_200()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
+
+    daemon = SimulatedCTraderCliDaemon(
+        bridge_dir,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        initial_balance_usd=Decimal("200.00"),
+        bid=Decimal("1.12400"),
+        ask=Decimal("1.12402"),
+        clock=lambda: t_now[0],
+    )
+    daemon.start()
+    # Inject unrelated pre-existing manual Demo trade in History -> must NEVER pollute EventLens ledger!
+    daemon.inject_unrelated_history_deal(
+        broker_position_id=88888,
+        closing_deal_id=88001,
+        side="buy",
+        volume_units=5000,
+        entry_price=Decimal("1.10000"),
+        closing_price=Decimal("1.11000"),
+        net_profit_usd=Decimal("49.70"),
+        commissions_usd=Decimal("-0.30"),
+        label="manual_ui_trade",
+    )
+
+    adapter = CTraderCliDemoBrokerAdapter(
+        state_db_path=state_db,
+        bridge_dir=bridge_dir,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t_now[0],
+    )
+    engine = CTraderCliDemoExecutionEngine(
+        adapter=adapter,
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        clock=lambda: t_now[0],
+    )
+    try:
+        mkt0 = _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        snap0 = engine.snapshot_sync(market=mkt0)
+        assert snap0.daily_baseline_valid is True
+        assert adapter.closed_deals() == []
+
+        # =====================================================================
+        # Scenario A: Delayed History on `close_position` -> `position_closed_unpriced` -> backfill
+        # =====================================================================
+        dec_a, app_a = _make_approved_demo_pair(
+            decision_id="dec-close-delay-a",
+            snapshot_id=snap0.snapshot_id,
+            now=t_now[0],
+            side="buy",
+            units=2000,
+        )
+        rec_a = engine.record_sync(dec_a, app_a)
+        assert rec_a.status == "recorded"
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        mkt_a_open = _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        ex_a0, tg_a0 = engine.step_broker_events_and_protection(mkt_a_open)
+        assert ex_a0 == ()
+        assert len(tg_a0) == 1
+        pos_a_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        # Move market to 1.12500 / 1.12502 (+9.8 pips on 2000 EUR -> +$1.96 gross), delay History!
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12500")
+        daemon.ask = Decimal("1.12502")
+        daemon.delay_close_history = True
+        close_a_cid = adapter.submit_close_position(
+            broker_position_id=pos_a_id,
+            decision_id=dec_a.decision_id,
+            assessment_id=app_a.assessment_id,
+            protective_reason="agent_close_target",
+        )
+        daemon.step()
+
+        t_now[0] += timedelta(seconds=1)
+        mkt_a_close = _fresh_market(t_now[0], bid=Decimal("1.12500"), ask=Decimal("1.12502"))
+        ex_a_unp, tg_a_unp = engine.step_broker_events_and_protection(mkt_a_close)
+        assert ex_a_unp == ()
+        assert tg_a_unp == ()  # NEVER emit confirmed ShadowFill while History deal is missing!
+        assert adapter.open_positions() == []
+        unp_a = adapter.unpriced_closed_positions()
+        assert len(unp_a) == 1
+        assert unp_a[0]["broker_position_id"] == pos_a_id
+        assert unp_a[0]["status"] == "position_closed_unpriced"
+        assert unp_a[0]["close_price"] is None
+        assert unp_a[0]["realized_net_pnl_usd"] is None
+        assert unp_a[0]["commission_usd"] is None
+        assert adapter.get_intent(close_a_cid)["status"] == "position_closed_unpriced"  # type: ignore[index]
+        assert adapter.get_intent(close_a_cid)["fill_price"] is None  # type: ignore[index]
+
+        rep_a_unp = engine.report(market=mkt_a_close)
+        assert rep_a_unp["status"] == "pending_close_accounting"
+        assert rep_a_unp["pending_close_accounting"] is True
+        assert rep_a_unp["realized_pnl_usd"] is None  # Never report 0.00 for unknown PnL!
+        assert rep_a_unp["total_fees_usd"] is None
+        assert rep_a_unp["reconciliation"]["blocks_new_risk"] is True
+        assert any(
+            f"position_closed_unpriced_awaiting_history:{pos_a_id}:" in d
+            for d in rep_a_unp["reconciliation"]["drift_reasons"]
+        )
+
+        # Move live Bid/Ask FAR away (1.14000) before History arrives to prove live Bid/Ask is never used!
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.14000")
+        daemon.ask = Decimal("1.14002")
+        daemon.delay_close_history = False
+        assert daemon.flush_delayed_history() == 1
+
+        mkt_a_after = _fresh_market(t_now[0], bid=Decimal("1.14000"), ask=Decimal("1.14002"))
+        ex_a_bf, tg_a_bf = engine.step_broker_events_and_protection(mkt_a_after)
+        assert ex_a_bf == ()
+        assert len(tg_a_bf) == 1
+        assert tg_a_bf[0].fill_price == Decimal("1.12500")
+        assert tg_a_bf[0].fill_price != Decimal("1.14000")
+        assert tg_a_bf[0].fill_price != Decimal("1.12402")
+        assert tg_a_bf[0].realized_pnl_usd > Decimal("1.50")
+        assert tg_a_bf[0].commission_usd > Decimal("0.00")
+        assert adapter.unpriced_closed_positions() == []
+        assert adapter.get_intent(close_a_cid)["status"] == "filled"  # type: ignore[index]
+        rep_a_ok = engine.report(market=mkt_a_after)
+        assert rep_a_ok["status"] == "ok"
+        assert rep_a_ok["pending_close_accounting"] is False
+        assert rep_a_ok["realized_pnl_usd"] is not None
+        assert Decimal(rep_a_ok["realized_pnl_usd"]) > Decimal("1.50")
+
+        # =====================================================================
+        # Scenario B: Staged partial closes (`分批平仓`) — never reuse earlier deal on same PositionId!
+        # =====================================================================
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12400")
+        daemon.ask = Decimal("1.12402")
+        daemon.emit_reconcile_snapshot("prep_b")
+        mkt_b0 = _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        snap_b0 = engine.snapshot_sync(market=mkt_b0)
+        dec_b, app_b = _make_approved_demo_pair(
+            decision_id="dec-staged-b",
+            snapshot_id=snap_b0.snapshot_id,
+            now=t_now[0],
+            side="buy",
+            units=3000,
+            weight_abs="0.30",
+        )
+        assert engine.record_sync(dec_b, app_b).status == "recorded"
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos_b_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        # Leg 1: Partial close 1000 of 3000 EUR at 1.12480 (History immediate -> deal D1)
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12480")
+        daemon.ask = Decimal("1.12482")
+        c_b1 = adapter.submit_close_position(
+            broker_position_id=pos_b_id,
+            volume_units=1000,
+            decision_id=dec_b.decision_id,
+            assessment_id=app_b.assessment_id,
+            protective_reason="agent_partial_reduction",
+        )
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        ex_b1, tg_b1 = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12480"), ask=Decimal("1.12482"))
+        )
+        assert ex_b1 == ()
+        assert len(tg_b1) == 1
+        assert tg_b1[0].prior_quantity == Decimal("3000")
+        assert tg_b1[0].delta_quantity == Decimal("-1000")
+        assert tg_b1[0].new_quantity == Decimal("2000")
+        assert tg_b1[0].fill_price == Decimal("1.12480")
+        assert adapter.get_intent(c_b1)["status"] == "partial"  # type: ignore[index]
+        assert adapter.open_positions()[0]["volume_units"] == 2000
+
+        # Leg 2: Close remaining 2000 EUR at 1.12320 WITH delayed History!
+        # Crucial check: D1 (1.12480) is ALREADY in History for pos_b_id, and MUST NOT be reused!
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12320")
+        daemon.ask = Decimal("1.12322")
+        daemon.delay_close_history = True
+        c_b2 = adapter.submit_close_position(
+            broker_position_id=pos_b_id,
+            decision_id=dec_b.decision_id,
+            assessment_id=app_b.assessment_id,
+            protective_reason="agent_close_target",
+        )
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        ex_b2_unp, tg_b2_unp = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12320"), ask=Decimal("1.12322"))
+        )
+        assert ex_b2_unp == ()
+        assert tg_b2_unp == ()  # D1 was NOT reused; no premature fill for Leg 2!
+        assert adapter.get_intent(c_b2)["status"] == "position_closed_unpriced"  # type: ignore[index]
+        assert adapter.get_intent(c_b2)["fill_price"] is None  # type: ignore[index]
+        unp_b = adapter.unpriced_closed_positions()
+        assert len(unp_b) == 1
+        assert unp_b[0]["priced_closed_units"] == 1000
+        assert unp_b[0]["unpriced_closed_units"] == 2000
+
+        # Flush D2 -> reconciles exact 2-deal VWAP & telescoping quantities (2000 -> 0)
+        daemon.delay_close_history = False
+        assert daemon.flush_delayed_history() == 1
+        t_now[0] += timedelta(seconds=1)
+        ex_b2_ok, tg_b2_ok = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12320"), ask=Decimal("1.12322"))
+        )
+        assert ex_b2_ok == ()
+        assert len(tg_b2_ok) == 1
+        assert tg_b2_ok[0].prior_quantity == Decimal("2000")
+        assert tg_b2_ok[0].delta_quantity == Decimal("-2000")
+        assert tg_b2_ok[0].new_quantity == Decimal("0")
+        assert tg_b2_ok[0].fill_price == Decimal("1.12320")
+        assert adapter.unpriced_closed_positions() == []
+        deals_b = adapter.closed_deals(broker_position_id=pos_b_id)
+        assert len(deals_b) == 2
+        assert [int(d["volume_units"]) for d in deals_b] == [1000, 2000]
+
+        # =====================================================================
+        # Scenario C: Multi-deal single close (`多笔 deal`) + negative swap + dedup across snapshot
+        # =====================================================================
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12400")
+        daemon.ask = Decimal("1.12402")
+        daemon.default_swap_usd = Decimal("-0.17")
+        daemon.emit_reconcile_snapshot("prep_c")
+        snap_c0 = engine.snapshot_sync(
+            market=_fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        dec_c, app_c = _make_approved_demo_pair(
+            decision_id="dec-multideal-c",
+            snapshot_id=snap_c0.snapshot_id,
+            now=t_now[0],
+            side="sell",
+            units=3000,
+            weight_abs="0.30",
+        )
+        assert engine.record_sync(dec_c, app_c).status == "recorded"
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos_c_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        # Split single ClosePosition into 2 distinct closing_deal_ids at 1.12300 (1000) & 1.12330 (2000)
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12318")
+        daemon.ask = Decimal("1.12320")
+        daemon.split_next_close_legs = [
+            (1000, Decimal("1.12300")),
+            (2000, Decimal("1.12330")),
+        ]
+        adapter.submit_close_position(
+            broker_position_id=pos_c_id,
+            decision_id=dec_c.decision_id,
+            assessment_id=app_c.assessment_id,
+            protective_reason="agent_close_target",
+        )
+        daemon.step()
+        daemon.default_swap_usd = Decimal("0.00")
+        # Emit additional reconcile_snapshots carrying the exact same closed_deals -> must NEVER double-count!
+        daemon.emit_reconcile_snapshot("extra_dup_check_1")
+        daemon.emit_reconcile_snapshot("extra_dup_check_2")
+        t_now[0] += timedelta(seconds=1)
+        ex_c, tg_c = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12318"), ask=Decimal("1.12320"))
+        )
+        assert ex_c == ()
+        assert len(tg_c) == 2
+        assert [(f.prior_quantity, f.delta_quantity, f.new_quantity) for f in tg_c] == [
+            (Decimal("-3000"), Decimal("1000"), Decimal("-2000")),
+            (Decimal("-2000"), Decimal("2000"), Decimal("0")),
+        ]
+        assert [f.fill_price for f in tg_c] == [Decimal("1.12300"), Decimal("1.12330")]
+        deals_c = adapter.closed_deals(broker_position_id=pos_c_id)
+        assert len(deals_c) == 2
+        assert sum(Decimal(str(d["swap_usd"])) for d in deals_c) == Decimal("-0.34")
+        # Unrelated deal 88001 was NEVER ingested!
+        assert all(int(d["closing_deal_id"]) != 88001 for d in adapter.closed_deals())
+
+        # =====================================================================
+        # Scenario D: Autonomous broker SL (delayed History -> backfill) & TP (immediate History)
+        # =====================================================================
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12400")
+        daemon.ask = Decimal("1.12402")
+        daemon.emit_reconcile_snapshot("prep_d1")
+        snap_d1 = engine.snapshot_sync(
+            market=_fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        dec_d1, app_d1 = _make_approved_demo_pair(
+            decision_id="dec-sl-d1",
+            snapshot_id=snap_d1.snapshot_id,
+            now=t_now[0],
+            side="buy",
+            units=3000,
+            weight_abs="0.30",
+        )
+        assert engine.record_sync(dec_d1, app_d1).status == "recorded"
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos_d1_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        # Autonomous broker SL triggers while History is delayed -> MUST record `position_closed_unpriced`,
+        # NEVER fabricate entry_price (1.12402), 1000 units, or 0.00 PnL!
+        t_now[0] += timedelta(seconds=2)
+        daemon.delay_close_history = True
+        daemon.trigger_broker_stop_loss_close(pos_d1_id)
+        t_now[0] += timedelta(seconds=1)
+        ex_d1_unp, tg_d1_unp = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12290"), ask=Decimal("1.12292"))
+        )
+        assert ex_d1_unp == ()
+        assert tg_d1_unp == ()
+        assert len(adapter.unpriced_closed_positions()) == 1
+        assert adapter.unpriced_closed_positions()[0]["broker_position_id"] == pos_d1_id
+
+        daemon.delay_close_history = False
+        assert daemon.flush_delayed_history() == 1
+        t_now[0] += timedelta(seconds=1)
+        ex_d1_ok, tg_d1_ok = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12290"), ask=Decimal("1.12292"))
+        )
+        assert tg_d1_ok == ()
+        assert len(ex_d1_ok) == 1
+        assert ex_d1_ok[0].kind == "protective_exit"
+        assert ex_d1_ok[0].prior_quantity == Decimal("3000")
+        assert ex_d1_ok[0].delta_quantity == Decimal("-3000")
+        assert ex_d1_ok[0].new_quantity == Decimal("0")
+        assert ex_d1_ok[0].fill_price < Decimal("1.12402")
+        assert ex_d1_ok[0].realized_pnl_usd < Decimal("-3.00")
+        assert ex_d1_ok[0].commission_usd > Decimal("0.00")
+
+        # Autonomous broker TP with immediate History in `reconcile_snapshot.closed_deals`
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12400")
+        daemon.ask = Decimal("1.12402")
+        daemon.emit_reconcile_snapshot("prep_d2")
+        snap_d2 = engine.snapshot_sync(
+            market=_fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        dec_d2, app_d2 = _make_approved_demo_pair(
+            decision_id="dec-tp-d2",
+            snapshot_id=snap_d2.snapshot_id,
+            now=t_now[0],
+            side="buy",
+            units=3000,
+            weight_abs="0.30",
+        )
+        adapter.submit_market_order(
+            decision=dec_d2,
+            assessment=app_d2,
+            side="buy",
+            volume_units=3000,
+            client_intent_id="mkt-dec-tp-d2",
+            stop_loss_pips=11.0,
+            take_profit_pips=15.0,
+        )
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos_d2_id = int(adapter.open_positions()[0]["broker_position_id"])
+        t_now[0] += timedelta(seconds=2)
+        daemon.trigger_broker_take_profit_close(pos_d2_id)
+        t_now[0] += timedelta(seconds=1)
+        ex_d2, tg_d2 = engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12552"), ask=Decimal("1.12554"))
+        )
+        assert tg_d2 == ()
+        assert len(ex_d2) == 1
+        assert ex_d2[0].fill_price > Decimal("1.12540")
+        assert ex_d2[0].realized_pnl_usd > Decimal("4.00")
+
+        # =====================================================================
+        # Scenario E: Post-broker close crash recovery + full cross-restart idempotency (`重启幂等`)
+        # =====================================================================
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12400")
+        daemon.ask = Decimal("1.12402")
+        daemon.emit_reconcile_snapshot("prep_e")
+        snap_e0 = engine.snapshot_sync(
+            market=_fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        dec_e, app_e = _make_approved_demo_pair(
+            decision_id="dec-crash-close-e",
+            snapshot_id=snap_e0.snapshot_id,
+            now=t_now[0],
+            side="buy",
+            units=2000,
+        )
+        assert engine.record_sync(dec_e, app_e).status == "recorded"
+        daemon.step()
+        t_now[0] += timedelta(seconds=1)
+        engine.step_broker_events_and_protection(
+            _fresh_market(t_now[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos_e_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.12460")
+        daemon.ask = Decimal("1.12462")
+        daemon.crash_mode = "after_broker_call_before_event"
+        close_e_cid = adapter.submit_close_position(
+            broker_position_id=pos_e_id,
+            decision_id=dec_e.decision_id,
+            assessment_id=app_e.assessment_id,
+            protective_reason="agent_close_target",
+        )
+        with pytest.raises(SimulatedBridgeCrashError):
+            daemon.step()
+
+        rep_before_restart = None
+    finally:
+        adapter.close()
+
+    # Restart BOTH daemon (fresh bridge_session_id, _event_seq=0!) and Python adapter/engine!
+    t_now[0] += timedelta(seconds=2)
+    daemon_restarted = SimulatedCTraderCliDaemon(
+        bridge_dir,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        bid=Decimal("1.12460"),
+        ask=Decimal("1.12462"),
+        clock=lambda: t_now[0],
+    )
+    daemon_restarted.start()
+    daemon_restarted.step()  # Recovers in-flight close_e_cid from journal + History!
+
+    adapter_r1 = CTraderCliDemoBrokerAdapter(
+        state_db_path=state_db,
+        bridge_dir=bridge_dir,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t_now[0],
+    )
+    engine_r1 = CTraderCliDemoExecutionEngine(
+        adapter=adapter_r1,
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        clock=lambda: t_now[0],
+    )
+    try:
+        mkt_r1 = _fresh_market(t_now[0], bid=Decimal("1.12460"), ask=Decimal("1.12462"))
+        ex_r1, tg_r1 = engine_r1.step_broker_events_and_protection(mkt_r1)
+        assert ex_r1 == ()
+        assert len(tg_r1) == 1
+        assert tg_r1[0].execution_id == close_e_cid
+        assert adapter_r1.get_intent(close_e_cid)["status"] == "filled"  # type: ignore[index]
+        rep_before_restart = engine_r1.report(market=mkt_r1)
+        assert rep_before_restart["status"] == "ok"
+        assert rep_before_restart["pending_close_accounting"] is False
+        deals_count_1 = len(rep_before_restart["closed_deals"])
+        fills_count_1 = len(rep_before_restart["fills"])
+        pnl_1 = rep_before_restart["realized_pnl_usd"]
+        fees_1 = rep_before_restart["total_fees_usd"]
+    finally:
+        adapter_r1.close()
+
+    # Second full daemon + adapter + engine restart -> 100% idempotent (zero duplicate deals or fills!)
+    t_now[0] += timedelta(seconds=2)
+    daemon_r2 = SimulatedCTraderCliDaemon(
+        bridge_dir,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        bid=Decimal("1.12460"),
+        ask=Decimal("1.12462"),
+        clock=lambda: t_now[0],
+    )
+    daemon_r2.start()
+    daemon_r2.step()
+
+    adapter_r2 = CTraderCliDemoBrokerAdapter(
+        state_db_path=state_db,
+        bridge_dir=bridge_dir,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t_now[0],
+    )
+    engine_r2 = CTraderCliDemoExecutionEngine(
+        adapter=adapter_r2,
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        clock=lambda: t_now[0],
+    )
+    try:
+        mkt_r2 = _fresh_market(t_now[0], bid=Decimal("1.12460"), ask=Decimal("1.12462"))
+        ex_r2, tg_r2 = engine_r2.step_broker_events_and_protection(mkt_r2)
+        assert ex_r2 == ()
+        assert tg_r2 == ()
+        rep_after_restart = engine_r2.report(market=mkt_r2)
+        assert len(rep_after_restart["closed_deals"]) == deals_count_1
+        assert len(rep_after_restart["fills"]) == fills_count_1
+        assert rep_after_restart["realized_pnl_usd"] == pnl_1
+        assert rep_after_restart["total_fees_usd"] == fees_1
+    finally:
+        adapter_r2.close()
+
+    # Verify CLI `demo-reconcile` surfaces `unpriced_closed_positions` and `closed_deals`
+    t_now[0] = datetime.now(UTC)
+    daemon_r2.clock = lambda: t_now[0]
+    daemon_r2.emit_reconcile_snapshot("cli_reconcile_check")
+    shadow_cli_main(
+        [
+            "demo-reconcile",
+            "--quote-bridge-dir",
+            str(bridge_dir),
+            "--cli-demo-state-db",
+            str(state_db),
+            "--expected-demo-account-number",
+            "5100201",
+        ]
+    )
+    cli_rec_out = json.loads(capsys.readouterr().out)
+    assert cli_rec_out["unpriced_closed_positions"] == []
+    assert len(cli_rec_out["closed_deals"]) == deals_count_1
+
+
+def test_stage_f_demo_engine_cross_day_daily_baseline_preserves_outage_losses_across_restarts(
+    tmp_path: Path,
+) -> None:
+    """P1 daily-baseline regression guard (`CTraderCliDemoExecutionEngine`):
+    1. Open position carried across NY 17:00 rollover during a quote outage sets a durable provisional
+       baseline (`daily_baseline_valid=False`, `unconfirmed_open_position_without_valid_quote`) equal
+       to `max(last_valid_equity_usd, prior_baseline)` (never raw cash), blocks risk-increasing orders
+       (`daily_baseline_unconfirmed`) while permitting `CLOSE`, survives process restarts, and confirms
+       conservatively on recovery (`confirmed_after_quote_recovery_conservative`) so post-outage crashes
+       immediately trigger `daily_loss_limit_triggered` and flatten open risk (`protective_daily_loss_limit`).
+    2. Even when the Python process is completely offline across NY 17:00 rollover and broker server SL
+       closes the position during the outage (so Day 2 wakes up already flat at lower balance), Day 2
+       preserves Day 1's conservative `carried_ref` (`confirmed_carried_position_conservative`) and
+       triggers `daily_loss_limit_triggered` instead of resetting Day 2 baseline to post-SL cash."""
+    # Part 1: Open position carried across rollover during quote outage + restart + crash drop
+    t1 = [datetime(2026, 7, 15, 19, 0, 0, tzinfo=UTC)]  # 15:00 EDT (trading_day = 2026-07-15)
+    b1 = tmp_path / "daily_p1_bridge"
+    db1 = tmp_path / "daily_p1.sqlite"
+    risk_pol = RiskPolicy.pepperstone_razor_200()  # max_daily_loss_usd = $8.00
+    exit_pol = ProtectiveExitPolicy(
+        max_holding_seconds=86400 * 3,
+        stop_loss_pips=Decimal("500"),
+        max_position_loss_usd=Decimal("100"),
+        max_daily_loss_usd=Decimal("8.00"),
+    )
+    risk_engine = DeterministicHardRiskEngine(policy=risk_pol, clock=lambda: t1[0])
+
+    d1 = SimulatedCTraderCliDaemon(
+        b1,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        initial_balance_usd=Decimal("200.00"),
+        bid=Decimal("1.12400"),
+        ask=Decimal("1.12402"),
+        clock=lambda: t1[0],
+    )
+    d1.start()
+    ad1 = CTraderCliDemoBrokerAdapter(
+        state_db_path=db1,
+        bridge_dir=b1,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t1[0],
+    )
+    eng1 = CTraderCliDemoExecutionEngine(
+        adapter=ad1,
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        clock=lambda: t1[0],
+    )
+    try:
+        mkt_open = _fresh_market(t1[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        snap0 = eng1.snapshot_sync(market=mkt_open)
+        assert snap0.daily_baseline_valid is True
+        assert snap0.daily_baseline_equity_usd == Decimal("200.00")
+
+        dec_open, app_open = _make_approved_demo_pair(
+            decision_id="dec-d1-open",
+            snapshot_id=snap0.snapshot_id,
+            now=t1[0],
+            side="buy",
+            units=3000,
+            weight_abs="0.30",
+        )
+        assert eng1.record_sync(dec_open, app_open).status == "recorded"
+        d1.step()
+        t1[0] += timedelta(seconds=1)
+        eng1.step_broker_events_and_protection(
+            _fresh_market(t1[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+
+        # Still on Day 1 (20:00 UTC == 16:00 EDT): rally to 1.13500 -> high_equity = ~$203.29 > $200.00
+        t1[0] = datetime(2026, 7, 15, 20, 0, 0, tzinfo=UTC)
+        d1.bid = Decimal("1.13500")
+        d1.ask = Decimal("1.13502")
+        d1.emit_reconcile_snapshot("day1_high")
+        mkt_high = _fresh_market(t1[0], bid=Decimal("1.13500"), ask=Decimal("1.13502"))
+        snap_high = eng1.snapshot_sync(market=mkt_high)
+        assert snap_high.valuation_valid is True
+        assert snap_high.daily_baseline_valid is True
+        high_equity = snap_high.equity
+        assert high_equity > Decimal("203.00")
+
+        # Cross 17:00 EDT rollover into Day 2 (2026-07-16, 21:30 UTC == 17:30 EDT) during a quote outage!
+        t1[0] = datetime(2026, 7, 15, 21, 30, 0, tzinfo=UTC)
+        d1.emit_reconcile_snapshot("day2_quote_outage")
+        empty_mkt = MarketSnapshot(snapshot_id="empty-rollover", as_of=t1[0], quotes=())
+        snap_rollover = eng1.snapshot_sync(market=empty_mkt)
+        assert snap_rollover.valuation_valid is False
+        assert snap_rollover.daily_baseline_valid is False
+        assert (
+            snap_rollover.daily_baseline_reason == "unconfirmed_open_position_without_valid_quote"
+        )
+        assert snap_rollover.daily_baseline_equity_usd == high_equity
+
+        # Risk-increasing order MUST be rejected while daily_baseline_valid is False
+        dec_add, app_add = _make_approved_demo_pair(
+            decision_id="dec-d2-add",
+            snapshot_id=snap_rollover.snapshot_id,
+            now=t1[0],
+            side="buy",
+            units=4000,
+            weight_abs="0.40",
+        )
+        prior_t1 = Thesis(
+            thesis_id="t1",
+            revision=1,
+            status="active",
+            narrative="Active EUR/USD thesis",
+            instruments=("EUR/USD",),
+            supporting_event_ids=("ev-d1-open",),
+            invalidation_conditions=("EUR/USD < 1.1100",),
+            confidence=Decimal("0.65"),
+            created_at=t1[0] - timedelta(hours=2),
+            updated_at=t1[0] - timedelta(hours=2),
+            review_at=t1[0] + timedelta(hours=4),
+        )
+        probe_mkt = _fresh_market(t1[0], bid=Decimal("1.13500"), ask=Decimal("1.13502"))
+        assess_add = asyncio.run(
+            risk_engine.assess(dec_add, snap_rollover, probe_mkt, prior_theses=(prior_t1,))
+        )
+        assert assess_add.outcome == "reject"
+        assert "daily_baseline_unconfirmed" in assess_add.reasons
+
+        # Risk-reducing CLOSE remains permitted by DeterministicHardRiskEngine
+        dec_close = AgentDecision(
+            decision_id="dec-d2-close-allowed",
+            event_id="ev-d2-close",
+            based_on_memory_version=1,
+            based_on_snapshot_id=snap_rollover.snapshot_id,
+            provider="deepseek",
+            model_version="deepseek-chat",
+            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            started_at=t1[0],
+            completed_at=t1[0],
+            valid_until=t1[0] + timedelta(seconds=60),
+            portfolio_action="CLOSE",
+            target=TargetPortfolio(
+                target_id="tgt-d2-close",
+                based_on_snapshot_id=snap_rollover.snapshot_id,
+                rationale="Close during unconfirmed baseline",
+                positions=(
+                    TargetPosition(
+                        instrument="EUR/USD",
+                        weight=Decimal("0"),
+                        thesis_ids=("t1",),
+                    ),
+                ),
+            ),
+            rationale="Close during unconfirmed baseline",
+        )
+        assess_close = asyncio.run(
+            risk_engine.assess(dec_close, snap_rollover, probe_mkt, prior_theses=(prior_t1,))
+        )
+        assert assess_close.outcome == "approve"
+    finally:
+        ad1.close()
+
+    # Restart adapter + engine on Day 2 (21:35 UTC) while quotes are STILL missing -> provisional persists!
+    t1[0] = datetime(2026, 7, 15, 21, 35, 0, tzinfo=UTC)
+    d1.emit_reconcile_snapshot("day2_restart_still_outage")
+    ad1_re = CTraderCliDemoBrokerAdapter(
+        state_db_path=db1,
+        bridge_dir=b1,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t1[0],
+    )
+    eng1_re = CTraderCliDemoExecutionEngine(
+        adapter=ad1_re,
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        clock=lambda: t1[0],
+    )
+    try:
+        snap_restart = eng1_re.snapshot_sync(
+            market=MarketSnapshot(snapshot_id="empty-restart", as_of=t1[0], quotes=())
+        )
+        assert snap_restart.daily_baseline_valid is False
+        assert snap_restart.daily_baseline_equity_usd == high_equity
+
+        # Quotes recover at 21:40 UTC after a sharp crash to 1.09500 (equity ~$191.29, down ~$12.00 > $8.00 cap!)
+        t1[0] = datetime(2026, 7, 15, 21, 40, 0, tzinfo=UTC)
+        d1.bid = Decimal("1.09500")
+        d1.ask = Decimal("1.09502")
+        d1.emit_reconcile_snapshot("day2_recovered_crash")
+        mkt_crash = _fresh_market(t1[0], bid=Decimal("1.09500"), ask=Decimal("1.09502"))
+        snap_rec = eng1_re.snapshot_sync(market=mkt_crash)
+        assert snap_rec.valuation_valid is True
+        assert snap_rec.daily_baseline_valid is True
+        assert snap_rec.daily_baseline_reason == "confirmed_after_quote_recovery_conservative"
+        assert snap_rec.daily_baseline_equity_usd == high_equity
+        assert snap_rec.daily_pnl_usd <= Decimal("-8.00")
+        assert snap_rec.daily_loss_limit_triggered is True
+
+        # Protective monitor dispatches `protective_daily_loss_limit` close immediately
+        eng1_re.step_broker_events_and_protection(mkt_crash)
+        d1.step()
+        t1[0] += timedelta(seconds=1)
+        mkt_flat = _fresh_market(t1[0], bid=Decimal("1.09500"), ask=Decimal("1.09502"))
+        ex_dl, _ = eng1_re.step_broker_events_and_protection(mkt_flat)
+        assert len(ex_dl) == 1
+        assert ex_dl[0].reason == "protective_daily_loss_limit"
+        assert ad1_re.open_positions() == []
+
+        snap_flat = eng1_re.snapshot_sync(market=mkt_flat)
+        assert snap_flat.daily_loss_limit_triggered is True
+        dec_blocked, app_blocked = _make_approved_demo_pair(
+            decision_id="dec-d2-blocked-after-loss",
+            snapshot_id=snap_flat.snapshot_id,
+            now=t1[0],
+            side="buy",
+            units=1000,
+            weight_abs="0.10",
+        )
+        assess_blocked = asyncio.run(
+            risk_engine.assess(dec_blocked, snap_flat, mkt_flat, prior_theses=(prior_t1,))
+        )
+        assert assess_blocked.outcome == "reject"
+        assert "daily_loss_limit_exceeded" in assess_blocked.reasons
+        # Engine-level defense-in-depth also rejects even if called directly
+        assert eng1_re.record_sync(dec_blocked, app_blocked).status == "rejected"
+    finally:
+        ad1_re.close()
+
+    # Part 2: Cold stop across rollover while broker server SL closes position during outage
+    t2 = [datetime(2026, 7, 15, 19, 0, 0, tzinfo=UTC)]
+    b2 = tmp_path / "daily_p2_bridge"
+    db2 = tmp_path / "daily_p2.sqlite"
+    d2 = SimulatedCTraderCliDaemon(
+        b2,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        initial_balance_usd=Decimal("200.00"),
+        bid=Decimal("1.12400"),
+        ask=Decimal("1.12402"),
+        clock=lambda: t2[0],
+    )
+    d2.start()
+    ad2 = CTraderCliDemoBrokerAdapter(
+        state_db_path=db2,
+        bridge_dir=b2,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t2[0],
+    )
+    eng2 = CTraderCliDemoExecutionEngine(
+        adapter=ad2,
+        risk_policy=risk_pol,
+        exit_policy=ProtectiveExitPolicy.pepperstone_razor_200(),
+        clock=lambda: t2[0],
+    )
+    try:
+        mkt2_open = _fresh_market(t2[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        snap2_0 = eng2.snapshot_sync(market=mkt2_open)
+        dec2, app2 = _make_approved_demo_pair(
+            decision_id="dec-p2-open",
+            snapshot_id=snap2_0.snapshot_id,
+            now=t2[0],
+            side="buy",
+            units=3000,
+            weight_abs="0.30",
+        )
+        ad2.submit_market_order(
+            decision=dec2,
+            assessment=app2,
+            side="buy",
+            volume_units=3000,
+            client_intent_id="mkt-p2-open",
+            stop_loss_pips=35.0,  # -$10.50 SL loss on 3000 EUR (> $8.00 daily limit!)
+        )
+        d2.step()
+        t2[0] += timedelta(seconds=1)
+        eng2.step_broker_events_and_protection(
+            _fresh_market(t2[0], bid=Decimal("1.12400"), ask=Decimal("1.12402"))
+        )
+        pos2_id = int(ad2.open_positions()[0]["broker_position_id"])
+    finally:
+        ad2.close()
+
+    # Engine is completely offline across 17:00 EDT rollover; at 21:10 UTC (Day 2), broker SL fires!
+    t2[0] = datetime(2026, 7, 15, 21, 10, 0, tzinfo=UTC)
+    d2.trigger_broker_stop_loss_close(pos2_id)
+
+    # Engine starts up at 21:15 UTC (Day 2): broker is ALREADY flat at ~$189.30!
+    t2[0] = datetime(2026, 7, 15, 21, 15, 0, tzinfo=UTC)
+    d2.emit_reconcile_snapshot("day2_cold_start_after_overnight_sl")
+    ad2_re = CTraderCliDemoBrokerAdapter(
+        state_db_path=db2,
+        bridge_dir=b2,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t2[0],
+    )
+    eng2_re = CTraderCliDemoExecutionEngine(
+        adapter=ad2_re,
+        risk_policy=risk_pol,
+        exit_policy=ProtectiveExitPolicy.pepperstone_razor_200(),
+        clock=lambda: t2[0],
+    )
+    try:
+        mkt2_day2 = _fresh_market(t2[0], bid=Decimal("1.12050"), ask=Decimal("1.12052"))
+        snap2_day2 = eng2_re.snapshot_sync(market=mkt2_day2)
+        assert snap2_day2.daily_baseline_valid is True
+        assert snap2_day2.daily_baseline_reason == "confirmed_carried_position_conservative"
+        assert snap2_day2.daily_baseline_equity_usd == Decimal("200.00")
+        assert snap2_day2.daily_pnl_usd < Decimal("-10.00")
+        assert snap2_day2.daily_loss_limit_triggered is True
+    finally:
+        ad2_re.close()
+
+
+def test_real_ctrader_automate_usd_per_one_lot_zero_spread_quote_accepted() -> None:
+    """Real Spotware cTrader.Automate 1.0.21 on Pepperstone Razor Demo emits
+    `commission="3", commission_type="UsdPerOneLot"` alongside 0.0-pip raw ECN quotes."""
+    from eventlens.quotes import QuoteQualityPolicy, validate_market_quote
+    from eventlens.trading.execution import ShadowCostModel
+
+    ts = datetime(2026, 11, 11, 12, 7, 35, tzinfo=UTC)
+    q_lot = Quote(
+        instrument="EUR/USD",
+        source_at=ts,
+        bridge_at=ts,
+        received_at=ts,
+        available_at=ts,
+        source_provider="ctrader_algo",
+        basis="live_poll",
+        bid=Decimal("1.11352"),
+        ask=Decimal("1.11352"),
+        commission=Decimal("3"),
+        commission_type="UsdPerOneLot",
+    )
+    assert q_lot.has_verified_commission is True
+    val = validate_market_quote(
+        MarketSnapshot(snapshot_id="mkt-lot", as_of=ts, quotes=(q_lot,)),
+        as_of=ts,
+        policy=QuoteQualityPolicy(allow_commission_bearing_zero_spread=True),
+    )
+    assert val.valid is True
+    cm = ShadowCostModel.pepperstone_razor()
+    fee_floor, src_floor = cm.fee_with_source(Decimal("100000"), Decimal("1.11352"), quote=q_lot)
+    assert src_floor == "broker_metadata_verified_conservative_bps_floor"
+    assert fee_floor == Decimal("3.34")
+    cm_direct = ShadowCostModel(
+        commission_bps=Decimal("0"), allow_commission_bearing_zero_spread=True
+    )
+    fee_lot, src_lot = cm_direct.fee_with_source(Decimal("100000"), Decimal("1.11352"), quote=q_lot)
+    assert src_lot == "broker_metadata_usd_per_lot"
+    assert fee_lot == Decimal("3.00")
+
+
+def test_reconcile_between_close_order_event_and_post_close_snapshot_never_doubles_initial_units(
+    tmp_path: Path,
+) -> None:
+    """Real cloud race regression guard: if Python calls `reconcile()` after `close_position`
+    `order_event` (seq=N) is flushed to `execution-events.jsonl` but milliseconds before the
+    post-close `reconcile_snapshot` (seq=N+1) is flushed, the older pre-close snapshot (seq=N-1)
+    must NEVER reopen the closed position or inflate `initial_volume_units` to `2x`."""
+    t_now = [datetime(2026, 11, 11, 12, 37, 0, tzinfo=UTC)]
+    bridge_dir = tmp_path / "race_bridge"
+    state_db = tmp_path / "race_state.sqlite"
+    daemon = SimulatedCTraderCliDaemon(
+        bridge_dir,
+        account_number=5100201,
+        expected_demo_account_number="5100201",
+        allow_demo_orders=True,
+        initial_balance_usd=Decimal("200.00"),
+        bid=Decimal("1.11350"),
+        ask=Decimal("1.11350"),
+        clock=lambda: t_now[0],
+    )
+    daemon.start()
+    adapter = CTraderCliDemoBrokerAdapter(
+        state_db_path=state_db,
+        bridge_dir=bridge_dir,
+        allow_orders=True,
+        confirm_demo_execution=True,
+        expected_demo_account_number="5100201",
+        clock=lambda: t_now[0],
+    )
+    try:
+        adapter.reconcile()
+        dec, app = _make_approved_demo_pair(
+            decision_id="dec-race-1000",
+            snapshot_id="snap-race",
+            now=t_now[0],
+            side="buy",
+            units=1000,
+            weight_abs="0.10",
+        )
+        adapter.submit_market_order(
+            decision=dec,
+            assessment=app,
+            side="buy",
+            volume_units=1000,
+            client_intent_id="mkt-race-1000",
+            stop_loss_pips=11.0,
+        )
+        daemon.step()
+        adapter.reconcile()
+        pos_id = int(adapter.open_positions()[0]["broker_position_id"])
+
+        t_now[0] += timedelta(seconds=2)
+        daemon.bid = Decimal("1.11348")
+        daemon.ask = Decimal("1.11348")
+        adapter.submit_close_position(
+            broker_position_id=pos_id,
+            decision_id=dec.decision_id,
+            assessment_id=app.assessment_id,
+            protective_reason="demo_smoke_bounded_exit",
+        )
+        daemon.step()
+
+        # Simulate reading right after `close_position` `order_event` before trailing `reconcile_snapshot`
+        ev_path = bridge_dir / "execution-events.jsonl"
+        lines = ev_path.read_text(encoding="utf-8").splitlines(keepends=True)
+        trailing_post_close_snap = lines[-1]
+        assert (
+            '"kind": "reconcile_snapshot"' in trailing_post_close_snap
+            or '"kind":"reconcile_snapshot"' in trailing_post_close_snap
+        )
+        ev_path.write_text("".join(lines[:-1]), encoding="utf-8")
+
+        rec_mid_race = adapter.reconcile()
+        assert adapter.open_positions() == []
+        assert adapter.unpriced_closed_positions() == []
+        assert rec_mid_race.unpriced_closed_position_ids == ()
+
+        # Now trailing post-close `reconcile_snapshot` arrives -> clean=True, flat, zero unpriced units!
+        with ev_path.open("a", encoding="utf-8") as fh:
+            fh.write(trailing_post_close_snap)
+        rec_after = adapter.reconcile()
+        assert rec_after.clean is True
+        assert rec_after.open_positions == ()
+        assert rec_after.unpriced_closed_position_ids == ()
+    finally:
+        adapter.close()

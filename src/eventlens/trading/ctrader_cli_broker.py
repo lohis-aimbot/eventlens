@@ -456,9 +456,17 @@ class CTraderCliDemoBrokerAdapter:
 
                 CREATE TABLE IF NOT EXISTS demo_daily_state (
                     trading_day TEXT PRIMARY KEY,
+                    session_start_utc TEXT,
+                    daily_close_utc TEXT,
+                    session_rollover_utc TEXT,
                     baseline_equity_usd TEXT NOT NULL,
                     min_equity_seen_usd TEXT NOT NULL,
                     loss_limit_triggered INTEGER NOT NULL DEFAULT 0,
+                    triggered_at TEXT,
+                    trigger_reason TEXT,
+                    baseline_valid INTEGER NOT NULL DEFAULT 1,
+                    baseline_reason TEXT NOT NULL DEFAULT 'confirmed_from_demo_broker_snapshot',
+                    provisional_has_prior_ref INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
                 """
@@ -473,6 +481,40 @@ class CTraderCliDemoBrokerAdapter:
                 )
             if "unlock_audit_json" not in meta_cols:
                 self.db.execute("ALTER TABLE demo_adapter_meta ADD COLUMN unlock_audit_json TEXT")
+            if "last_valid_equity_usd" not in meta_cols:
+                self.db.execute(
+                    "ALTER TABLE demo_adapter_meta ADD COLUMN last_valid_equity_usd TEXT"
+                )
+            if "last_valid_open_qty_eur" not in meta_cols:
+                self.db.execute(
+                    "ALTER TABLE demo_adapter_meta ADD COLUMN last_valid_open_qty_eur TEXT NOT NULL DEFAULT '0'"
+                )
+            if "last_valid_trading_day" not in meta_cols:
+                self.db.execute(
+                    "ALTER TABLE demo_adapter_meta ADD COLUMN last_valid_trading_day TEXT"
+                )
+            if "last_valid_at" not in meta_cols:
+                self.db.execute("ALTER TABLE demo_adapter_meta ADD COLUMN last_valid_at TEXT")
+
+            daily_cols = {
+                str(r["name"])
+                for r in self.db.execute("PRAGMA table_info(demo_daily_state)").fetchall()
+            }
+            for col_name, col_def in (
+                ("session_start_utc", "TEXT"),
+                ("daily_close_utc", "TEXT"),
+                ("session_rollover_utc", "TEXT"),
+                ("triggered_at", "TEXT"),
+                ("trigger_reason", "TEXT"),
+                ("baseline_valid", "INTEGER NOT NULL DEFAULT 1"),
+                (
+                    "baseline_reason",
+                    "TEXT NOT NULL DEFAULT 'confirmed_from_demo_broker_snapshot'",
+                ),
+                ("provisional_has_prior_ref", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if col_name not in daily_cols:
+                    self.db.execute(f"ALTER TABLE demo_daily_state ADD COLUMN {col_name} {col_def}")
 
             intent_cols = {
                 str(r["name"])
@@ -1621,11 +1663,11 @@ class CTraderCliDemoBrokerAdapter:
             int(pos_row["volume_units"]) if current_open_units is None else int(current_open_units),
         )
         priced_u = sum(int(d["volume_units"]) for d in deal_rows)
-        init_u = max(
-            int(pos_row["initial_volume_units"] or 0),
-            open_u + priced_u,
-            int(pos_row["volume_units"] or 0),
-        )
+        recorded_init_u = int(pos_row["initial_volume_units"] or 0)
+        if recorded_init_u > 0:
+            init_u = max(recorded_init_u, open_u, priced_u)
+        else:
+            init_u = max(open_u + priced_u, int(pos_row["volume_units"] or 0))
         closed_total_u = max(0, init_u - open_u)
         unpriced_u = max(0, closed_total_u - priced_u)
         deal_count = len(deal_rows)
@@ -1803,6 +1845,18 @@ class CTraderCliDemoBrokerAdapter:
                     unknown_intent_ids=unknown_ids,
                 )
 
+            snap_sess_id = str(snap_row["bridge_session_id"])
+            snap_seq_num = int(snap_row["event_seq"])
+            max_order_row = self.db.execute(
+                """SELECT COALESCE(MAX(event_seq), 0) AS max_seq
+                FROM demo_broker_events
+                WHERE bridge_session_id=? AND kind='order_event'""",
+                (snap_sess_id,),
+            ).fetchone()
+            snapshot_predates_latest_order_event = (
+                int(max_order_row["max_seq"]) > snap_seq_num if max_order_row is not None else False
+            )
+
             snap = json.loads(snap_row["raw_json"])
             snap_ok, snap_reasons, snap_age = self._validate_snapshot_dict_locked(snap, now=now)
             drift_reasons: list[str] = list(snap_reasons)
@@ -1965,6 +2019,17 @@ class CTraderCliDemoBrokerAdapter:
             for pid, loc in list(local_by_id.items()):
                 if pid in broker_positions:
                     bp = broker_positions[pid]
+                    loc_open_u = max(0, int(loc["volume_units"] or 0))
+                    if snapshot_predates_latest_order_event and loc_open_u < bp.volume_units:
+                        # A newer `order_event` in the same bridge session already closed/reduced `pid`
+                        # after this snapshot was emitted; never reopen or inflate `initial_volume_units`!
+                        self._recompute_position_close_accounting_locked(
+                            pid,
+                            now,
+                            current_open_units=loc_open_u,
+                            closed_by_intent=False,
+                        )
+                        continue
                     acc = self._recompute_position_close_accounting_locked(
                         pid,
                         now,
@@ -2233,51 +2298,241 @@ class CTraderCliDemoExecutionEngine:
         return f"demo-port-{digest}"
 
     def _update_daily_state(
-        self, now: datetime, equity: Decimal, *, valid_snapshot_and_quote: bool
+        self,
+        now: datetime,
+        equity: Decimal,
+        *,
+        signed_qty: Decimal,
+        has_unpriced_closes: bool,
+        valid_snapshot_and_quote: bool,
+        invalid_reason: str,
     ) -> tuple[Decimal, Decimal, bool, bool, str]:
-        day_id, _, _, _ = self.exit_policy.effective_window(now)
+        day_id, start_utc, close_utc, rollover_utc = self.exit_policy.effective_window(now)
+        limit = min(self.exit_policy.max_daily_loss_usd, self.risk_policy.max_daily_loss_usd)
         with self.adapter._lock, self.adapter.db:
+            meta = self.adapter.db.execute("SELECT * FROM demo_adapter_meta WHERE id=1").fetchone()
+            last_valid_eq: Decimal | None = (
+                Decimal(str(meta["last_valid_equity_usd"]))
+                if meta is not None and meta["last_valid_equity_usd"] is not None
+                else None
+            )
+            last_valid_qty = (
+                Decimal(str(meta["last_valid_open_qty_eur"] or "0"))
+                if meta is not None
+                else Decimal("0")
+            )
+            last_valid_at_dt = _parse_iso_utc(meta["last_valid_at"]) if meta is not None else None
+
+            prior_row = self.adapter.db.execute(
+                "SELECT * FROM demo_daily_state WHERE trading_day < ? ORDER BY trading_day DESC LIMIT 1",
+                (day_id,),
+            ).fetchone()
+            prior_baseline: Decimal | None = (
+                Decimal(str(prior_row["baseline_equity_usd"])) if prior_row is not None else None
+            )
+
+            deal_rows_recent = self.adapter.db.execute(
+                "SELECT closing_time, net_profit_usd FROM demo_broker_close_deals"
+            ).fetchall()
+            has_deal_since_rollover_or_last_valid = False
+            today_realized_pnl = Decimal("0.00")
+            for dr in deal_rows_recent:
+                ct = _parse_iso_utc(dr["closing_time"])
+                if ct is None:
+                    continue
+                if ct >= start_utc:
+                    has_deal_since_rollover_or_last_valid = True
+                    today_realized_pnl += Decimal(str(dr["net_profit_usd"]))
+                elif last_valid_at_dt is not None and ct > last_valid_at_dt:
+                    has_deal_since_rollover_or_last_valid = True
+
+            had_carried_or_outage_risk = (
+                signed_qty != Decimal("0")
+                or last_valid_qty != Decimal("0")
+                or has_unpriced_closes
+                or has_deal_since_rollover_or_last_valid
+            )
+            if had_carried_or_outage_risk:
+                prior_candidates = [x for x in (last_valid_eq, prior_baseline) if x is not None]
+                if prior_candidates:
+                    carried_ref: Decimal | None = max(prior_candidates)
+                elif today_realized_pnl < Decimal("0"):
+                    carried_ref = (equity - today_realized_pnl).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                else:
+                    carried_ref = None
+            else:
+                carried_ref = last_valid_eq
+
             row = self.adapter.db.execute(
                 "SELECT * FROM demo_daily_state WHERE trading_day=?",
                 (day_id,),
             ).fetchone()
-            if not valid_snapshot_and_quote:
-                base = (
-                    Decimal(str(row["baseline_equity_usd"]))
-                    if row is not None
-                    else self.fallback_initial_equity_usd
-                )
-                trig = bool(row["loss_limit_triggered"]) if row is not None else False
-                return (
-                    base,
-                    Decimal("0.00"),
-                    trig,
-                    False,
-                    "missing_or_stale_demo_reconcile_snapshot",
-                )
-
             if row is None:
+                if not valid_snapshot_and_quote:
+                    has_prior_ref = 1 if carried_ref is not None else 0
+                    provisional = (
+                        carried_ref if carried_ref is not None else self.fallback_initial_equity_usd
+                    )
+                    unconf_reason = (
+                        "unconfirmed_open_position_without_valid_quote"
+                        if (signed_qty != Decimal("0") or last_valid_qty != Decimal("0"))
+                        else invalid_reason
+                    )
+                    self.adapter.db.execute(
+                        """INSERT INTO demo_daily_state
+                        (trading_day, session_start_utc, daily_close_utc, session_rollover_utc,
+                         baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered,
+                         triggered_at, trigger_reason, baseline_valid, baseline_reason,
+                         provisional_has_prior_ref, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, 0, NULL, NULL, 0, ?, ?, ?)""",
+                        (
+                            day_id,
+                            start_utc.isoformat(),
+                            close_utc.isoformat(),
+                            rollover_utc.isoformat(),
+                            str(provisional),
+                            str(provisional),
+                            unconf_reason,
+                            has_prior_ref,
+                            now.isoformat(),
+                        ),
+                    )
+                    return provisional, Decimal("0.00"), False, False, unconf_reason
+
+                if carried_ref is not None:
+                    confirmed_base = max(carried_ref, equity)
+                    if had_carried_or_outage_risk and carried_ref > equity:
+                        base_reason = "confirmed_carried_position_conservative"
+                    elif carried_ref > equity:
+                        base_reason = "confirmed_after_outage_conservative"
+                    elif signed_qty != Decimal("0"):
+                        base_reason = "confirmed_marked_to_market"
+                    else:
+                        base_reason = "confirmed_flat"
+                else:
+                    confirmed_base = equity
+                    base_reason = (
+                        "confirmed_marked_to_market"
+                        if signed_qty != Decimal("0")
+                        else "confirmed_flat"
+                    )
+                min_seen = min(confirmed_base, equity)
+                daily_pnl = (equity - confirmed_base).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                triggered = daily_pnl <= -limit
+                triggered_at = now.isoformat() if triggered else None
+                trigger_reason = "daily_loss_limit_breached" if triggered else None
                 self.adapter.db.execute(
                     """INSERT INTO demo_daily_state
-                    (trading_day, baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered, updated_at)
-                    VALUES (?, ?, ?, 0, ?)""",
-                    (day_id, str(equity), str(equity), now.isoformat()),
+                    (trading_day, session_start_utc, daily_close_utc, session_rollover_utc,
+                     baseline_equity_usd, min_equity_seen_usd, loss_limit_triggered,
+                     triggered_at, trigger_reason, baseline_valid, baseline_reason,
+                     provisional_has_prior_ref, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?)""",
+                    (
+                        day_id,
+                        start_utc.isoformat(),
+                        close_utc.isoformat(),
+                        rollover_utc.isoformat(),
+                        str(confirmed_base),
+                        str(min_seen),
+                        int(triggered),
+                        triggered_at,
+                        trigger_reason,
+                        base_reason,
+                        now.isoformat(),
+                    ),
                 )
-                return equity, Decimal("0.00"), False, True, "confirmed_from_demo_broker_snapshot"
+                self.adapter.db.execute(
+                    """UPDATE demo_adapter_meta
+                    SET last_valid_equity_usd=?, last_valid_open_qty_eur=?,
+                        last_valid_trading_day=?, last_valid_at=?
+                    WHERE id=1""",
+                    (str(equity), str(signed_qty), day_id, now.isoformat()),
+                )
+                return confirmed_base, daily_pnl, triggered, True, base_reason
 
-            baseline = Decimal(str(row["baseline_equity_usd"]))
-            min_seen = min(Decimal(str(row["min_equity_seen_usd"])), equity)
+            if not valid_snapshot_and_quote:
+                was_valid_existing = bool(row["baseline_valid"])
+                has_ref_existing = bool(row["provisional_has_prior_ref"])
+                existing_base = Decimal(str(row["baseline_equity_usd"]))
+                if not was_valid_existing and carried_ref is not None:
+                    base_out = max(existing_base, carried_ref) if has_ref_existing else carried_ref
+                    if base_out != existing_base or not has_ref_existing:
+                        self.adapter.db.execute(
+                            """UPDATE demo_daily_state
+                            SET baseline_equity_usd=?, min_equity_seen_usd=?,
+                                provisional_has_prior_ref=1, updated_at=?
+                            WHERE trading_day=?""",
+                            (str(base_out), str(base_out), now.isoformat(), day_id),
+                        )
+                else:
+                    base_out = existing_base
+                trig = bool(row["loss_limit_triggered"])
+                reason_out = (
+                    str(row["baseline_reason"]) if not was_valid_existing else invalid_reason
+                )
+                return base_out, Decimal("0.00"), trig, False, reason_out
+
+            was_valid = bool(row["baseline_valid"])
+            has_ref = bool(row["provisional_has_prior_ref"])
+            if not was_valid:
+                candidates_rec: list[Decimal] = [equity]
+                if has_ref:
+                    candidates_rec.append(Decimal(str(row["baseline_equity_usd"])))
+                if carried_ref is not None:
+                    candidates_rec.append(carried_ref)
+                baseline = max(candidates_rec)
+                base_reason = (
+                    "confirmed_after_quote_recovery_conservative"
+                    if (has_ref or carried_ref is not None)
+                    else (
+                        "confirmed_marked_to_market"
+                        if signed_qty != Decimal("0")
+                        else "confirmed_flat"
+                    )
+                )
+            else:
+                baseline = Decimal(str(row["baseline_equity_usd"]))
+                base_reason = str(row["baseline_reason"])
+
+            min_seen = min(Decimal(str(row["min_equity_seen_usd"])), baseline, equity)
             daily_pnl = (equity - baseline).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            triggered = bool(row["loss_limit_triggered"]) or (
-                daily_pnl <= -self.exit_policy.max_daily_loss_usd
-            )
+            triggered = bool(row["loss_limit_triggered"])
+            triggered_at = row["triggered_at"]
+            trigger_reason = row["trigger_reason"]
+            if not triggered and daily_pnl <= -limit:
+                triggered = True
+                triggered_at = now.isoformat()
+                trigger_reason = "daily_loss_limit_breached"
             self.adapter.db.execute(
                 """UPDATE demo_daily_state
-                SET min_equity_seen_usd=?, loss_limit_triggered=?, updated_at=?
+                SET baseline_equity_usd=?, min_equity_seen_usd=?, loss_limit_triggered=?,
+                    triggered_at=?, trigger_reason=?, baseline_valid=1, baseline_reason=?,
+                    provisional_has_prior_ref=1, updated_at=?
                 WHERE trading_day=?""",
-                (str(min_seen), int(triggered), now.isoformat(), day_id),
+                (
+                    str(baseline),
+                    str(min_seen),
+                    int(triggered),
+                    triggered_at,
+                    trigger_reason,
+                    base_reason,
+                    now.isoformat(),
+                    day_id,
+                ),
             )
-            return baseline, daily_pnl, triggered, True, "confirmed_from_demo_broker_snapshot"
+            self.adapter.db.execute(
+                """UPDATE demo_adapter_meta
+                SET last_valid_equity_usd=?, last_valid_open_qty_eur=?,
+                    last_valid_trading_day=?, last_valid_at=?
+                WHERE id=1""",
+                (str(equity), str(signed_qty), day_id, now.isoformat()),
+            )
+            return baseline, daily_pnl, triggered, True, base_reason
 
     async def snapshot(self, *, market: MarketSnapshot | None = None) -> PortfolioSnapshot:
         return await asyncio.to_thread(self.snapshot_sync, market=market)
@@ -2294,14 +2549,27 @@ class CTraderCliDemoExecutionEngine:
         sides = {str(p["side"]) for p in open_pos}
         has_hedged_conflict = len(sides) > 1
         signed_qty = sum(
-            Decimal(int(p["volume_units"]))
-            if str(p["side"]) == "buy"
-            else -Decimal(int(p["volume_units"]))
-            for p in open_pos
+            (
+                Decimal(int(p["volume_units"]))
+                if str(p["side"]) == "buy"
+                else -Decimal(int(p["volume_units"]))
+                for p in open_pos
+            ),
+            Decimal("0"),
         )
 
+        acct_identity_ok = (
+            rec.account_number is not None
+            and rec.account_number > 0
+            and (
+                self.adapter.expected_demo_account_number is None
+                or rec.account_number == self.adapter.expected_demo_account_number
+            )
+            and rec.account_currency == self.adapter.expected_account_currency
+        )
         snap_valid = (
-            rec.broker_balance_usd is not None
+            acct_identity_ok
+            and rec.broker_balance_usd is not None
             and rec.broker_equity_usd is not None
             and rec.snapshot_age_seconds is not None
             and -5.0 <= rec.snapshot_age_seconds <= self.adapter.max_snapshot_age_seconds
@@ -2348,16 +2616,25 @@ class CTraderCliDemoExecutionEngine:
             valuation_valid = False
             valuation_reason = "position_closed_unpriced_awaiting_broker_history"
 
-        equity = max(
-            Decimal("0.01"),
-            balance_usd + unrealized if valuation_valid else (rec.broker_equity_usd or balance_usd),
+        invalid_base_reason = (
+            valuation_reason if not valuation_valid else "missing_or_stale_demo_reconcile_snapshot"
         )
+        if valuation_valid and snap_valid:
+            equity = max(Decimal("0.01"), balance_usd + unrealized)
+        elif snap_valid and rec.broker_equity_usd is not None and signed_qty == Decimal("0"):
+            equity = max(Decimal("0.01"), rec.broker_equity_usd)
+        else:
+            equity = max(Decimal("0.01"), balance_usd)
+
         baseline, daily_pnl, daily_trig, base_valid, base_reason = self._update_daily_state(
             now,
             equity,
+            signed_qty=signed_qty,
+            has_unpriced_closes=bool(unpriced_rows),
             valid_snapshot_and_quote=snap_valid and valuation_valid,
+            invalid_reason=invalid_base_reason,
         )
-        if rec.blocks_new_risk:
+        if rec.blocks_new_risk and base_valid:
             base_valid = False
             base_reason = (
                 f"demo_reconcile_blocks_new_risk:{','.join(rec.drift_reasons) or 'halted'}"
@@ -2669,7 +2946,33 @@ class CTraderCliDemoExecutionEngine:
                     reason=f"demo_partial_close_rejected:{exc}",
                 )
 
-        # Case 4: Risk-increasing open or scale-in -> submit_market_order
+        # Case 4: Risk-increasing open or scale-in -> enforce confirmed daily baseline & daily loss cap, then submit_market_order
+        cur_snap = self.snapshot_sync()
+        if not cur_snap.daily_baseline_valid:
+            return ExecutionReceipt(
+                execution_id=f"rej-{decision.decision_id}",
+                decision_id=decision.decision_id,
+                target_id=decision.target.target_id,
+                assessment_id=assessment.assessment_id,
+                mode="ctrader_cli_demo",
+                status="rejected",
+                recorded_at=now,
+                reason=f"daily_baseline_unconfirmed:{cur_snap.daily_baseline_reason}",
+            )
+        eff_daily_limit = min(
+            self.exit_policy.max_daily_loss_usd, self.risk_policy.max_daily_loss_usd
+        )
+        if cur_snap.daily_loss_limit_triggered or cur_snap.daily_pnl_usd <= -eff_daily_limit:
+            return ExecutionReceipt(
+                execution_id=f"rej-{decision.decision_id}",
+                decision_id=decision.decision_id,
+                target_id=decision.target.target_id,
+                assessment_id=assessment.assessment_id,
+                mode="ctrader_cli_demo",
+                status="rejected",
+                recorded_at=now,
+                reason="daily_loss_limit_exceeded",
+            )
         delta_units = abs(desired_signed) - abs(curr_signed)
         side: Literal["buy", "sell"] = "buy" if desired_signed > 0 else "sell"
         try:
@@ -3081,6 +3384,8 @@ class CTraderCliDemoExecutionEngine:
             policy=self.exit_policy.quote_quality_policy("EUR/USD"),
         )
         quote = qc.quote if qc.valid else None
+        snap_prot = self.snapshot_sync(market=market) if market is not None else None
+        daily_loss_exit = bool(snap_prot is not None and snap_prot.daily_loss_limit_triggered)
         in_close_cutoff = is_in_daily_close_window(
             now,
             tz_name=self.exit_policy.trading_timezone,
@@ -3103,6 +3408,8 @@ class CTraderCliDemoExecutionEngine:
                 trig_reason = self._stop_exit_reason
             elif stop_reason is not None and "close" in stop_reason:
                 trig_reason = stop_reason
+            elif daily_loss_exit:
+                trig_reason = "protective_daily_loss_limit"
             elif in_close_cutoff:
                 trig_reason = "daily_close_cutoff_protective_exit"
             elif opened_dt is not None and (now - opened_dt).total_seconds() >= float(
@@ -3178,6 +3485,9 @@ class CTraderCliDemoExecutionEngine:
             intent_rows = self.adapter.db.execute(
                 "SELECT * FROM demo_broker_intents ORDER BY rowid ASC"
             ).fetchall()
+            daily_rows = self.adapter.db.execute(
+                "SELECT * FROM demo_daily_state ORDER BY trading_day ASC"
+            ).fetchall()
         fills = [json.loads(r["fill_json"]) for r in fill_rows]
         alerts: list[str] = []
         if self.adapter.halted_reason:
@@ -3226,6 +3536,7 @@ class CTraderCliDemoExecutionEngine:
             "open_broker_positions": self.adapter.open_positions(),
             "unpriced_closed_positions": unpriced_positions,
             "closed_deals": closed_deals,
+            "daily_states": [dict(r) for r in daily_rows],
             "intents": [dict(r) for r in intent_rows],
             "fills": fills,
             "faults": [],
@@ -3525,12 +3836,12 @@ class SimulatedCTraderCliDaemon:
         broker_position_id: int = 44001,
         side: Literal["buy", "sell"] = "sell",
         volume_units: int = 5000,
-        entry_price: str = "1.11000",
-        closing_price: str = "1.10800",
-        gross_profit_usd: str = "10.00",
-        net_profit_usd: str = "9.80",
-        commissions_usd: str = "-0.20",
-        swap_usd: str = "0.00",
+        entry_price: str | Decimal = "1.11000",
+        closing_price: str | Decimal = "1.10800",
+        gross_profit_usd: str | Decimal = "10.00",
+        net_profit_usd: str | Decimal = "9.80",
+        commissions_usd: str | Decimal = "-0.20",
+        swap_usd: str | Decimal = "0.00",
         label: str = "manual-legacy-trade",
     ) -> None:
         now_iso = _utc_now(self.clock).isoformat()
@@ -3541,12 +3852,12 @@ class SimulatedCTraderCliDaemon:
                 "symbol": "EURUSD",
                 "position_side": side,
                 "volume_units": volume_units,
-                "entry_price": entry_price,
-                "closing_price": closing_price,
-                "gross_profit_usd": gross_profit_usd,
-                "net_profit_usd": net_profit_usd,
-                "commissions_usd": commissions_usd,
-                "swap_usd": swap_usd,
+                "entry_price": str(entry_price),
+                "closing_price": str(closing_price),
+                "gross_profit_usd": str(gross_profit_usd),
+                "net_profit_usd": str(net_profit_usd),
+                "commissions_usd": str(commissions_usd),
+                "swap_usd": str(swap_usd),
                 "label": label,
                 "entry_time": now_iso,
                 "closing_time": now_iso,

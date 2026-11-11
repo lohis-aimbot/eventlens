@@ -199,7 +199,7 @@ class PortfolioSnapshot(Contract):
 TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS: frozenset[str] = frozenset(
     {"ctrader_algo", "ctrader_openapi"}
 )
-TRUSTED_COMMISSION_TYPES: frozenset[str] = frozenset({"UsdPerMillionUsdVolume"})
+TRUSTED_COMMISSION_TYPES: frozenset[str] = frozenset({"UsdPerMillionUsdVolume", "UsdPerOneLot"})
 
 
 QuoteBasis = Literal["live_poll", "synthetic_fixture", "historical_bar_replay"]

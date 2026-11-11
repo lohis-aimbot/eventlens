@@ -15,6 +15,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from .contracts import (
+    TRUSTED_COMMISSION_TYPES,
     TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS,
     Contract,
     Identifier,
@@ -610,7 +611,7 @@ def align_news(
         and quote.provider in TRUSTED_COMMISSION_ZERO_SPREAD_PROVIDERS
         and quote.commission is not None
         and quote.commission > Decimal("0")
-        and quote.commission_type == "UsdPerMillionUsdVolume"
+        and quote.commission_type in TRUSTED_COMMISSION_TYPES
     )
     status = (
         "missing_event"
@@ -777,7 +778,10 @@ class QuoteQualityPolicy(Contract):
         "ctrader_algo",
         "ctrader_openapi",
     )
-    trusted_commission_types: tuple[Identifier, ...] = ("UsdPerMillionUsdVolume",)
+    trusted_commission_types: tuple[Identifier, ...] = (
+        "UsdPerMillionUsdVolume",
+        "UsdPerOneLot",
+    )
     require_verified_provenance: bool = False
 
 

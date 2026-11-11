@@ -1,30 +1,31 @@
 #!/usr/bin/env bash
 # Build EventLensCliBridge.algo (`<TargetFramework>net6.0</TargetFramework>`, as required by
 # Spotware `cTrader.Automate 1.0.21` packager which rejects `net8.0` with CT0004) inside
-# Microsoft's official .NET 8 SDK image (`mcr.microsoft.com/dotnet/sdk:8.0`, linux/amd64)
-# as a non-root UID:GID using dedicated DOTNET_CLI_HOME / NUGET_PACKAGES / XDG_* directories
-# under /tmp/build-work (without redefining HOME) and AlgoPublish=false, followed by an
-# air-gapped (`--network none`) `ctrader-console metadata` inspection of the compiled `.algo`.
+# Microsoft's official .NET 8 SDK image (`SDK 8.0.428`, pinned by overridable SHA-256 digest,
+# linux/amd64) using dedicated DOTNET_CLI_HOME / NUGET_PACKAGES / XDG_* directories under
+# /tmp/build-work (without redefining HOME) and AlgoPublish=false, followed by an air-gapped
+# (`--network none`) `ctrader-console metadata` inspection of the compiled `.algo`.
+#
+# Build UID note (verified on Ubuntu 24.04 GCP VM, see docs/research/2026-11-11-cloud-preflight-audit.md):
+#   - Deriving an arbitrary unmapped host UID (such as `eventlens`) fails before compilation during
+#     NuGet migration mutex initialization; arbitrary non-root build UID support is NOT accepted.
+#   - `BUILD_UID_GID` therefore defaults to the cloud-verified `0:0` inside the ephemeral `/src:ro`
+#     SDK container and chowns exported host artifacts in `${ALGO_OUT_DIR}` to `eventlens:eventlens`.
+#   - Air-gapped `metadata` check defaults `CTRADER_METADATA_USER` to `1654:1654` (`app` inside
+#     `ctrader-console`); this offline check does NOT prove authenticated non-root broker runtime support.
 #
 # NOTE: Not executed locally on the macOS audit host; run on the Ubuntu 24.04 x86_64 VM.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/eventlens}"
 ALGO_OUT_DIR="${ALGO_OUT_DIR:-/var/lib/eventlens/algo}"
-DOTNET_SDK_IMAGE="${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk:8.0}"
-CTRADER_CONSOLE_IMAGE="${CTRADER_CONSOLE_IMAGE:-ghcr.io/spotware/ctrader-console:latest}"
+DOTNET_SDK_IMAGE="${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk@sha256:1b955f179b02df4f0eb5fadedaa898cbe44d620a64aab52eec72c8e91d1355b5}"
+CTRADER_CONSOLE_IMAGE="${CTRADER_CONSOLE_IMAGE:-ghcr.io/spotware/ctrader-console@sha256:6a339e15ee895de270be4a4e293fdb3f2fcdbecfbbace460105703125742e5ad}"
 VERIFY_ALGO_METADATA="${VERIFY_ALGO_METADATA:-1}"
+RUN_UID_GID="${BUILD_UID_GID:-0:0}"
+CTRADER_METADATA_USER="${CTRADER_METADATA_USER-1654:1654}"
 
 mkdir -p "${ALGO_OUT_DIR}"
-
-if [[ -n "${BUILD_UID_GID:-}" ]]; then
-  RUN_UID_GID="${BUILD_UID_GID}"
-elif [[ "${EUID}" -eq 0 ]] && id -u eventlens >/dev/null 2>&1; then
-  chown eventlens:eventlens "${ALGO_OUT_DIR}"
-  RUN_UID_GID="$(id -u eventlens):$(id -g eventlens)"
-else
-  RUN_UID_GID="$(id -u):$(id -g)"
-fi
 
 docker run --rm \
   --platform linux/amd64 \

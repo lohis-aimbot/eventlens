@@ -121,6 +121,7 @@ class ShadowCostModel(Contract):
         Decimal,
         Literal[
             "broker_metadata_usd_per_million",
+            "broker_metadata_usd_per_lot",
             "broker_metadata_verified_conservative_bps_floor",
             "unverified_model_commission_bps",
         ],
@@ -132,19 +133,27 @@ class ShadowCostModel(Contract):
             quote is not None and quote.has_verified_commission and quote.commission is not None
         )
         if has_broker_meta and quote is not None and quote.commission is not None:
-            broker_fee = notional_usd * quote.commission / Decimal("1000000")
+            if quote.commission_type == "UsdPerOneLot":
+                broker_fee = (abs(units) / Decimal("100000")) * quote.commission
+            else:
+                broker_fee = notional_usd * quote.commission / Decimal("1000000")
         fee = (max(bps_fee, broker_fee) + self.fixed_fee_usd).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
         source: Literal[
             "broker_metadata_usd_per_million",
+            "broker_metadata_usd_per_lot",
             "broker_metadata_verified_conservative_bps_floor",
             "unverified_model_commission_bps",
         ]
         if not has_broker_meta:
             source = "unverified_model_commission_bps"
         elif broker_fee >= bps_fee:
-            source = "broker_metadata_usd_per_million"
+            source = (
+                "broker_metadata_usd_per_lot"
+                if quote is not None and quote.commission_type == "UsdPerOneLot"
+                else "broker_metadata_usd_per_million"
+            )
         else:
             source = "broker_metadata_verified_conservative_bps_floor"
         return fee, source
@@ -276,6 +285,7 @@ class ShadowFill(Contract):
     commission_usd: Decimal = Field(ge=0)
     commission_source: Literal[
         "broker_metadata_usd_per_million",
+        "broker_metadata_usd_per_lot",
         "broker_metadata_verified_conservative_bps_floor",
         "unverified_model_commission_bps",
     ] = "unverified_model_commission_bps"

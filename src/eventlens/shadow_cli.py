@@ -1301,16 +1301,23 @@ async def _run_demo_smoke(
         final_rec = adapter.reconcile()
         while loop.time() < close_deadline:
             final_rec = adapter.reconcile()
-            if not adapter.open_positions() and not final_rec.open_positions:
+            if (
+                not adapter.open_positions()
+                and not final_rec.open_positions
+                and not final_rec.unpriced_closed_position_ids
+                and final_rec.clean
+            ):
                 break
             await asyncio.sleep(0.05)
 
+        engine.step_broker_events_and_protection(market)
         close_intent = adapter.get_intent(close_cid)
+        pos_deals = adapter.closed_deals(broker_position_id=pos_id)
         flat_after = not bool(adapter.open_positions()) and not bool(final_rec.open_positions)
         return {
             "scope": "ctrader_cli_demo_smoke",
             "execution_authorized": True,
-            "passed": flat_after and final_rec.clean,
+            "passed": flat_after and final_rec.clean and bool(pos_deals),
             "decision_id": decision.decision_id,
             "assessment_id": assessment.assessment_id,
             "approved_quantity_eur": str(assessment.approved_quantity_eur),
@@ -1320,6 +1327,7 @@ async def _run_demo_smoke(
             "entry_fill_price": confirmed_pos["entry_price"],
             "sl_confirmed": bool(confirmed_pos["sl_confirmed"]),
             "exit_fill_price": close_intent["fill_price"] if close_intent else None,
+            "close_deal_ids": [int(d["closing_deal_id"]) for d in pos_deals],
             "flat_after_close": flat_after,
             "reconciliation_after_close": final_rec.model_dump(mode="json"),
         }
@@ -1358,6 +1366,8 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 "manual_unlock_required": adapter.manual_unlock_required,
                 "reconciliation": rec_res.model_dump(mode="json"),
                 "local_open_positions": adapter.open_positions(),
+                "unpriced_closed_positions": adapter.unpriced_closed_positions(),
+                "closed_deals": adapter.closed_deals(),
             }
         finally:
             adapter.close()
