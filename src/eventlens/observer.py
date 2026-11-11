@@ -4,9 +4,10 @@ import fcntl
 import gzip
 import hashlib
 import json
+import re
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from email.utils import parsedate_to_datetime
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import Field, model_validator
 
-from .contracts import Contract, Identifier, Timestamp
+from .contracts import Contract, Identifier, MacroSemantics, Timestamp
 
 Kind = Literal["news", "calendar"]
 Basis = Literal["live_poll", "synthetic_fixture"]
@@ -28,11 +29,259 @@ class MacroValues(Contract):
 
     actual: str | None = None
     reported_forecast: str | None = None
+    consensus: str | None = None
+    preliminary: str | None = None
     previous: str | None = None
     revised_previous: str | None = None
     unit: str | None = None
     country: str | None = None
     period: str | None = None
+
+
+_FINAL_RELEASE_RE = re.compile(r"(?:终值|\bfinal\b|\brevised\b)", re.IGNORECASE)
+_WIRE_VS_PRELIM_RE = re.compile(
+    r"(?P<actual>-?\d+(?:\.\d+)?%?)\s+vs\.?\s+(?P<prelim>-?\d+(?:\.\d+)?%?)\s+prelim(?:inary)?\b",
+    re.IGNORECASE,
+)
+_WIRE_PRELIM_WAS_RE = re.compile(
+    r"(?:prelim(?:inary)?\s+was|初值[为:：]?)\s*(?P<prelim>-?\d+(?:\.\d+)?%?)",
+    re.IGNORECASE,
+)
+_WIRE_PRIOR_WAS_RE = re.compile(
+    r"(?:prior\s+was|previous\s+was|前值[为:：]?)\s*(?P<prior>-?\d+(?:\.\d+)?%?)",
+    re.IGNORECASE,
+)
+_WIRE_VS_CONSENSUS_RE = re.compile(
+    r"(?P<actual>-?\d+(?:\.\d+)?%?)\s+vs\.?\s+(?P<consensus>-?\d+(?:\.\d+)?%?)\s+(?:expected|exp|consensus|forecast|est)\b",
+    re.IGNORECASE,
+)
+
+
+def _parse_macro_float(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    cleaned = raw.strip().rstrip("%kKmMbB").replace(",", "").strip()
+    if not cleaned:
+        return None
+    try:
+        val = float(cleaned)
+    except ValueError:
+        return None
+    return val if val == val and abs(val) != float("inf") else None
+
+
+def analyze_macro_semantics(
+    title: str,
+    macro: MacroValues | None = None,
+    *,
+    raw_text: str = "",
+    companion_texts: Sequence[str] = (),
+) -> MacroSemantics | None:
+    """Separate actual/consensus/preliminary/previous/revised and detect preliminary/prior conflicts."""
+    combined_text = "\n".join(x for x in (title, raw_text, *companion_texts) if x)
+    vs_prelim_m = _WIRE_VS_PRELIM_RE.search(combined_text)
+    prelim_was_m = _WIRE_PRELIM_WAS_RE.search(combined_text)
+    prior_was_m = _WIRE_PRIOR_WAS_RE.search(combined_text)
+    vs_cons_m = _WIRE_VS_CONSENSUS_RE.search(combined_text)
+
+    wire_actual = (
+        vs_prelim_m.group("actual")
+        if vs_prelim_m is not None
+        else (vs_cons_m.group("actual") if vs_cons_m is not None else None)
+    )
+    wire_prelim = (
+        vs_prelim_m.group("prelim")
+        if vs_prelim_m is not None
+        else (prelim_was_m.group("prelim") if prelim_was_m is not None else None)
+    )
+    wire_prior = prior_was_m.group("prior") if prior_was_m is not None else None
+    wire_consensus = vs_cons_m.group("consensus") if vs_cons_m is not None else None
+
+    if macro is None:
+        if wire_prelim is None and wire_consensus is None and wire_prior is None:
+            return None
+        if wire_prelim is not None and wire_consensus is None:
+            return MacroSemantics(
+                actual=wire_actual,
+                consensus=None,
+                preliminary=wire_prelim,
+                previous=wire_prior,
+                semantics_status="preliminary_as_forecast_or_previous",
+                surprise_status="ambiguous",
+                surprise_direction="unknown",
+                detail="wire compares final print against preliminary reading without independent consensus",
+            )
+        act_f = _parse_macro_float(wire_actual)
+        con_f = _parse_macro_float(wire_consensus)
+        if act_f is not None and con_f is not None:
+            s_dir: Literal["above_consensus", "below_consensus", "inline", "unknown"] = (
+                "above_consensus"
+                if act_f > con_f
+                else ("below_consensus" if act_f < con_f else "inline")
+            )
+            return MacroSemantics(
+                actual=wire_actual,
+                consensus=wire_consensus,
+                preliminary=wire_prelim,
+                previous=wire_prior,
+                semantics_status="clean",
+                surprise_status="confirmed",
+                surprise_direction=s_dir,
+            )
+        return MacroSemantics(
+            actual=wire_actual,
+            consensus=wire_consensus,
+            preliminary=wire_prelim,
+            previous=wire_prior,
+            semantics_status="missing_consensus",
+            surprise_status="unknown",
+            surprise_direction="unknown",
+        )
+
+    actual = macro.actual or wire_actual
+    reported_fcst = macro.reported_forecast
+    previous = macro.previous
+    revised_prev = macro.revised_previous
+    prelim = macro.preliminary or wire_prelim
+    consensus = macro.consensus or wire_consensus
+    is_final = bool(_FINAL_RELEASE_RE.search(f"{title}\n{raw_text}"))
+
+    # Check cross-source conflict between calendar previous/forecast and wire prelim/prior
+    if (
+        wire_prior is not None
+        and previous is not None
+        and _parse_macro_float(wire_prior) != _parse_macro_float(previous)
+    ):
+        return MacroSemantics(
+            actual=actual,
+            consensus=consensus,
+            preliminary=prelim or reported_fcst,
+            previous=previous,
+            revised_previous=revised_prev or wire_prior,
+            reported_forecast=reported_fcst,
+            semantics_status="cross_source_conflict",
+            surprise_status="ambiguous",
+            surprise_direction="unknown",
+            detail=(
+                f"calendar previous={previous}/forecast={reported_fcst} conflicts with "
+                f"wire prelim={wire_prelim}/prior={wire_prior}"
+            ),
+        )
+
+    # Check if a final release conflates preliminary into both reported_forecast and previous
+    if (
+        is_final
+        and reported_fcst is not None
+        and previous is not None
+        and _parse_macro_float(reported_fcst) is not None
+        and _parse_macro_float(reported_fcst) == _parse_macro_float(previous)
+        and macro.consensus is None
+    ):
+        return MacroSemantics(
+            actual=actual,
+            consensus=None,
+            preliminary=prelim or reported_fcst,
+            previous=previous,
+            revised_previous=revised_prev,
+            reported_forecast=reported_fcst,
+            semantics_status="preliminary_as_forecast_or_previous",
+            surprise_status="ambiguous",
+            surprise_direction="unknown",
+            detail=(
+                f"final release has identical reported_forecast={reported_fcst} and "
+                f"previous={previous} (preliminary conflation)"
+            ),
+        )
+
+    if (
+        wire_prelim is not None
+        and reported_fcst is not None
+        and _parse_macro_float(wire_prelim) == _parse_macro_float(reported_fcst)
+        and macro.consensus is None
+    ):
+        return MacroSemantics(
+            actual=actual,
+            consensus=None,
+            preliminary=wire_prelim,
+            previous=wire_prior or previous,
+            revised_previous=revised_prev,
+            reported_forecast=reported_fcst,
+            semantics_status="preliminary_as_forecast_or_previous",
+            surprise_status="ambiguous",
+            surprise_direction="unknown",
+            detail=f"reported_forecast={reported_fcst} matches preliminary={wire_prelim} without verified consensus",
+        )
+
+    if (
+        not is_final
+        and reported_fcst is not None
+        and previous is not None
+        and _parse_macro_float(reported_fcst) is not None
+        and _parse_macro_float(reported_fcst) == _parse_macro_float(previous)
+        and macro.consensus is None
+        and re.search(r"\b(?:prelim(?:inary)?|flash|revised)\b", combined_text, re.IGNORECASE)
+    ):
+        return MacroSemantics(
+            actual=actual,
+            consensus=None,
+            preliminary=prelim or reported_fcst,
+            previous=previous,
+            revised_previous=revised_prev,
+            reported_forecast=reported_fcst,
+            semantics_status="preliminary_equality_needs_verification",
+            surprise_status="ambiguous",
+            surprise_direction="unknown",
+            detail=(
+                f"release mentions prelim/flash/revised while reported_forecast={reported_fcst} "
+                f"equals previous={previous} without explicit consensus"
+            ),
+        )
+
+    eff_consensus = consensus if consensus is not None else reported_fcst
+    if eff_consensus is None:
+        return MacroSemantics(
+            actual=actual,
+            consensus=None,
+            preliminary=prelim,
+            previous=previous,
+            revised_previous=revised_prev,
+            reported_forecast=reported_fcst,
+            semantics_status="missing_consensus",
+            surprise_status="unknown",
+            surprise_direction="unknown",
+        )
+
+    act_val = _parse_macro_float(actual)
+    con_val = _parse_macro_float(eff_consensus)
+    if act_val is None or con_val is None:
+        return MacroSemantics(
+            actual=actual,
+            consensus=eff_consensus,
+            preliminary=prelim,
+            previous=previous,
+            revised_previous=revised_prev,
+            reported_forecast=reported_fcst,
+            semantics_status="clean",
+            surprise_status="unknown",
+            surprise_direction="unknown",
+        )
+
+    direction: Literal["above_consensus", "below_consensus", "inline", "unknown"] = (
+        "above_consensus"
+        if act_val > con_val
+        else ("below_consensus" if act_val < con_val else "inline")
+    )
+    return MacroSemantics(
+        actual=actual,
+        consensus=eff_consensus,
+        preliminary=prelim,
+        previous=previous,
+        revised_previous=revised_prev,
+        reported_forecast=reported_fcst,
+        semantics_status="clean",
+        surprise_status="confirmed",
+        surprise_direction=direction,
+    )
 
 
 class SourceRecord(Contract):
@@ -160,6 +409,7 @@ class StoredRevision(Contract):
     received_at: Timestamp
     recorded_at: Timestamp
     available_at: Timestamp
+    poll_gap_seconds: float | None = Field(default=None, ge=0)
     record: SourceRecord
 
 
@@ -297,6 +547,17 @@ class ObserverStore:
                     "SELECT anchors FROM observer_streams WHERE provider=? AND basis=? AND stream=?",
                     key,
                 ).fetchone()
+                prev_poll = self.db.execute(
+                    """SELECT received_at FROM observer_polls
+                    WHERE provider=? AND basis=? AND stream=?
+                    ORDER BY rowid DESC LIMIT 1""",
+                    key,
+                ).fetchone()
+                poll_gap_seconds: float | None = None
+                if prev_poll is not None and prev_poll["received_at"] is not None:
+                    prev_rx = _parse_iso_utc(prev_poll["received_at"])
+                    if prev_rx is not None:
+                        poll_gap_seconds = max(0.0, (batch.received_at - prev_rx).total_seconds())
                 ids = [item.source_id for item in batch.records]
                 if len(ids) != len(set(ids)):
                     raise ValueError("Duplicate source IDs within a capture")
@@ -359,6 +620,7 @@ class ObserverStore:
                     "rejected": len(batch.rejected),
                     "parse_error": batch.parse_error,
                     "coverage": coverage,
+                    "poll_gap_seconds": poll_gap_seconds,
                     "sample_source_ids": ids[:3],
                     "execution_authorized": False,
                 }
@@ -615,7 +877,13 @@ class ObserverStore:
         with self._lock:
             if as_of is not None and (as_of.tzinfo is None or as_of.utcoffset() is None):
                 raise ValueError("History cutoff requires a timezone")
-            query = """SELECT r.*, MIN(p.available_at) AS available_at
+            query = """SELECT r.*, MIN(p.available_at) AS available_at,
+                    (SELECT p2.result FROM observer_sightings s2
+                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
+                     WHERE p2.provider=r.provider AND p2.basis=r.basis AND p2.kind=r.kind
+                       AND s2.source_id=r.source_id AND s2.revision=r.revision
+                       AND p2.available_at IS NOT NULL
+                     ORDER BY p2.rowid ASC LIMIT 1) AS first_poll_result
                 FROM observer_revisions r JOIN observer_sightings s
                     ON s.source_id=r.source_id AND s.revision=r.revision
                 JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
@@ -630,6 +898,16 @@ class ObserverStore:
                 GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
                 ORDER BY r.revision"""
             rows = self.db.execute(query, params).fetchall()
+
+            def _extract_hist_poll_gap(raw_res: str | None) -> float | None:
+                if not raw_res:
+                    return None
+                try:
+                    val = json.loads(raw_res).get("poll_gap_seconds")
+                    return float(val) if isinstance(val, (int, float)) and val >= 0 else None
+                except (ValueError, TypeError):
+                    return None
+
             records = tuple(
                 StoredRevision(
                     provider=str(row["provider"]),
@@ -638,6 +916,7 @@ class ObserverStore:
                     received_at=row["received_at"],
                     recorded_at=row["recorded_at"],
                     available_at=row["available_at"],
+                    poll_gap_seconds=_extract_hist_poll_gap(row["first_poll_result"]),
                     record=SourceRecord.model_validate_json(row["record"]),
                 )
                 for row in rows
@@ -659,7 +938,13 @@ class ObserverStore:
             if not 1 <= limit <= 1000:
                 raise ValueError("Revision limit must be between 1 and 1000")
             query = """
-                SELECT r.*, MIN(p.available_at) AS available_at
+                SELECT r.*, MIN(p.available_at) AS available_at,
+                    (SELECT p2.result FROM observer_sightings s2
+                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
+                     WHERE p2.provider=r.provider AND p2.basis=r.basis AND p2.kind=r.kind
+                       AND s2.source_id=r.source_id AND s2.revision=r.revision
+                       AND p2.available_at IS NOT NULL
+                     ORDER BY p2.rowid ASC LIMIT 1) AS first_poll_result
                 FROM observer_revisions r
                 JOIN observer_sightings s
                     ON s.source_id=r.source_id AND s.revision=r.revision
@@ -680,6 +965,16 @@ class ObserverStore:
                 ORDER BY available_at ASC, r.provider ASC, r.kind ASC, r.source_id ASC, r.revision ASC
             """
             rows = self.db.execute(query, params).fetchall()
+
+            def _extract_poll_gap(raw_res: str | None) -> float | None:
+                if not raw_res:
+                    return None
+                try:
+                    val = json.loads(raw_res).get("poll_gap_seconds")
+                    return float(val) if isinstance(val, (int, float)) and val >= 0 else None
+                except (ValueError, TypeError):
+                    return None
+
             items = tuple(
                 StoredRevision(
                     provider=str(row["provider"]),
@@ -688,6 +983,7 @@ class ObserverStore:
                     received_at=row["received_at"],
                     recorded_at=row["recorded_at"],
                     available_at=row["available_at"],
+                    poll_gap_seconds=_extract_poll_gap(row["first_poll_result"]),
                     record=SourceRecord.model_validate_json(row["record"]),
                 )
                 for row in rows

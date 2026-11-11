@@ -1,0 +1,18 @@
+[Unit]
+Description=EventLens Headless cTrader CLI Bridge Container (EURUSD Demo)
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/eventlens
+EnvironmentFile=/etc/eventlens/eventlens.env
+ExecStart=/usr/bin/docker compose -f /opt/eventlens/deploy/gcp/docker-compose.ctrader-cli.yml up --no-build --remove-orphans
+ExecStop=/usr/bin/docker compose -f /opt/eventlens/deploy/gcp/docker-compose.ctrader-cli.yml stop -t 30
+TimeoutStopSec=45
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 """Point-in-time quote observations. No account positions, model or order capabilities."""
 
 import fcntl
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -190,6 +191,67 @@ class QuoteStore:
                 yield
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def has_session(self, session_id: str) -> bool:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT 1 FROM quote_sessions WHERE session_id=?", (str(session_id),)
+            ).fetchone()
+            return row is not None
+
+    def last_sequence(self, session_id: str) -> int:
+        with self._lock:
+            row = self.db.execute(
+                "SELECT MAX(sequence) AS max_seq FROM quote_observations WHERE session_id=?",
+                (str(session_id),),
+            ).fetchone()
+            if row is None or row["max_seq"] is None:
+                return 0
+            return int(row["max_seq"])
+
+    def mark_session_superseded(
+        self,
+        session_id: str,
+        superseded_at: datetime,
+        *,
+        reason: str = "superseded_by_new_bridge_start",
+    ) -> None:
+        with self._lock:
+            superseded_at = utc(superseded_at)
+            session = self.db.execute(
+                "SELECT * FROM quote_sessions WHERE session_id=?", (str(session_id),)
+            ).fetchone()
+            if session is None or session["stop"] is not None:
+                return
+            q_cnt = int(
+                self.db.execute(
+                    "SELECT COUNT(*) FROM quote_observations WHERE session_id=?",
+                    (str(session_id),),
+                ).fetchone()[0]
+            )
+            stop_doc = json.dumps(
+                {
+                    "version": 1,
+                    "kind": "stop",
+                    "session_id": str(session_id),
+                    "stopped_at": superseded_at.isoformat(),
+                    "quotes": q_cnt,
+                    "superseded_reason": reason,
+                }
+            )
+            with self.db:
+                self.db.execute(
+                    "UPDATE quote_sessions SET stop=? WHERE session_id=? AND stop IS NULL",
+                    (stop_doc, str(session_id)),
+                )
+                self.db.execute(
+                    "INSERT INTO quote_failures VALUES (?, ?, ?)",
+                    (
+                        superseded_at.isoformat(),
+                        f"session_superseded:{session_id}:{reason}",
+                        stop_doc,
+                    ),
+                )
 
     def start(self, item: BridgeStart, received: datetime, *, basis: Basis) -> None:
         with self._lock:
@@ -616,8 +678,25 @@ def compute_price_trajectory(
             Decimal("0.1"), rounding=ROUND_HALF_UP
         )
 
+    samples_30m = [(ts, mid) for ts, mid in causal if (cutoff_utc - ts).total_seconds() <= 1800.0]
     mids_15m = [mid for ts, mid in causal if (cutoff_utc - ts).total_seconds() <= 900.0]
-    mids_30m = [mid for ts, mid in causal if (cutoff_utc - ts).total_seconds() <= 1800.0]
+    mids_30m = [mid for _, mid in samples_30m]
+    max_gap_30m_s: float | None = None
+    cov_ratio_30m: float | None = None
+    if len(samples_30m) >= 2:
+        max_gap_30m_s = round(
+            max(
+                (samples_30m[i][0] - samples_30m[i - 1][0]).total_seconds()
+                for i in range(1, len(samples_30m))
+            ),
+            3,
+        )
+        span_s = max(0.0, (samples_30m[-1][0] - samples_30m[0][0]).total_seconds())
+        cov_ratio_30m = round(min(1.0, span_s / 1800.0), 4)
+    elif len(samples_30m) == 1:
+        cov_ratio_30m = 0.0
+    latest_ts = causal[-1][0]
+    freshness_ms = max(0, int((cutoff_utc - latest_ts).total_seconds() * 1000))
     return PriceTrajectorySummary(
         instrument=instrument,
         as_of=cutoff_utc,
@@ -631,6 +710,10 @@ def compute_price_trajectory(
         window_30m_high_mid=max(mids_30m) if mids_30m else None,
         window_30m_low_mid=min(mids_30m) if mids_30m else None,
         sample_count_30m=len(mids_30m),
+        max_gap_30m_seconds=max_gap_30m_s,
+        coverage_ratio_30m=cov_ratio_30m,
+        quote_freshness_ms=freshness_ms,
+        evidence_id=f"traj:{instrument}:{cutoff_utc.isoformat()}",
     )
 
 

@@ -111,9 +111,22 @@ def freeze_series(
 ) -> SeriesManifest:
     plan = SeriesPlan.model_validate_json(plan.model_dump_json())
     config = ReplayInferenceConfig.model_validate_json(config.model_dump_json())
+    event_exclude = set(Event.model_fields) - {
+        "event_id",
+        "source",
+        "source_type",
+        "source_reference",
+        "source_timestamp",
+        "received_timestamp",
+        "raw_text",
+        "author",
+    }
+    plan_json = plan.model_dump_json(
+        exclude={"episodes": {"__all__": {"event": event_exclude}}} if event_exclude else None
+    )
     return SeriesManifest(
         run_id=plan.run_id,
-        plan_id=digest(plan.model_dump_json()),
+        plan_id=digest(plan_json),
         protocol_id=DecisionReplayProtocol().protocol_id,
         config=config,
         memory_prompt_version=MEMORY_PROMPT_VERSION,

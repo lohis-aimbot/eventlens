@@ -15,6 +15,7 @@ from pydantic import Field
 from ..contracts import (
     AgentDecision,
     Contract,
+    Event,
     Identifier,
     MarketSnapshot,
     PortfolioSnapshot,
@@ -23,8 +24,11 @@ from ..contracts import (
 )
 from ..quotes import QuoteQualityPolicy, validate_market_quote
 from .portfolio import (
+    ExAnteTradeRiskMetrics,
     ExposureChangeKind,
     classify_exposure_change,
+    compute_ex_ante_trade_risk,
+    quantize_risk_budget_quantity_eur,
     quantize_target_quantity_eur,
 )
 
@@ -124,6 +128,18 @@ class RiskPolicy(Contract):
     rollover_hour: int = Field(default=17, ge=0, le=23)
     rollover_minute: int = Field(default=0, ge=0, le=59)
     kill_switch_active: bool = False
+    block_unverified_decision_evidence: bool = True
+    require_verified_decision_evidence: bool = False
+    block_ambiguous_macro_semantics: bool = True
+    max_macro_schedule_lag_seconds: float | None = Field(default=600.0, gt=0)
+    max_observer_poll_gap_seconds: float | None = Field(default=None, gt=0)
+    max_risk_per_trade_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    ex_ante_stop_loss_pips: Decimal | None = Field(default=None, gt=0)
+    max_margin_utilization_pct: Decimal | None = Field(default=None, gt=0, le=1)
+    estimated_slippage_bps: Decimal = Field(default=Decimal("0.25"), ge=0)
+    estimated_commission_round_trip_per_million_usd: Decimal = Field(default=Decimal("6.0"), ge=0)
+    estimated_fixed_fee_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    cap_quantity_by_risk_budget: bool = False
 
     @classmethod
     def pepperstone_razor_200(
@@ -132,6 +148,10 @@ class RiskPolicy(Contract):
         kill_switch_active: bool = False,
         max_quote_age_ms: int = 2000,
         allow_commission_bearing_zero_spread: bool = True,
+        max_risk_per_trade_pct: Decimal | None = None,
+        ex_ante_stop_loss_pips: Decimal | None = None,
+        max_margin_utilization_pct: Decimal | None = None,
+        cap_quantity_by_risk_budget: bool = False,
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo account standard: 200x leverage, 0.01..100 lots, controlled risk."""
         return cls(
@@ -148,6 +168,63 @@ class RiskPolicy(Contract):
             max_spread_pips=Decimal("2.0"),
             allow_commission_bearing_zero_spread=allow_commission_bearing_zero_spread,
             kill_switch_active=kill_switch_active,
+            max_risk_per_trade_pct=max_risk_per_trade_pct,
+            ex_ante_stop_loss_pips=ex_ante_stop_loss_pips,
+            max_margin_utilization_pct=max_margin_utilization_pct,
+            cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
+        )
+
+    @classmethod
+    def pepperstone_razor_200_guarded(
+        cls,
+        *,
+        kill_switch_active: bool = False,
+        max_quote_age_ms: int = 2000,
+        max_risk_per_trade_pct: Decimal = Decimal("0.02"),
+        ex_ante_stop_loss_pips: Decimal = Decimal("11.0"),
+        max_margin_utilization_pct: Decimal = Decimal("0.25"),
+        cap_quantity_by_risk_budget: bool = True,
+    ) -> "RiskPolicy":
+        """Pepperstone Razor $200 USD Demo profile with explicit q-dependent ex-ante risk-budget sizing."""
+        return cls.pepperstone_razor_200(
+            kill_switch_active=kill_switch_active,
+            max_quote_age_ms=max_quote_age_ms,
+            max_risk_per_trade_pct=max_risk_per_trade_pct,
+            ex_ante_stop_loss_pips=ex_ante_stop_loss_pips,
+            max_margin_utilization_pct=max_margin_utilization_pct,
+            cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
+        )
+
+    def ex_ante_trade_risk(
+        self,
+        *,
+        quantity_eur: Decimal,
+        current_equity: Decimal,
+        mid_price: Decimal,
+        spread_pips: Decimal = Decimal("0"),
+        stop_loss_pips: Decimal | None = None,
+    ) -> ExAnteTradeRiskMetrics:
+        eff_stop = (
+            stop_loss_pips
+            if stop_loss_pips is not None
+            else (self.ex_ante_stop_loss_pips or Decimal("0"))
+        )
+        budget = (
+            current_equity * self.max_risk_per_trade_pct
+            if self.max_risk_per_trade_pct is not None and current_equity > Decimal("0")
+            else None
+        )
+        return compute_ex_ante_trade_risk(
+            quantity_eur=quantity_eur,
+            current_equity=current_equity,
+            mid_price=mid_price,
+            leverage=self.leverage,
+            stop_loss_pips=eff_stop,
+            spread_pips=spread_pips,
+            estimated_slippage_bps=self.estimated_slippage_bps,
+            estimated_commission_round_trip_per_million_usd=self.estimated_commission_round_trip_per_million_usd,
+            fixed_fees_usd=self.estimated_fixed_fee_usd,
+            risk_budget_usd=budget,
         )
 
     def quantize_target_quantity_eur(
@@ -155,8 +232,10 @@ class RiskPolicy(Contract):
         current_equity: Decimal,
         mid_price: Decimal,
         target_weight: Decimal,
+        *,
+        spread_pips: Decimal = Decimal("0"),
     ) -> Decimal:
-        return quantize_target_quantity_eur(
+        base_qty = quantize_target_quantity_eur(
             current_equity,
             mid_price,
             target_weight,
@@ -166,6 +245,33 @@ class RiskPolicy(Contract):
             max_volume_eur=self.max_volume_eur,
             max_position_weight=self.max_position_weight,
         )
+        if (
+            not self.cap_quantity_by_risk_budget
+            or base_qty == Decimal("0")
+            or self.max_risk_per_trade_pct is None
+            or self.ex_ante_stop_loss_pips is None
+        ):
+            return base_qty
+        budget_qty = quantize_risk_budget_quantity_eur(
+            current_equity=current_equity,
+            mid_price=mid_price,
+            risk_budget_usd=current_equity * self.max_risk_per_trade_pct,
+            stop_loss_pips=self.ex_ante_stop_loss_pips,
+            direction_sign=1 if target_weight > Decimal("0") else -1,
+            leverage=self.leverage,
+            volume_step_eur=self.volume_step_eur,
+            min_volume_eur=self.min_volume_eur,
+            max_volume_eur=self.max_volume_eur,
+            max_position_weight=self.max_position_weight,
+            max_margin_utilization_pct=self.max_margin_utilization_pct,
+            spread_pips=spread_pips,
+            estimated_slippage_bps=self.estimated_slippage_bps,
+            estimated_commission_round_trip_per_million_usd=self.estimated_commission_round_trip_per_million_usd,
+            fixed_fees_usd=self.estimated_fixed_fee_usd,
+        )
+        if abs(budget_qty) < abs(base_qty):
+            return budget_qty
+        return base_qty
 
     def classify_exposure_change(
         self,
@@ -217,6 +323,7 @@ class DeterministicHardRiskEngine:
         *,
         prior_theses: tuple[Thesis, ...] = (),
         source_stale_reason: str | None = None,
+        event: Event | None = None,
     ) -> RiskAssessment:
         decision = AgentDecision.model_validate_json(decision.model_dump_json())
         current = PortfolioSnapshot.model_validate_json(current.model_dump_json())
@@ -271,6 +378,7 @@ class DeterministicHardRiskEngine:
         quotes_by_instrument = {q.instrument: q for q in market.quotes}
         increases_risk = False
         has_reversal = False
+        approved_eurusd_qty: Decimal | None = None
 
         for pos in target.positions:
             gross_weight += abs(pos.weight)
@@ -298,19 +406,43 @@ class DeterministicHardRiskEngine:
             if change_kind == "reversal_risk_increasing":
                 has_reversal = True
 
+            if pos.instrument == "EUR/USD" and pos.weight == Decimal("0"):
+                approved_eurusd_qty = Decimal("0")
+
             if (
                 pos.weight != Decimal("0")
                 and mid_price is not None
                 and mid_price > Decimal("0")
                 and current.equity > Decimal("0")
             ):
-                desired_qty = self.policy.quantize_target_quantity_eur(
-                    current.equity, mid_price, pos.weight
+                spread_pips = (
+                    (quote.ask - quote.bid) / EURUSD_PIP
+                    if quote is not None and quote.ask >= quote.bid
+                    else Decimal("0")
                 )
+                desired_qty = self.policy.quantize_target_quantity_eur(
+                    current.equity, mid_price, pos.weight, spread_pips=spread_pips
+                )
+                if pos.instrument == "EUR/USD":
+                    approved_eurusd_qty = desired_qty
                 if abs(desired_qty) < self.policy.min_volume_eur:
                     reasons.append("below_minimum_trade_volume")
                 elif abs(desired_qty) > self.policy.max_volume_eur:
                     reasons.append("exceeds_maximum_trade_volume")
+                elif change_kind in ("risk_increasing", "reversal_risk_increasing"):
+                    ex_ante = self.policy.ex_ante_trade_risk(
+                        quantity_eur=desired_qty,
+                        current_equity=current.equity,
+                        mid_price=mid_price,
+                        spread_pips=spread_pips,
+                    )
+                    if not ex_ante.within_risk_budget:
+                        reasons.append("ex_ante_stop_risk_exceeds_budget")
+                    if (
+                        self.policy.max_margin_utilization_pct is not None
+                        and ex_ante.margin_utilization_pct > self.policy.max_margin_utilization_pct
+                    ):
+                        reasons.append("margin_utilization_exceeds_limit")
 
             if pos.weight == Decimal("0") and current_qty == Decimal("0"):
                 reasons.append("close_target_without_open_position")
@@ -334,6 +466,57 @@ class DeterministicHardRiskEngine:
         # pending protective exits, and daily close cutoff window.
         # Purely risk-reducing actions (CLOSE or partial reduction) remain permitted.
         if increases_risk:
+            if self.policy.block_unverified_decision_evidence:
+                if decision.evidence_verification_status in (
+                    "contradicted_price_direction",
+                    "missing_short_window_coverage",
+                    "unverified_numeric_claim",
+                ):
+                    reasons.append(
+                        f"unverified_decision_evidence:{decision.evidence_verification_status}"
+                    )
+                elif (
+                    self.policy.require_verified_decision_evidence
+                    and decision.evidence_verification_status != "verified"
+                ):
+                    reasons.append(
+                        f"unverified_decision_evidence:{decision.evidence_verification_status}"
+                    )
+            if event is not None and event.source_type != "internal_review":
+                if (
+                    self.policy.block_ambiguous_macro_semantics
+                    and event.macro_semantics is not None
+                    and event.macro_semantics.surprise_status == "ambiguous"
+                ):
+                    reasons.append(
+                        f"ambiguous_macro_semantics:{event.macro_semantics.semantics_status}"
+                    )
+                sched_lag = event.schedule_lag_seconds
+                pub_lag = event.publication_lag_seconds
+                if event.is_delayed_catchup:
+                    reasons.append("delayed_event_catchup_blocks_new_risk")
+                elif (
+                    self.policy.max_macro_schedule_lag_seconds is not None
+                    and sched_lag is not None
+                    and sched_lag > self.policy.max_macro_schedule_lag_seconds
+                ):
+                    reasons.append("delayed_event_catchup_blocks_new_risk")
+                elif (
+                    self.policy.max_observer_poll_gap_seconds is not None
+                    and event.poll_gap_seconds is not None
+                    and event.poll_gap_seconds > self.policy.max_observer_poll_gap_seconds
+                    and (
+                        (
+                            pub_lag is not None
+                            and pub_lag > self.policy.max_observer_poll_gap_seconds
+                        )
+                        or (
+                            sched_lag is not None
+                            and sched_lag > self.policy.max_observer_poll_gap_seconds
+                        )
+                    )
+                ):
+                    reasons.append("delayed_event_catchup_blocks_new_risk")
             if source_stale_reason is not None:
                 reasons.append(f"stale_or_degraded_source_blocks_new_risk:{source_stale_reason}")
             if self.policy.kill_switch_active:
@@ -377,6 +560,7 @@ class DeterministicHardRiskEngine:
             snapshot_id=current.snapshot_id,
             checked_at=checked_at,
             reasons=deduped,
+            approved_quantity_eur=approved_eurusd_qty if len(deduped) == 0 else None,
         )
 
     def _build_assessment(
@@ -387,6 +571,7 @@ class DeterministicHardRiskEngine:
         snapshot_id: str,
         checked_at: datetime,
         reasons: list[str],
+        approved_quantity_eur: Decimal | None = None,
     ) -> RiskAssessment:
         approved = len(reasons) == 0
         return RiskAssessment(
@@ -399,4 +584,5 @@ class DeterministicHardRiskEngine:
             valid_until=checked_at + timedelta(seconds=self.policy.assessment_ttl_seconds),
             outcome="approve" if approved else "reject",
             reasons=("all_hard_risk_checks_passed",) if approved else tuple(reasons),
+            approved_quantity_eur=approved_quantity_eur if approved else None,
         )

@@ -4,9 +4,12 @@ from datetime import datetime
 from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from typing import Literal, Protocol
 
-from ..contracts import PortfolioSnapshot, TargetPortfolio, Thesis
+from pydantic import Field
+
+from ..contracts import Contract, PortfolioSnapshot, TargetPortfolio, Thesis
 
 LOT_UNITS_EUR = Decimal("100000")
+EURUSD_PIP_VALUE_PER_EUR = Decimal("0.0001")
 
 ExposureChangeKind = Literal[
     "no_change",
@@ -14,6 +17,163 @@ ExposureChangeKind = Literal[
     "risk_increasing",
     "reversal_risk_increasing",
 ]
+
+
+class ExAnteTradeRiskMetrics(Contract):
+    """Ex-ante notional, margin, and q-dependent stop/cost risk estimate (never a guaranteed fill cap)."""
+
+    quantity_eur: Decimal
+    notional_usd: Decimal = Field(ge=0)
+    effective_leverage: Decimal = Field(ge=0)
+    margin_used_usd: Decimal = Field(ge=0)
+    margin_utilization_pct: Decimal = Field(ge=0)
+    stop_loss_pips: Decimal = Field(ge=0)
+    stop_distance_loss_usd: Decimal = Field(ge=0)
+    spread_cost_usd: Decimal = Field(ge=0)
+    estimated_slippage_usd: Decimal = Field(ge=0)
+    estimated_commission_usd: Decimal = Field(ge=0)
+    fixed_fees_usd: Decimal = Field(ge=0)
+    ex_ante_total_risk_usd: Decimal = Field(ge=0)
+    risk_budget_usd: Decimal | None = Field(default=None, ge=0)
+    within_risk_budget: bool = True
+    ex_ante_estimate_only: Literal[True] = True
+
+
+def compute_ex_ante_trade_risk(
+    *,
+    quantity_eur: Decimal,
+    current_equity: Decimal,
+    mid_price: Decimal,
+    leverage: Decimal = Decimal("1"),
+    stop_loss_pips: Decimal = Decimal("0"),
+    spread_pips: Decimal = Decimal("0"),
+    estimated_slippage_bps: Decimal = Decimal("0.25"),
+    estimated_commission_round_trip_per_million_usd: Decimal = Decimal("6.0"),
+    fixed_fees_usd: Decimal = Decimal("0"),
+    risk_budget_usd: Decimal | None = None,
+) -> ExAnteTradeRiskMetrics:
+    """Compute q-dependent ex-ante stop-out loss plus spread, slippage, commission, and fixed fees.
+
+    Note: This is strictly an ex-ante estimate under assumed stop execution and cost parameters.
+    Quote outages, liquidity gaps, and stop slippage can cause realized loss to exceed this figure.
+    """
+    abs_q = abs(quantity_eur)
+    notional_usd = abs_q * max(mid_price, Decimal("0"))
+    eff_lev = notional_usd / current_equity if current_equity > Decimal("0") else Decimal("0")
+    margin_usd = notional_usd / leverage if leverage > Decimal("0") else notional_usd
+    margin_pct = margin_usd / current_equity if current_equity > Decimal("0") else Decimal("0")
+
+    stop_loss_usd = abs_q * max(stop_loss_pips, Decimal("0")) * EURUSD_PIP_VALUE_PER_EUR
+    spread_usd = abs_q * max(spread_pips, Decimal("0")) * EURUSD_PIP_VALUE_PER_EUR
+    slippage_usd = (
+        Decimal("2") * notional_usd * (max(estimated_slippage_bps, Decimal("0")) / Decimal("10000"))
+    )
+    commission_usd = notional_usd * (
+        max(estimated_commission_round_trip_per_million_usd, Decimal("0")) / Decimal("1000000")
+    )
+    fixed_usd = max(fixed_fees_usd, Decimal("0")) if abs_q > Decimal("0") else Decimal("0")
+    total_risk_usd = stop_loss_usd + spread_usd + slippage_usd + commission_usd + fixed_usd
+    within_budget = risk_budget_usd is None or total_risk_usd <= risk_budget_usd
+    return ExAnteTradeRiskMetrics(
+        quantity_eur=quantity_eur,
+        notional_usd=notional_usd,
+        effective_leverage=eff_lev,
+        margin_used_usd=margin_usd,
+        margin_utilization_pct=margin_pct,
+        stop_loss_pips=max(stop_loss_pips, Decimal("0")),
+        stop_distance_loss_usd=stop_loss_usd,
+        spread_cost_usd=spread_usd,
+        estimated_slippage_usd=slippage_usd,
+        estimated_commission_usd=commission_usd,
+        fixed_fees_usd=fixed_usd,
+        ex_ante_total_risk_usd=total_risk_usd,
+        risk_budget_usd=risk_budget_usd,
+        within_risk_budget=within_budget,
+    )
+
+
+def quantize_risk_budget_quantity_eur(
+    *,
+    current_equity: Decimal,
+    mid_price: Decimal,
+    risk_budget_usd: Decimal,
+    stop_loss_pips: Decimal,
+    direction_sign: int = 1,
+    leverage: Decimal = Decimal("200"),
+    volume_step_eur: Decimal = Decimal("1000"),
+    min_volume_eur: Decimal = Decimal("1000"),
+    max_volume_eur: Decimal = Decimal("10000000"),
+    max_position_weight: Decimal = Decimal("0.25"),
+    max_margin_utilization_pct: Decimal | None = None,
+    spread_pips: Decimal = Decimal("0"),
+    estimated_slippage_bps: Decimal = Decimal("0.25"),
+    estimated_commission_round_trip_per_million_usd: Decimal = Decimal("6.0"),
+    fixed_fees_usd: Decimal = Decimal("0"),
+) -> Decimal:
+    """Solve q*stop + spread(q) + slippage(q) + commission(q) + fixed_fees <= risk_budget, ROUND_DOWN to step."""
+    if (
+        direction_sign == 0
+        or current_equity <= Decimal("0")
+        or mid_price <= Decimal("0")
+        or stop_loss_pips <= Decimal("0")
+        or risk_budget_usd <= max(fixed_fees_usd, Decimal("0"))
+    ):
+        return Decimal("0")
+    per_unit_risk = (
+        stop_loss_pips + max(spread_pips, Decimal("0"))
+    ) * EURUSD_PIP_VALUE_PER_EUR + mid_price * (
+        Decimal("2") * max(estimated_slippage_bps, Decimal("0")) / Decimal("10000")
+        + max(estimated_commission_round_trip_per_million_usd, Decimal("0")) / Decimal("1000000")
+    )
+    if per_unit_risk <= Decimal("0"):
+        return Decimal("0")
+    avail_budget = risk_budget_usd - max(fixed_fees_usd, Decimal("0"))
+    budget_steps = (avail_budget / per_unit_risk / volume_step_eur).to_integral_value(
+        rounding=ROUND_DOWN
+    )
+    buying_power_usd = current_equity * leverage
+    notional_cap_steps = (
+        (buying_power_usd * max_position_weight) / mid_price / volume_step_eur
+    ).to_integral_value(rounding=ROUND_DOWN)
+    chosen_steps = min(budget_steps, notional_cap_steps)
+    if max_margin_utilization_pct is not None and max_margin_utilization_pct > Decimal("0"):
+        margin_cap_steps = (
+            (current_equity * max_margin_utilization_pct * leverage) / mid_price / volume_step_eur
+        ).to_integral_value(rounding=ROUND_DOWN)
+        chosen_steps = min(chosen_steps, margin_cap_steps)
+
+    q_abs = min(max_volume_eur, chosen_steps * volume_step_eur)
+    if q_abs < min_volume_eur:
+        return Decimal("0")
+    recheck = compute_ex_ante_trade_risk(
+        quantity_eur=q_abs,
+        current_equity=current_equity,
+        mid_price=mid_price,
+        leverage=leverage,
+        stop_loss_pips=stop_loss_pips,
+        spread_pips=spread_pips,
+        estimated_slippage_bps=estimated_slippage_bps,
+        estimated_commission_round_trip_per_million_usd=estimated_commission_round_trip_per_million_usd,
+        fixed_fees_usd=fixed_fees_usd,
+        risk_budget_usd=risk_budget_usd,
+    )
+    while not recheck.within_risk_budget and q_abs >= min_volume_eur:
+        q_abs -= volume_step_eur
+        if q_abs < min_volume_eur:
+            return Decimal("0")
+        recheck = compute_ex_ante_trade_risk(
+            quantity_eur=q_abs,
+            current_equity=current_equity,
+            mid_price=mid_price,
+            leverage=leverage,
+            stop_loss_pips=stop_loss_pips,
+            spread_pips=spread_pips,
+            estimated_slippage_bps=estimated_slippage_bps,
+            estimated_commission_round_trip_per_million_usd=estimated_commission_round_trip_per_million_usd,
+            fixed_fees_usd=fixed_fees_usd,
+            risk_budget_usd=risk_budget_usd,
+        )
+    return q_abs if direction_sign > 0 else -q_abs
 
 
 def quantize_target_quantity_eur(
@@ -149,12 +309,14 @@ class DeterministicTargetValidator:
         theses: dict[str, Thesis] | None = None,
         as_of: datetime | None = None,
         portfolio_action: str | None = None,
+        allow_pending_risk_reduction: bool = False,
     ) -> None:
         target = TargetPortfolio.model_validate_json(target.model_dump_json())
         current = PortfolioSnapshot.model_validate_json(current.model_dump_json())
         if target.based_on_snapshot_id != current.snapshot_id:
             raise ValueError("Target is based on a stale or mismatched portfolio snapshot")
-        if current.pending_order_ids:
+        has_pending = bool(current.pending_order_ids)
+        if has_pending and not allow_pending_risk_reduction:
             raise ValueError("Cannot validate target while pending orders are outstanding")
         held_by_instrument = {
             held.instrument: held.quantity for held in current.positions if held.quantity != 0
@@ -168,7 +330,7 @@ class DeterministicTargetValidator:
         if portfolio_action in ("IGNORE_EVENT", "HOLD"):
             raise ValueError(f"Action {portfolio_action} must not produce a TargetPortfolio")
         if portfolio_action == "CLOSE":
-            if not held_by_instrument:
+            if not held_by_instrument and not (has_pending and allow_pending_risk_reduction):
                 raise ValueError("CLOSE target requires an existing open position")
             if any(pos.weight != Decimal("0") for pos in target.positions):
                 raise ValueError("CLOSE target requires zero weight for all positions")
@@ -182,7 +344,11 @@ class DeterministicTargetValidator:
                 raise ValueError(f"Target weight {pos.weight} exceeds bound {self.max_abs_weight}")
             if len(pos.thesis_ids) != len(set(pos.thesis_ids)):
                 raise ValueError("Duplicate thesis ID in target position")
-            if pos.weight == Decimal("0") and pos.instrument not in held_by_instrument:
+            if (
+                pos.weight == Decimal("0")
+                and pos.instrument not in held_by_instrument
+                and not (has_pending and allow_pending_risk_reduction)
+            ):
                 raise ValueError(
                     f"Zero-weight close target for {pos.instrument} requires an open position"
                 )

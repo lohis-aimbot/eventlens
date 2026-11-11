@@ -1,0 +1,66 @@
+# Headless Docker Compose stack for Spotware cTrader CLI (`EventLensCliBridge`) on GCP Ubuntu x86_64
+# Requires:
+#   1. /etc/eventlens/eventlens.env (eventlens:eventlens, mode 0600, containing CTRADER_CTID & CTRADER_DEMO_ACCOUNT_NUMBER)
+#   2. /etc/eventlens/ctrader-cli.pwd (root:root, mode 0600, zero ACLs — single-line cTID password, never passed via CLI string)
+#   3. /var/lib/eventlens/algo/EventLensCliBridge.algo (TargetFramework=net6.0, built via
+#      deploy/gcp/build_ctrader_algo.sh using mcr.microsoft.com/dotnet/sdk:8.0)
+#
+# Container runtime user & environment isolation notes:
+#   - Verified on GCP VM (`cTrader CLI 5.10.6.0`): `ghcr.io/spotware/ctrader-console:latest` has an empty
+#     `Config.User` (`""`) so it defaults to container `root`. Inside the image, user `app` (`1654:1654`)
+#     owns `/home/app` (`0750`), and explicit `--user 1654:1654` WITHOUT overriding `HOME` passes offline
+#     `--version` verification.
+#   - Distinction: offline `--version` != real Demo account runtime (`run /algo/EventLensCliBridge.algo ...`
+#     with `--pwd-file` and `/bridge` I/O). Non-root real-account execution is NOT yet verified/accepted,
+#     so default Compose leaves `user:` unset (image default) and `/etc/eventlens/ctrader-cli.pwd` remains
+#     `root:root` `0600` with zero ACL grants on the host.
+#   - Never redefine `HOME` here; isolate CLI/package/XDG state via dedicated `DOTNET_CLI_HOME`,
+#     `NUGET_PACKAGES`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` directories under `/tmp`.
+
+services:
+  ctrader-cli-bridge:
+    image: ghcr.io/spotware/ctrader-console:latest
+    platform: linux/amd64
+    container_name: eventlens-ctrader-cli
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    env_file:
+      - /etc/eventlens/eventlens.env
+    environment:
+      DOTNET_CLI_HOME: /tmp/ctrader-cli-dotnet
+      NUGET_PACKAGES: /tmp/ctrader-cli-nuget
+      XDG_CONFIG_HOME: /tmp/ctrader-cli-xdg-config
+      XDG_DATA_HOME: /tmp/ctrader-cli-xdg-data
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+    volumes:
+      - /var/lib/eventlens/algo:/algo:ro
+      - /var/lib/eventlens/bridge:/bridge
+      - /etc/eventlens/ctrader-cli.pwd:/run/secrets/ctrader_cli_pwd:ro
+    command:
+      - run
+      - /algo/EventLensCliBridge.algo
+      - --ctid
+      - "${CTRADER_CTID}"
+      - --pwd-file
+      - /run/secrets/ctrader_cli_pwd
+      - --account
+      - "${CTRADER_DEMO_ACCOUNT_NUMBER:?CTRADER_DEMO_ACCOUNT_NUMBER is required}"
+      - --symbol
+      - EURUSD
+      - --period
+      - t1
+      - --full-access
+      - --exit-on-stop
+      - "--BridgeDir=/bridge"
+      - "--SampleIntervalMilliseconds=200"
+      - "--RotationIntervalSeconds=43200"
+      - "--AllowDemoOrders=${CTRADER_ALLOW_DEMO_ORDERS:-false}"
+      - "--ExpectedDemoAccountNumber=${CTRADER_DEMO_ACCOUNT_NUMBER:?CTRADER_DEMO_ACCOUNT_NUMBER is required}"
+      - "--ExpectedAccountCurrency=${CTRADER_EXPECTED_ACCOUNT_CURRENCY:-USD}"
+      - "--ReconcileIntervalSeconds=15"
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "4"

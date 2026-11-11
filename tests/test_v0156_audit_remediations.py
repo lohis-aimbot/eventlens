@@ -1681,3 +1681,96 @@ def test_issue6_source_health_cache_quiet_timeout_dom_breakage_and_stale_risk_ga
     finally:
         g_state.close()
         g_ledger.close()
+
+
+def test_investinglive_rsc_flight_ref_deref_and_cross_stream_dedup(tmp_path: Path) -> None:
+    """Next.js RSC ``$xx`` chunk pointers resolve deterministically and cross-stream sidebar items never ping-pong importance."""
+    rx_t = datetime(2026, 11, 4, 10, 2, 0, tzinfo=UTC)
+    body_html = "<p>ECB’s inflation outlook faces upside energy risks.</p>"
+    body_hex_len = format(len(body_html.encode("utf-8")), "x")
+
+    def _build_rsc_page(ref_hex: str) -> bytes:
+        cb_art = {
+            "contentItemId": "cb-art-1",
+            "contentType": "Article",
+            "displayText": "ECB inflation outlook update",
+            "path": "central-banks/ecb-inflation-outlook-update",
+            "published": True,
+            "publishedUtc": "2026-11-04T10:01:00Z",
+            "modifiedUtc": "2026-11-04T10:01:00Z",
+            "isSponsored": False,
+            "category": {"termContentItems": [{"displayText": "Central Banks"}]},
+            "briefSummary": {"html": "<p>Summary line</p>"},
+            "summary": {"html": ""},
+            "expandedContent": f"${ref_hex}",
+        }
+        sidebar_art = {
+            "contentItemId": "sidebar-oil-1",
+            "contentType": "Article",
+            "displayText": "Oil futures steady ahead of US data",
+            "path": "commodities/oil-futures-steady-ahead-of-us-data",
+            "published": True,
+            "publishedUtc": "2026-11-04T09:30:00Z",
+            "modifiedUtc": "2026-11-04T09:30:00Z",
+            "isSponsored": False,
+            "category": {"termContentItems": [{"displayText": "Commodities"}]},
+            "briefSummary": {"html": "<p>US dollar in focus</p>"},
+            "summary": {"html": ""},
+            "expandedContent": "$deadbeef",
+        }
+        stream_str = f"{ref_hex}:T{body_hex_len},{body_html}5:{json.dumps([cb_art, sidebar_art], ensure_ascii=False)}"
+        return (
+            f"<!doctype html><html><body><script>self.__next_f.push([1,{json.dumps(stream_str, ensure_ascii=False)}])</script></body></html>"
+        ).encode("utf-8")
+
+    poll1_bytes = _build_rsc_page("28")
+    poll2_bytes = _build_rsc_page("49")
+    recs1, rej1, err1 = parse_investinglive_live_html(
+        poll1_bytes, stream="news/live_feed", received_at=rx_t
+    )
+    recs2, rej2, err2 = parse_investinglive_live_html(
+        poll2_bytes, stream="news/centralbank", received_at=rx_t + timedelta(seconds=5)
+    )
+    assert err1 is None and not rej1 and len(recs1) == 2
+    assert err2 is None and not rej2 and len(recs2) == 2
+    assert "ECB’s inflation outlook faces upside energy risks." in recs1[0].text
+    assert "$28" not in recs1[0].text and "$49" not in recs2[0].text
+    assert "$deadbeef" not in recs1[1].text
+    assert recs1 == recs2
+
+    ostore = ObserverStore(tmp_path / "rsc_dedup.sqlite")
+    try:
+        r_base = ostore.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                basis="live_poll",
+                kind="news",
+                request_url="https://investinglive.com/live-feed/",
+                request_started_at=rx_t,
+                received_at=rx_t,
+                elapsed_ms=10.0,
+                attempts=1,
+                payload=poll1_bytes,
+                records=recs1,
+            )
+        )
+        assert r_base["counts"] == {"baseline": 2, "new": 0, "revised": 0, "repeat": 0}
+        r_next = ostore.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/centralbank",
+                basis="live_poll",
+                kind="news",
+                request_url="https://investinglive.com/CentralBanks/",
+                request_started_at=rx_t + timedelta(seconds=5),
+                received_at=rx_t + timedelta(seconds=5),
+                elapsed_ms=10.0,
+                attempts=1,
+                payload=poll2_bytes,
+                records=recs2,
+            )
+        )
+        assert r_next["counts"] == {"baseline": 0, "new": 0, "revised": 0, "repeat": 2}
+    finally:
+        ostore.close()

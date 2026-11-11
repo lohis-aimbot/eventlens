@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
+  <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=fix%2Fv0157-data-decision-runtime-integrity" alt="CI Checks" /></a>
 </p>
 
 <p align="center">
-  <strong>Python 3.11+</strong> &nbsp;·&nbsp; <strong>360 项自动化测试通过</strong> &nbsp;·&nbsp; <strong>Shadow 影子研究模式</strong> &nbsp;·&nbsp; <strong>纯 Demo 物理锁定</strong>
+  <strong>Python 3.11+</strong> &nbsp;·&nbsp; <strong>自动化回归测试</strong> &nbsp;·&nbsp; <strong>Shadow 影子研究模式</strong> &nbsp;·&nbsp; <strong>仅限 Demo</strong>
 </p>
 
 <p align="center">
@@ -28,6 +28,9 @@
 ---
 
 ## 项目简介
+
+> [!IMPORTANT]
+> **开发进度 · 2026 年 11 月 11 日。** 当前分支为开发中的快照。GCP 私有云主机已建立；一份有记录的 C# 源码快照在显式使用 root 构建配置后成功生成 `.algo`，并通过未连接券商的断网元数据检查。最近一次独立核验的 Python 快照通过 **373 项测试、Ruff 和 mypy**。随后进行的成交账本及跨日风控修复仍需复审和重新验证。**云端尚未启动连接账户的服务，无人值守 Demo 交易尚未验收。** 版本、哈希、限制与待修问题详见[云端预检审计](docs/research/2026-11-11-cloud-preflight-audit.md)。
 
 **EventLens** 是一个面向日内宏观交易研究的 Python 系统，核心围绕一条极简链路运转：**宏观事件（Event）→ 持续观点记忆（Thesis Memory）→ 风险受控仓位（Position）**。
 
@@ -148,18 +151,18 @@ eventlens observe report
 
 ## 云端常驻运行
 
-仓库内置了完整的 Ubuntu 24.04 + `systemd` 云端部署包（`deploy/gcp/`），无需再在本地电脑长开 cTrader 桌面端或每天手动点击 Start：
+仓库提供 Ubuntu 24.04 + `systemd` 云端部署代码（`deploy/gcp/`），目标是通过无头运行减少对本地 cTrader 桌面端的依赖；部署代码与真实账户运行分别验收：
 
-- **纯 Python 无头报价流（`ctrader_openapi.py`）：** 仅用 Python 标准库 `asyncio` + `ssl` 直连 `demo.ctraderapi.com:5036`，自动处理增量 Bid/Ask 缓存、每 `12 小时` 轮转报价会话，并在 Token 过期时自动刷新并以 `0600` 权限安全落盘。
-- **双重 Demo 物理级硬锁：** `CTraderLiveEndpointForbiddenError` 拒绝任何含 `live` 的服务器域名；`CTraderLiveAccountForbiddenError` 在账户鉴权前强制核验 `isLive == False`，彻底锁死实盘账户。
+- **主要路线：Docker cTrader CLI。** `EventLensCliBridge` 使用 .NET 8 SDK 构建 `net6.0` 目标（`cTrader.Automate` 固定为 `[1.0.21]`），通过 Spotware 官方 Linux 容器提供报价、持仓对账及显式启用的 Demo 执行接口。桥接程序检查 `Account.IsLive`、预期账户编号和账户币种；实际账户接入仍待验收。
+- **替代路线：Open API 只读报价。** `ctrader_openapi.py` 使用 `asyncio` + `ssl` 连接 `demo.ctraderapi.com:5036`，处理增量报价和 Token 刷新。原有 `--ctrader-demo-mirror-orders` 仍被阻断，不等于新的 CLI 执行接口已验收。
 - **24×5 常驻防护：** 自动识别外汇周末休市（纽约时间周五 `17:00` 至周日 `17:00`，自动适配夏令时/冬令时）并暂停抓新闻调模型；通过 `--max-daily-llm-calls` 锁定每日 UTC 大模型调用预算；收到 `systemctl stop`（`SIGTERM`）时优雅排空在途影子持仓。
-- **当前边界：** 部署代码与离线协议测试已全部就绪；**跨多日的真实云端无人值守运行仍待前向验收**，且券商模拟盘跟单功能当前保持阻断关闭。
+- **当前边界：** 有记录的源码快照已在云端用 `BUILD_UID_GID=0:0` 编译成功，产物以 `1654:1654` 用户断网读取元数据成功；默认使用主机普通 UID 的构建仍遇到 NuGet 初始化问题。最终账本和风控修复必须重新测试及编译，**券商登录、Demo 完整订单生命周期、多日无人值守运行和盈利能力均未验收**。
 
 ```bash
-# 在 Ubuntu 24.04 云主机（如 GCP e2-small）上一键初始化环境与 systemd 服务
+# 在已准备好的 x86_64 Ubuntu 24.04 云主机上仅做构建验证，不登录、不交易
 sudo bash deploy/gcp/setup_ubuntu.sh
-sudo nano /etc/eventlens/eventlens.env   # 填入 DeepSeek 与 cTrader Demo 凭证（0600 权限）
-sudo systemctl enable --now eventlens-shadow
+sudo env BUILD_UID_GID=0:0 bash /opt/eventlens/deploy/gcp/build_ctrader_algo.sh
+# 连接账户与启动服务属于独立的、尚待通过的 Demo 验收阶段，参见部署手册。
 ```
 
 完整云端配置与日常巡检手册 → **[docs/cloud-24x5-deployment.md](docs/cloud-24x5-deployment.md)**
@@ -172,6 +175,7 @@ EventLens 严格区分**离线自动化测试**、**已记录的真实窗口观�
 
 | 验证记录 | 实测数据与结果 | 说明了什么（以及客观局限） |
 |---|---|---|
+| **云端预检 · 2026-11-11** | 私有 Ubuntu 云主机验证完成；有记录的源码快照成功编译 `.algo` 并通过断网元数据检查；进一步修改前独立复跑 `373` 项 Python 测试通过 | 证明部署可行性；账本/风控缺陷、最终源码复编译、真实 Demo 生命周期及收益表现仍需验收，详见[审计报告](docs/research/2026-11-11-cloud-preflight-audit.md) |
 | **离线测试套件 · 2026-11-02** | **360 项测试全部通过**（`pytest`、`ruff`、`mypy`） | 在确定性模拟时钟下验证了状态机、硬风控、Open API 协议帧、Demo 安全锁、推进时钟复盘与模拟下单阻断 |
 | **真实 Shadow 观测 · 2026-10-23** | 采集 **1,786 条实时报价**，6 次模型推理，5 个记忆版本，**2 笔模拟建仓**（接收至成交耗时 `4.974 s` 与 `14.151 s`），1 笔定时平仓 | 法国/德国 PMI 初值窗口的首次实测；当时尚未上线两阶段停机排空，两场运行之间存在约 5 分钟持仓空档 |
 | **真实恢复与连续运行 · 2026-10-27** | 用新鲜实时报价平掉 10 月 23 日遗留持仓（`unclosed_risk = false`），随后完成 **2,240.0 秒不间断运行**（`3,517` 条有效报价，`0` 拒收，**10,761 次风控巡检**，持久化 `84` 条事件：过滤 `77` 条、`IGNORE_EVENT` `5` 条、陈旧报价拦截 `2` 条） | 验证了不回填历史价格的真实崩溃恢复、持仓期间零风控盲区、无超预期数据时不强行开仓，以及 `flat_completed` 干净收尾 |
@@ -183,10 +187,10 @@ EventLens 严格区分**离线自动化测试**、**已记录的真实窗口观�
 | 状态等级 | 当前覆盖范围 |
 |---|---|
 | **已实现（Implemented）** | 一手英文源采集、无头 `cTrader Open API` Demo 报价流、`--continuous` 常驻运行、有状态观点复盘、每日模型预算熔断、历史回放数据血统隔离、只读 `status`/`report` 客观诊断 |
-| **离线验证（Offline-Verified）** | `360` 项自动化测试覆盖协议编解码、实盘硬锁、周末休眠、崩溃恢复、时间戳分类学及风控/账本数学不变量 |
+| **离线验证（Offline-Verified）** | 最近一次独立检查的快照为 `373` 项测试通过，Ruff 与 mypy 通过；后续修改必须重新验证，历史测试通过不代表最终修订已验收 |
 | **真实观测（Live-Observed）** | 2026 年 10 月 22–29 日原始 SQLite/JSONL 证据原样保存在本地未提交的 `data/` 目录中（详见[验收报告](docs/shadow-acceptance.md)）。10 月 28 日基于雅虎 1 分钟 K 线的临时回放已[单独隔离勘误](docs/replay-errata-2026-10-28.md)，不作为秒级实盘成交依据 |
-| **待前向验收（Pending Acceptance）** | 跨多日云端无人值守连续运行、`investingLive` 实时 HTML 通道前向延迟验收、有状态观点复盘实盘效果评估，以及多窗口扣费后策略表现评估 |
-| **已阻断关闭（Unavailable）** | 任何真实资金账户交易，以及模拟盘自动映射下单（`--ctrader-demo-mirror-orders` 在完成按持仓 ID 平仓、成交确认与持久化对账验收前强制拦截） |
+| **待前向验收（Pending Acceptance）** | 成交账本与跨日风控问题收口、最终源码复测及锁包编译、cTrader CLI 真实 Demo 登录与订单生命周期、多日云端连续观测，以及多窗口扣费后策略表现评估 |
+| **已阻断关闭（Unavailable）** | 任何真实资金账户交易及旧版 Open API 自动映射下单；新的 CLI Demo 接口仍需单独验收和显式启用 |
 
 ---
 

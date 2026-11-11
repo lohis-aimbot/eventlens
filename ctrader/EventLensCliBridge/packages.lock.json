@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net6.0": {
+      "cTrader.Automate": {
+        "type": "Direct",
+        "requested": "[1.0.21, 1.0.21]",
+        "resolved": "1.0.21",
+        "contentHash": "jvgImJpYyeJZCxNzuYyaC0SjTT7+gQOO25oSV58JbMJ+QBssd6FYK+psonE3o1bDCXSbi0wPR1OLleYf3aFXBg=="
+      }
+    }
+  }
+}

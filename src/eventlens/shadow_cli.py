@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import signal
 import sqlite3
 from bisect import bisect_left, bisect_right
@@ -12,8 +13,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
-from .contracts import AgentContext, AgentDecision, MarketSnapshot
+from .contracts import (
+    AgentContext,
+    AgentDecision,
+    MarketSnapshot,
+    TargetPortfolio,
+    TargetPosition,
+    Thesis,
+    ThesisChange,
+)
 from .deepseek import DeepSeekClient
 from .observer import APPLICATION_ID as OBSERVER_APPLICATION_ID
 from .observer import (
@@ -40,6 +50,7 @@ from .trading.execution import (
     ProtectiveExitPolicy,
     ShadowCostModel,
     SQLiteShadowLedger,
+    build_shadow_audit_metrics,
     inspect_shadow_ledger_readonly,
 )
 from .trading.portfolio import LOT_UNITS_EUR, DeterministicTargetValidator
@@ -939,7 +950,382 @@ def _build_policies(
         risk = RiskPolicy.model_validate({**risk.model_dump(), **risk_updates})
     if exit_updates:
         exit_pol = ProtectiveExitPolicy.model_validate({**exit_pol.model_dump(), **exit_updates})
+    raw_risk_pct = getattr(args, "max_risk_per_trade_pct", None)
+    if raw_risk_pct is not None:
+        risk_pct = Decimal(str(raw_risk_pct))
+        if risk_pct > Decimal("0"):
+            risk = RiskPolicy.model_validate(
+                {
+                    **risk.model_dump(),
+                    "max_risk_per_trade_pct": risk_pct,
+                    "ex_ante_stop_loss_pips": exit_pol.stop_loss_pips or Decimal("11.0"),
+                    "cap_quantity_by_risk_budget": True,
+                }
+            )
     return initial_cash, risk, exit_pol, cost_model
+
+
+def _parse_cli_expected_account_number(raw: str) -> int:
+    from .trading.ctrader_cli_broker import parse_strict_int64_account_number
+
+    parsed = parse_strict_int64_account_number(raw, allow_zero=True)
+    if parsed is None:
+        raise argparse.ArgumentTypeError(
+            f"Invalid --expected-demo-account-number={raw!r}: must be strict 64-bit ASCII digits"
+        )
+    return parsed
+
+
+def _resolve_expected_demo_account_number(
+    args: argparse.Namespace,
+    *,
+    require_positive: bool = False,
+) -> int | None:
+    from .trading.ctrader_cli_broker import parse_strict_int64_account_number
+
+    explicit = getattr(args, "expected_demo_account_number", None)
+    if explicit is not None:
+        parsed_explicit = parse_strict_int64_account_number(
+            explicit, allow_zero=not require_positive
+        )
+        if parsed_explicit is None:
+            raise ValueError(
+                "--expected-demo-account-number must be a positive 64-bit integer (> 0) "
+                "when Demo order execution is enabled"
+            )
+        return parsed_explicit if parsed_explicit > 0 else None
+
+    raw_env = os.environ.get("CTRADER_DEMO_ACCOUNT_NUMBER", "").strip()
+    if raw_env:
+        parsed_env = parse_strict_int64_account_number(raw_env, allow_zero=not require_positive)
+        if parsed_env is None:
+            req_kind = "positive " if require_positive else "non-negative "
+            raise ValueError(
+                f"Invalid CTRADER_DEMO_ACCOUNT_NUMBER={raw_env!r}: "
+                f"must be a strict 64-bit {req_kind}integer"
+            )
+        return parsed_env if parsed_env > 0 else None
+
+    if require_positive:
+        raise ValueError(
+            "Demo execution requires an explicit positive integer Demo account number via "
+            "--expected-demo-account-number or CTRADER_DEMO_ACCOUNT_NUMBER"
+        )
+    return None
+
+
+def _resolve_cli_demo_state_db(args: argparse.Namespace) -> Path:
+    from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
+
+    raw_cli_state_db: Path | None = getattr(args, "cli_demo_state_db", None)
+    if raw_cli_state_db is not None:
+        return Path(raw_cli_state_db)
+    shadow_db_path = Path(args.shadow_db)
+    candidate = shadow_db_path.parent / "cli-demo-broker.sqlite"
+    if candidate.is_file() or not shadow_db_path.is_file():
+        return candidate
+    try:
+        conn = sqlite3.connect(
+            shadow_db_path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5,
+        )
+        try:
+            app_id = int(conn.execute("PRAGMA application_id").fetchone()[0])
+        finally:
+            conn.close()
+        if app_id == CTraderCliDemoBrokerAdapter.APPLICATION_ID:
+            return shadow_db_path
+    except sqlite3.Error:
+        pass
+    return candidate
+
+
+async def _run_demo_smoke(
+    args: argparse.Namespace,
+    *,
+    risk_policy: RiskPolicy,
+    exit_policy: ProtectiveExitPolicy,
+) -> dict[str, Any]:
+    """Execute one bounded, hard-risk-gated Demo open -> SL-confirmed -> close -> flat smoke cycle."""
+    from .sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
+    from .trading.agent import SINGLE_PASS_PROMPT_VERSION
+    from .trading.ctrader_cli_broker import (
+        CTraderCliDemoBrokerAdapter,
+        CTraderCliDemoExecutionEngine,
+        DemoBrokerSafetyError,
+    )
+
+    bridge_dir: Path = getattr(args, "quote_bridge_dir")
+    state_db = _resolve_cli_demo_state_db(args)
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    args.quotes_db.parent.mkdir(parents=True, exist_ok=True)
+    expected_acct = _resolve_expected_demo_account_number(args, require_positive=True)
+    volume_units = int(getattr(args, "volume_units", 1000))
+    side: Literal["buy", "sell"] = "sell" if getattr(args, "side", "buy") == "sell" else "buy"
+    hold_seconds = float(getattr(args, "hold_seconds", 0.2))
+    timeout_seconds = float(getattr(args, "timeout_seconds", 20.0))
+
+    qstore = QuoteStore(args.quotes_db, readonly=False)
+    now_attach = datetime.now(UTC)
+    tail = DirectoryTail(bridge_dir)
+    collector = DemoQuoteCollector(
+        qstore,
+        now_attach,
+        allow_multiple_sessions=True,
+        allow_unclean_session_rollover=True,
+        max_start_handshake_age_seconds=30.0,
+    )
+    from .quotes import BridgeQuote, BridgeStart
+
+    candidates = sorted(
+        bridge_dir.resolve().glob("quotes-*.jsonl"),
+        key=lambda p: (p.stat().st_mtime_ns, p.name),
+        reverse=True,
+    )
+    for cand in candidates:
+        try:
+            stat = cand.stat()
+            raw_bytes = cand.read_bytes()
+            lines = raw_bytes.split(b"\n")
+            remainder = lines.pop()
+            if not lines:
+                continue
+            first_obj = json.loads(lines[0].decode("utf-8"))
+            if first_obj.get("kind") != "start":
+                continue
+            if any(json.loads(ln.decode("utf-8")).get("kind") == "stop" for ln in lines if ln):
+                continue
+            start_item = BridgeStart.model_validate(first_obj)
+            if now_attach > start_item.started_at + timedelta(seconds=start_item.duration_seconds):
+                continue
+            tail.ignored.discard(cand)
+            consumed_offset = len(raw_bytes) - len(remainder)
+            tail.files[cand] = (stat.st_ino, consumed_offset, remainder)
+            if not qstore.has_session(str(start_item.session_id)):
+                qstore.start(start_item, now_attach, basis="live_poll")
+            collector.session = start_item
+            collector.stopped = False
+            last_seq = qstore.last_sequence(str(start_item.session_id))
+            for raw_ln_b in lines[1:]:
+                if not raw_ln_b:
+                    continue
+                raw_ln = raw_ln_b.decode("utf-8")
+                obj = json.loads(raw_ln)
+                if obj.get("kind") != "quote":
+                    continue
+                seq_val = int(obj.get("sequence", 0))
+                if seq_val <= last_seq:
+                    continue
+                q_item = BridgeQuote.model_validate(obj)
+                if now_attach - q_item.source_at <= timedelta(seconds=5):
+                    qstore.record(q_item, now_attach, raw_ln)
+                    last_seq = seq_val
+            break
+        except Exception:
+            continue
+    adapter = CTraderCliDemoBrokerAdapter(
+        state_db_path=state_db,
+        bridge_dir=bridge_dir,
+        allow_orders=True,
+        confirm_demo_execution=bool(getattr(args, "confirm_demo_execution", False)),
+        expected_demo_account_number=expected_acct,
+        default_stop_loss_pips=(
+            float(exit_policy.stop_loss_pips) if exit_policy.stop_loss_pips is not None else 11.0
+        ),
+        default_take_profit_pips=(
+            float(exit_policy.take_profit_pips)
+            if exit_policy.take_profit_pips is not None
+            else 22.0
+        ),
+    )
+    try:
+        smoke_risk_policy = risk_policy.model_copy(
+            update={
+                "max_volume_eur": Decimal(volume_units),
+                "block_unverified_decision_evidence": False,
+                "require_verified_decision_evidence": False,
+            }
+        )
+        engine = CTraderCliDemoExecutionEngine(
+            adapter=adapter,
+            risk_policy=smoke_risk_policy,
+            exit_policy=exit_policy,
+            market_provider=lambda ts: build_market_snapshot(qstore, ts, basis="live_poll"),
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+
+        def _poll_quotes_once() -> MarketSnapshot:
+            for raw in tail.poll():
+                collector.accept(raw, datetime.now(UTC))
+            return build_market_snapshot(qstore, datetime.now(UTC), basis="live_poll")
+
+        market = _poll_quotes_once()
+        init_rec = adapter.reconcile()
+        while loop.time() < deadline:
+            has_eur = any(q.instrument == "EUR/USD" for q in market.quotes)
+            if has_eur and not init_rec.blocks_new_risk and init_rec.allow_demo_orders is True:
+                break
+            await asyncio.sleep(0.05)
+            market = _poll_quotes_once()
+            init_rec = adapter.reconcile()
+
+        if init_rec.open_positions or adapter.open_positions():
+            raise DemoBrokerSafetyError(
+                "demo-smoke requires a flat Demo account before starting; open positions detected"
+            )
+        if init_rec.blocks_new_risk or init_rec.allow_demo_orders is not True:
+            raise DemoBrokerSafetyError(
+                f"demo-smoke preflight failed: blocks_new_risk={init_rec.blocks_new_risk} "
+                f"allow_demo_orders={init_rec.allow_demo_orders} drift={init_rec.drift_reasons}"
+            )
+
+        now = datetime.now(UTC)
+        portfolio = engine.snapshot_sync(market=market)
+        smoke_id = uuid4().hex[:10]
+        thesis = Thesis(
+            thesis_id=f"smoke-thesis-{smoke_id}",
+            revision=1,
+            status="active",
+            created_at=now,
+            updated_at=now,
+            review_at=now + timedelta(minutes=15),
+            narrative="Supervised bounded cTrader CLI Demo smoke verification",
+            instruments=("EUR/USD",),
+            supporting_event_ids=(f"smoke-event-{smoke_id}",),
+            invalidation_conditions=("EUR/USD <= 1.0000",),
+            confidence=0.60,
+        )
+        signed_weight = Decimal("0.20") if side == "buy" else Decimal("-0.20")
+        decision = AgentDecision(
+            decision_id=f"smoke-dec-{smoke_id}",
+            event_id=f"smoke-event-{smoke_id}",
+            based_on_memory_version=0,
+            based_on_snapshot_id=portfolio.snapshot_id,
+            provider="deterministic_demo_smoke",
+            model_version="demo_smoke_v1",
+            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            started_at=now,
+            completed_at=now,
+            valid_until=now + timedelta(seconds=30),
+            thesis_changes=(
+                ThesisChange(
+                    expected_revision=0,
+                    thesis=thesis,
+                    reason="Supervised bounded Demo smoke verification",
+                ),
+            ),
+            portfolio_action="SET_TARGET",
+            target=TargetPortfolio(
+                target_id=f"smoke-tgt-{smoke_id}",
+                based_on_snapshot_id=portfolio.snapshot_id,
+                rationale="Bounded Demo execution & SL attachment smoke check",
+                positions=(
+                    TargetPosition(
+                        instrument="EUR/USD",
+                        weight=signed_weight,
+                        thesis_ids=(thesis.thesis_id,),
+                    ),
+                ),
+            ),
+            rationale="Bounded Demo execution & SL attachment smoke check",
+        )
+
+        # Enforce full deterministic target validator + hard risk gate (never bypass risk.py!)
+        assert decision.target is not None
+        DeterministicTargetValidator().validate(
+            decision.target,
+            portfolio,
+            theses={thesis.thesis_id: thesis},
+            as_of=now,
+            portfolio_action="SET_TARGET",
+        )
+        risk_engine = DeterministicHardRiskEngine(policy=smoke_risk_policy)
+        assessment = await risk_engine.assess(
+            decision,
+            portfolio,
+            market,
+            prior_theses=(),
+        )
+        if assessment.outcome != "approve":
+            raise DemoBrokerSafetyError(
+                f"Hard risk engine rejected demo-smoke order: {assessment.reasons}"
+            )
+
+        receipt = await engine.record(decision, assessment)
+        if receipt.status != "recorded":
+            raise DemoBrokerSafetyError(f"demo-smoke submission rejected: {receipt.reason}")
+
+        # Wait for broker-confirmed fill + SL confirmation
+        confirmed_pos: dict[str, Any] | None = None
+        while loop.time() < deadline:
+            adapter.poll_events()
+            open_pos = adapter.open_positions()
+            if open_pos:
+                confirmed_pos = open_pos[0]
+                break
+            intent_state = adapter.get_intent(receipt.execution_id)
+            if intent_state is not None and intent_state["status"] in (
+                "rejected",
+                "expired",
+                "cancelled",
+                "unknown_execution",
+            ):
+                raise DemoBrokerSafetyError(
+                    f"demo-smoke entry failed with status={intent_state['status']} "
+                    f"error={intent_state.get('error_code')}"
+                )
+            await asyncio.sleep(0.05)
+
+        if confirmed_pos is None:
+            raise DemoBrokerSafetyError("Timed out waiting for broker-confirmed Demo entry fill")
+        pos_id = int(confirmed_pos["broker_position_id"])
+        if not bool(confirmed_pos["sl_confirmed"]):
+            adapter.submit_close_position(
+                broker_position_id=pos_id, protective_reason="demo_smoke_emergency_close_no_sl"
+            )
+            raise DemoBrokerSafetyError(f"Broker position {pos_id} filled without confirmed SL!")
+
+        if hold_seconds > 0:
+            await asyncio.sleep(min(hold_seconds, 30.0))
+
+        close_cid = adapter.submit_close_position(
+            broker_position_id=pos_id,
+            decision_id=decision.decision_id,
+            assessment_id=assessment.assessment_id,
+            protective_reason="demo_smoke_bounded_exit",
+        )
+
+        close_deadline = loop.time() + timeout_seconds
+        final_rec = adapter.reconcile()
+        while loop.time() < close_deadline:
+            final_rec = adapter.reconcile()
+            if not adapter.open_positions() and not final_rec.open_positions:
+                break
+            await asyncio.sleep(0.05)
+
+        close_intent = adapter.get_intent(close_cid)
+        flat_after = not bool(adapter.open_positions()) and not bool(final_rec.open_positions)
+        return {
+            "scope": "ctrader_cli_demo_smoke",
+            "execution_authorized": True,
+            "passed": flat_after and final_rec.clean,
+            "decision_id": decision.decision_id,
+            "assessment_id": assessment.assessment_id,
+            "approved_quantity_eur": str(assessment.approved_quantity_eur),
+            "entry_intent_id": receipt.execution_id,
+            "close_intent_id": close_cid,
+            "broker_position_id": pos_id,
+            "entry_fill_price": confirmed_pos["entry_price"],
+            "sl_confirmed": bool(confirmed_pos["sl_confirmed"]),
+            "exit_fill_price": close_intent["fill_price"] if close_intent else None,
+            "flat_after_close": flat_after,
+            "reconciliation_after_close": final_rec.model_dump(mode="json"),
+        }
+    finally:
+        adapter.close()
+        qstore.close()
 
 
 async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
@@ -949,6 +1335,64 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     basis: Literal["live_poll", "synthetic_fixture"] = (
         "synthetic_fixture" if raw_basis == "synthetic_fixture" else "live_poll"
     )
+
+    if args.command == "demo-reconcile":
+        from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
+
+        bridge_dir_arg: Path = getattr(args, "quote_bridge_dir")
+        state_db_arg = _resolve_cli_demo_state_db(args)
+        state_db_arg.parent.mkdir(parents=True, exist_ok=True)
+        adapter = CTraderCliDemoBrokerAdapter(
+            state_db_path=state_db_arg,
+            bridge_dir=bridge_dir_arg,
+            allow_orders=False,
+            confirm_demo_execution=False,
+            expected_demo_account_number=_resolve_expected_demo_account_number(args),
+        )
+        try:
+            rec_res = adapter.reconcile()
+            return {
+                "scope": "ctrader_cli_demo_reconciliation",
+                "execution_authorized": False,
+                "halted_reason": adapter.halted_reason,
+                "manual_unlock_required": adapter.manual_unlock_required,
+                "reconciliation": rec_res.model_dump(mode="json"),
+                "local_open_positions": adapter.open_positions(),
+            }
+        finally:
+            adapter.close()
+
+    if args.command == "demo-unlock":
+        from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
+
+        bridge_dir_u: Path = getattr(args, "quote_bridge_dir")
+        state_db_u = _resolve_cli_demo_state_db(args)
+        state_db_u.parent.mkdir(parents=True, exist_ok=True)
+        adapter = CTraderCliDemoBrokerAdapter(
+            state_db_path=state_db_u,
+            bridge_dir=bridge_dir_u,
+            allow_orders=False,
+            confirm_demo_execution=False,
+            expected_demo_account_number=_resolve_expected_demo_account_number(args),
+        )
+        try:
+            rec_u = adapter.acknowledge_manual_unlock(note=str(getattr(args, "note", "")))
+            return {
+                "scope": "ctrader_cli_demo_unlock",
+                "execution_authorized": False,
+                "halted_reason": adapter.halted_reason,
+                "manual_unlock_required": adapter.manual_unlock_required,
+                "reconciliation": rec_u.model_dump(mode="json"),
+            }
+        finally:
+            adapter.close()
+
+    if args.command == "demo-smoke":
+        return await _run_demo_smoke(
+            args,
+            risk_policy=risk_policy,
+            exit_policy=exit_policy,
+        )
 
     if args.command in ("status", "report"):
         diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
@@ -962,6 +1406,28 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             now=now,
         )
         ro_runtime = inspect_runtime_store_readonly(args.shadow_db)
+        runner_info = ro_runtime.get("runner") if isinstance(ro_runtime, dict) else None
+        stored_summary = (
+            runner_info.get("summary")
+            if isinstance(runner_info, dict) and isinstance(runner_info.get("summary"), dict)
+            else None
+        )
+        if not ro_ledger.get("degraded") and stored_summary is not None:
+            ro_ledger["audit_metrics"] = build_shadow_audit_metrics(
+                fills=ro_ledger.get("fills") or (),
+                faults=ro_ledger.get("faults") or (),
+                receipts=ro_ledger.get("receipts") or (),
+                realized_pnl_usd=Decimal(str(ro_ledger.get("realized_pnl_usd", "0.00"))),
+                total_fees_usd=Decimal(str(ro_ledger.get("total_fees_usd", "0.00"))),
+                unclosed_risk=bool(ro_ledger.get("unclosed_risk")),
+                max_holding_seconds=exit_policy.max_holding_seconds,
+                protection_coverage=stored_summary.get("protection_coverage"),
+                started_at=stored_summary.get("started_at")
+                or (runner_info.get("started_at") if isinstance(runner_info, dict) else None),
+                stopped_at=stored_summary.get("stopped_at")
+                or (runner_info.get("stopped_at") if isinstance(runner_info, dict) else None),
+                configured_duration_seconds=stored_summary.get("duration_seconds"),
+            )
         diagnostics = _build_objective_diagnostics(
             shadow_db=args.shadow_db,
             memory_db=diag_mem_db,
@@ -1057,6 +1523,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             if (args.observer_db.is_file() or getattr(args, "poll_news", False))
             else None
         )
+        cli_demo_adapter: Any = None
         try:
             runner_ref: list[ShadowRunner] = []
 
@@ -1081,6 +1548,11 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                         risk_policy.allow_commission_bearing_zero_spread
                     ),
                     max_position_weight=risk_policy.max_position_weight,
+                    leverage=risk_policy.leverage,
+                    max_risk_per_trade_pct=risk_policy.max_risk_per_trade_pct,
+                    ex_ante_stop_loss_pips=(
+                        risk_policy.ex_ante_stop_loss_pips or exit_policy.stop_loss_pips
+                    ),
                     review_horizon=timedelta(seconds=review_horizon_s),
                 )
                 if call_model
@@ -1198,6 +1670,34 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                     basis=basis,
                     sample_interval_ms=int(getattr(args, "ctrader_sample_interval_ms", 200)),
                 )
+            if getattr(args, "ctrader_cli_demo_orders", False):
+                from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
+
+                assert quote_bridge_dir is not None
+                cli_state_db: Path = getattr(args, "cli_demo_state_db", None) or (
+                    args.shadow_db.parent / "cli-demo-broker.sqlite"
+                )
+                cli_state_db.parent.mkdir(parents=True, exist_ok=True)
+                cli_demo_adapter = CTraderCliDemoBrokerAdapter(
+                    state_db_path=cli_state_db,
+                    bridge_dir=quote_bridge_dir,
+                    allow_orders=True,
+                    confirm_demo_execution=bool(getattr(args, "confirm_demo_execution", False)),
+                    expected_demo_account_number=_resolve_expected_demo_account_number(
+                        args, require_positive=True
+                    ),
+                    default_stop_loss_pips=(
+                        float(exit_policy.stop_loss_pips)
+                        if exit_policy.stop_loss_pips is not None
+                        else 11.0
+                    ),
+                    default_take_profit_pips=(
+                        float(exit_policy.take_profit_pips)
+                        if exit_policy.take_profit_pips is not None
+                        else 22.0
+                    ),
+                )
+                cli_demo_adapter.reconcile()
             continuous_mode = bool(getattr(args, "continuous", False))
             runner = ShadowRunner(
                 runtime=runtime,
@@ -1207,6 +1707,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 quote_bridge_dir=quote_bridge_dir,
                 ctrader_openapi_streamer=openapi_streamer,
                 ctrader_demo_mirror=bool(getattr(args, "ctrader_demo_mirror_orders", False)),
+                ctrader_cli_demo_adapter=cli_demo_adapter,
                 enforce_fx_weekend_pause=continuous_mode or use_ctrader_openapi,
                 news_source=active_news_source,
                 supplemental_calendar_source=supplemental_cal,
@@ -1255,6 +1756,8 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                     except Exception:
                         pass
         finally:
+            if cli_demo_adapter is not None:
+                cli_demo_adapter.close()
             if qstore is not None:
                 qstore.close()
             if ostore is not None:
@@ -1459,7 +1962,35 @@ def main(argv: list[str] | None = None) -> None:
     start_p.add_argument(
         "--ctrader-demo-mirror-orders",
         action="store_true",
-        help="Unavailable: Demo broker mirroring is blocked pending position lifecycle acceptance",
+        help="Unavailable: Open API Demo broker mirroring is blocked; use --ctrader-cli-demo-orders with EventLensCliBridge",
+    )
+    start_p.add_argument(
+        "--ctrader-cli-demo-orders",
+        action="store_true",
+        help="Opt in to position-ID-aware Demo order intents & reconciliation via EventLensCliBridge (--quote-bridge-dir required)",
+    )
+    start_p.add_argument(
+        "--confirm-demo-execution",
+        action="store_true",
+        help="Explicitly confirm non-Live Demo order execution when --ctrader-cli-demo-orders is enabled",
+    )
+    start_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="SQLite state DB path for CTraderCliDemoBrokerAdapter (defaults to <shadow-db-dir>/cli-demo-broker.sqlite)",
+    )
+    start_p.add_argument(
+        "--expected-demo-account-number",
+        type=_parse_cli_expected_account_number,
+        default=None,
+        help="Expected cTrader Demo Account.Number (positive 64-bit integer required when --ctrader-cli-demo-orders is enabled)",
+    )
+    start_p.add_argument(
+        "--max-risk-per-trade-pct",
+        type=str,
+        default=None,
+        help="Optional ex-ante risk budget fraction of equity per trade (e.g. '0.02' for 2%% ROUND_DOWN lot cap)",
     )
     start_p.add_argument(
         "--ctrader-sample-interval-ms",
@@ -1587,6 +2118,113 @@ def main(argv: list[str] | None = None) -> None:
         default="live_poll",
     )
 
+    reconcile_p = sub.add_parser(
+        "demo-reconcile",
+        help="Read-only reconciliation check of EventLensCliBridge Demo positions vs local state DB",
+    )
+    _add_common_db_args(reconcile_p, suppress_defaults=True)
+    reconcile_p.add_argument(
+        "--quote-bridge-dir",
+        type=Path,
+        required=True,
+        help="Shared EventLensCliBridge directory containing execution-events.jsonl",
+    )
+    reconcile_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional separate SQLite state DB path for CTraderCliDemoBrokerAdapter",
+    )
+    reconcile_p.add_argument(
+        "--expected-demo-account-number",
+        type=_parse_cli_expected_account_number,
+        default=None,
+        help="Optional expected cTrader Demo Account.Number to enforce during reconciliation",
+    )
+
+    unlock_p = sub.add_parser(
+        "demo-unlock",
+        help="Explicit operator unlock after verifying ambiguous/unknown Demo execution state is clean",
+    )
+    _add_common_db_args(unlock_p, suppress_defaults=True)
+    unlock_p.add_argument(
+        "--quote-bridge-dir",
+        type=Path,
+        required=True,
+        help="Shared EventLensCliBridge directory containing execution-events.jsonl",
+    )
+    unlock_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional separate SQLite state DB path for CTraderCliDemoBrokerAdapter",
+    )
+    unlock_p.add_argument(
+        "--expected-demo-account-number",
+        type=_parse_cli_expected_account_number,
+        default=None,
+        help="Optional expected cTrader Demo Account.Number to enforce before unlocking",
+    )
+    unlock_p.add_argument(
+        "--note",
+        type=str,
+        required=True,
+        help="Mandatory operator audit note explaining broker verification (>= 5 chars)",
+    )
+
+    smoke_p = sub.add_parser(
+        "demo-smoke",
+        help="Supervised bounded cTrader CLI Demo smoke test (1,000-2,000 EUR open -> SL confirmed -> close -> flat)",
+    )
+    _add_common_db_args(smoke_p, suppress_defaults=True)
+    smoke_p.add_argument(
+        "--quote-bridge-dir",
+        type=Path,
+        required=True,
+        help="Shared EventLensCliBridge directory containing quotes-*.jsonl & execution-events.jsonl",
+    )
+    smoke_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional SQLite state DB path for CTraderCliDemoBrokerAdapter",
+    )
+    smoke_p.add_argument(
+        "--confirm-demo-execution",
+        action="store_true",
+        help="Explicitly confirm placing a bounded Demo smoke trade on the connected non-Live account",
+    )
+    smoke_p.add_argument(
+        "--expected-demo-account-number",
+        type=_parse_cli_expected_account_number,
+        default=None,
+        help="Positive 64-bit cTrader Demo Account.Number enforced on preflight & dispatch (or set CTRADER_DEMO_ACCOUNT_NUMBER)",
+    )
+    smoke_p.add_argument(
+        "--side",
+        choices=("buy", "sell"),
+        default="buy",
+        help="Bounded Demo smoke entry side (default: buy)",
+    )
+    smoke_p.add_argument(
+        "--volume-units",
+        type=int,
+        default=1000,
+        help="Bounded Demo smoke EUR units (must be 1000 or 2000; default: 1000)",
+    )
+    smoke_p.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=0.2,
+        help="Seconds to hold after broker fill before closing by Position.Id (default: 0.2, max: 30)",
+    )
+    smoke_p.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=20.0,
+        help="Max seconds to wait for quote/reconcile/fill/close confirmation (default: 20, max: 120)",
+    )
+
     recover_p = sub.add_parser(
         "recover", help="Reconcile incomplete pre-crash decisions and expired orders"
     )
@@ -1641,12 +2279,44 @@ def main(argv: list[str] | None = None) -> None:
             and getattr(args, "quote_bridge_dir", None) is not None
         ):
             parser.error("--ctrader-openapi and --quote-bridge-dir are mutually exclusive")
+        if getattr(args, "ctrader_cli_demo_orders", False):
+            if getattr(args, "quote_bridge_dir", None) is None:
+                parser.error("--ctrader-cli-demo-orders requires --quote-bridge-dir")
+            if not getattr(args, "confirm_demo_execution", False):
+                parser.error("--ctrader-cli-demo-orders requires --confirm-demo-execution")
+            if not getattr(args, "call_model", False):
+                parser.error(
+                    "--ctrader-cli-demo-orders on `start` requires --call-model "
+                    "(for model-free bounded Demo verification, use `eventlens-shadow demo-smoke`)"
+                )
+            try:
+                _resolve_expected_demo_account_number(args, require_positive=True)
+            except ValueError as exc:
+                parser.error(str(exc))
         if getattr(args, "max_daily_llm_calls", None) is not None and args.max_daily_llm_calls < 1:
             parser.error("--max-daily-llm-calls must be >= 1")
         if getattr(args, "ctrader_sample_interval_ms", 200) < 0:
             parser.error("--ctrader-sample-interval-ms must be >= 0")
         if args.poll_news and args.news_interval < 10.0:
             parser.error("--news-interval must be at least 10 seconds when polling live news")
+    elif args.command == "demo-smoke":
+        if not getattr(args, "confirm_demo_execution", False):
+            parser.error("demo-smoke requires --confirm-demo-execution")
+        try:
+            _resolve_expected_demo_account_number(args, require_positive=True)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if int(getattr(args, "volume_units", 1000)) not in (1000, 2000):
+            parser.error("demo-smoke --volume-units is strictly bounded to 1000 or 2000 EUR")
+        if not (0.0 <= float(getattr(args, "hold_seconds", 0.2)) <= 30.0):
+            parser.error("demo-smoke --hold-seconds must be in [0, 30]")
+        if not (1.0 <= float(getattr(args, "timeout_seconds", 20.0)) <= 120.0):
+            parser.error("demo-smoke --timeout-seconds must be in [1, 120]")
+    elif args.command in ("demo-reconcile", "demo-unlock"):
+        try:
+            _resolve_expected_demo_account_number(args, require_positive=False)
+        except ValueError as exc:
+            parser.error(str(exc))
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
     result = asyncio.run(_run_command(args))
     print(json.dumps(result, ensure_ascii=False, indent=2))

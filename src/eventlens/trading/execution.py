@@ -4,7 +4,7 @@ import asyncio
 import json
 import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -624,6 +624,39 @@ class SQLiteShadowLedger:
                     }
                 )
         return cancelled
+
+    def record_fault(
+        self,
+        *,
+        stage: str,
+        reason: str,
+        detail: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Persist a durable runtime/protection fault entry without fabricating fills."""
+        check_now = _utc(now or self.clock())
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            self._record_fault_locked(check_now, stage, reason, detail)
+
+    def has_matching_pending_target(self, target: TargetPortfolio) -> bool:
+        """Return True if an active pending shadow order already targets the same instrument weights."""
+        desired = tuple((p.instrument, p.weight) for p in target.positions)
+        with self._lock:
+            rows = self.db.execute(
+                "SELECT decision_json FROM shadow_receipts WHERE order_status='pending' ORDER BY rowid"
+            ).fetchall()
+            for row in rows:
+                try:
+                    pending_dec = AgentDecision.model_validate_json(row["decision_json"])
+                except Exception:
+                    continue
+                if pending_dec.target is None:
+                    continue
+                existing = tuple((p.instrument, p.weight) for p in pending_dec.target.positions)
+                if existing == desired:
+                    return True
+            return False
 
     def cancel_risk_increasing_pending_orders(
         self,
@@ -1654,12 +1687,22 @@ class SQLiteShadowLedger:
                 alerts.append(
                     f"PENDING_EXIT_STATE: pending_exit_reason={account['pending_exit_reason']}"
                 )
+            audit_metrics = build_shadow_audit_metrics(
+                fills=fills,
+                faults=faults,
+                receipts=receipts,
+                realized_pnl_usd=Decimal(account["realized_pnl_usd"]),
+                total_fees_usd=Decimal(account["total_fees_usd"]),
+                unclosed_risk=unclosed_risk,
+                max_holding_seconds=self.exit_policy.max_holding_seconds,
+            )
             return {
                 "scope": "shadow_ledger_only",
                 "execution_authorized": False,
                 "unclosed_risk": unclosed_risk,
                 "alerts": alerts,
                 "recovery_instructions": recovery_instructions,
+                "audit_metrics": audit_metrics,
                 "cost_model": self.cost_model.model_dump(mode="json"),
                 "exit_policy": self.exit_policy.model_dump(mode="json"),
                 "risk_policy": self.risk_policy.model_dump(mode="json"),
@@ -1686,6 +1729,204 @@ class SQLiteShadowLedger:
                 "fills": fills,
                 "faults": faults,
             }
+
+
+def build_shadow_audit_metrics(
+    *,
+    fills: Sequence[dict[str, Any]],
+    faults: Sequence[dict[str, Any]],
+    receipts: Sequence[dict[str, Any]],
+    realized_pnl_usd: Decimal,
+    total_fees_usd: Decimal,
+    unclosed_risk: bool,
+    max_holding_seconds: int,
+    protection_coverage: dict[str, Any] | None = None,
+    started_at: str | None = None,
+    stopped_at: str | None = None,
+    configured_duration_seconds: float | None = None,
+    exit_drain_timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Compute auditable PnL decomposition, round-trip holding durations, check ratios, and fault status."""
+    pure_raw_pnl = Decimal("0.00")
+    embedded_slippage_cost = Decimal("0.00")
+    round_trips: list[dict[str, Any]] = []
+
+    active_raw_entry: Decimal | None = None
+    active_fill_entry: Decimal | None = None
+    active_opened_at: datetime | None = None
+
+    for f in fills:
+        delta = Decimal(str(f["delta_quantity"]))
+        prior_q = Decimal(str(f["prior_quantity"]))
+        new_q = Decimal(str(f["new_quantity"]))
+        fill_px = Decimal(str(f["fill_price"]))
+        raw_bid = Decimal(str(f["raw_bid"])) if f.get("raw_bid") is not None else None
+        raw_ask = Decimal(str(f["raw_ask"])) if f.get("raw_ask") is not None else None
+        raw_exec_px = (
+            (raw_ask if delta > Decimal("0") else raw_bid)
+            if (raw_ask is not None and raw_bid is not None)
+            else fill_px
+        )
+        filled_dt = datetime.fromisoformat(str(f["filled_at"])).astimezone(UTC)
+
+        if prior_q == Decimal("0"):
+            active_raw_entry = raw_exec_px
+            active_fill_entry = fill_px
+            active_opened_at = filled_dt
+        elif (prior_q > Decimal("0") and delta > Decimal("0")) or (
+            prior_q < Decimal("0") and delta < Decimal("0")
+        ):
+            total_abs = abs(prior_q) + abs(delta)
+            if active_raw_entry is not None:
+                active_raw_entry = (
+                    abs(prior_q) * active_raw_entry + abs(delta) * raw_exec_px
+                ) / total_abs
+            if active_fill_entry is not None:
+                active_fill_entry = (
+                    abs(prior_q) * active_fill_entry + abs(delta) * fill_px
+                ) / total_abs
+        else:
+            closed_units = min(abs(prior_q), abs(delta))
+            signed_closed = closed_units if prior_q > Decimal("0") else -closed_units
+            leg_realized = Decimal(str(f["realized_pnl_usd"]))
+            if active_raw_entry is not None:
+                leg_raw_pnl = (signed_closed * (raw_exec_px - active_raw_entry)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            else:
+                leg_raw_pnl = leg_realized
+            pure_raw_pnl += leg_raw_pnl
+            embedded_slippage_cost += leg_raw_pnl - leg_realized
+            hold_sec = (
+                round(max(0.0, (filled_dt - active_opened_at).total_seconds()), 4)
+                if active_opened_at is not None
+                else None
+            )
+            overdue_sec = (
+                round(max(0.0, hold_sec - float(max_holding_seconds)), 4)
+                if hold_sec is not None
+                else 0.0
+            )
+            round_trips.append(
+                {
+                    "close_fill_id": f.get("fill_id"),
+                    "close_reason": f.get("reason"),
+                    "closed_units_eur": str(closed_units),
+                    "opened_at": active_opened_at.isoformat() if active_opened_at else None,
+                    "closed_at": filled_dt.isoformat(),
+                    "actual_holding_seconds": hold_sec,
+                    "configured_max_holding_seconds": max_holding_seconds,
+                    "holding_overdue_seconds": overdue_sec,
+                    "pure_raw_quote_pnl_usd": str(leg_raw_pnl),
+                    "realized_fill_price_pnl_usd": str(leg_realized),
+                    "close_leg_commission_usd": str(f.get("commission_usd", "0.00")),
+                }
+            )
+            if new_q == Decimal("0"):
+                active_raw_entry = None
+                active_fill_entry = None
+                active_opened_at = None
+            elif not (
+                (prior_q > Decimal("0") and new_q > Decimal("0"))
+                or (prior_q < Decimal("0") and new_q < Decimal("0"))
+            ):
+                active_raw_entry = raw_exec_px
+                active_fill_entry = fill_px
+                active_opened_at = filled_dt
+
+    net_after_fees = (realized_pnl_usd - total_fees_usd).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    identity_ok = (pure_raw_pnl - embedded_slippage_cost == realized_pnl_usd) and (
+        realized_pnl_usd - total_fees_usd == net_after_fees
+    )
+    modes = {str(r.get("mode", "shadow")) for r in receipts}
+    venue = (
+        "ctrader_cli_demo"
+        if modes == {"ctrader_cli_demo"}
+        else ("shadow_simulated" if modes <= {"shadow"} else "mixed")
+    )
+
+    wall_clock_seconds: float | None = None
+    configured_to_wall_ratio: float | None = None
+    if started_at and stopped_at:
+        try:
+            st_dt = datetime.fromisoformat(started_at).astimezone(UTC)
+            en_dt = datetime.fromisoformat(stopped_at).astimezone(UTC)
+            wall_clock_seconds = round(max(0.0, (en_dt - st_dt).total_seconds()), 6)
+            if configured_duration_seconds is not None and wall_clock_seconds > 0:
+                configured_to_wall_ratio = round(
+                    float(configured_duration_seconds) / wall_clock_seconds, 6
+                )
+        except ValueError:
+            pass
+
+    valid_quote_check_ratio: float | None = None
+    max_open_outage_sec = 0.0
+    deferred_exit_fault_count = sum(
+        1 for flt in faults if flt.get("reason") == "protective_exit_deferred_bad_quote"
+    )
+    if protection_coverage is not None:
+        tot_chk = int(protection_coverage.get("total_protection_checks", 0) or 0)
+        val_chk = int(protection_coverage.get("valid_quote_checks", 0) or 0)
+        if tot_chk > 0:
+            valid_quote_check_ratio = round(val_chk / tot_chk, 8)
+        for iv in protection_coverage.get("outage_intervals", []) or []:
+            if iv.get("position_open"):
+                max_open_outage_sec = max(
+                    max_open_outage_sec, float(iv.get("duration_seconds", 0.0) or 0.0)
+                )
+
+    fault_reasons: list[str] = []
+    if any(float(rt["holding_overdue_seconds"]) > 5.0 for rt in round_trips):
+        fault_reasons.append("holding_exceeded_max_holding_seconds")
+    if deferred_exit_fault_count > 0:
+        fault_reasons.append("protective_exit_deferred_due_to_quote_outage")
+    if max_open_outage_sec >= 60.0 or any(
+        flt.get("reason") == "open_position_quote_outage_alert" for flt in faults
+    ):
+        fault_reasons.append("open_position_quote_outage")
+    if unclosed_risk:
+        fault_reasons.append("unclosed_risk_at_report")
+    if (
+        wall_clock_seconds is not None
+        and configured_duration_seconds is not None
+        and wall_clock_seconds
+        > float(configured_duration_seconds) + float(exit_drain_timeout_seconds) + 30.0
+    ):
+        fault_reasons.append("wall_clock_exceeded_configured_duration")
+    if faults and not fault_reasons:
+        fault_reasons.append("ledger_faults_recorded")
+
+    return {
+        "execution_venue": venue,
+        "pnl_decomposition": {
+            "pure_raw_quote_pnl_usd": str(pure_raw_pnl),
+            "embedded_slippage_and_spread_cost_usd": str(embedded_slippage_cost),
+            "realized_fill_price_pnl_usd": str(realized_pnl_usd),
+            "explicit_commission_fees_usd": str(total_fees_usd),
+            "net_realized_pnl_after_fees_usd": str(net_after_fees),
+            "accounting_identity_verified": identity_ok,
+            "note": (
+                "realized_fill_price_pnl_usd already embeds fill-price spread/slippage; "
+                "subtracting explicit_commission_fees_usd once yields net_realized_pnl_after_fees_usd "
+                "with zero double-counting."
+            ),
+        },
+        "round_trips": round_trips,
+        "deferred_exit_fault_count": deferred_exit_fault_count,
+        "timing_and_quote_check_diagnostics": {
+            "wall_clock_seconds": wall_clock_seconds,
+            "configured_duration_seconds": configured_duration_seconds,
+            "configured_duration_to_wall_clock_ratio": configured_to_wall_ratio,
+            "valid_quote_check_ratio": valid_quote_check_ratio,
+            "max_open_position_outage_seconds": round(max_open_outage_sec, 4),
+            "metric_kind": "discrete_check_sample_ratio_not_time_uptime",
+            "unknown_inter_check_gaps_cannot_infer_uptime": True,
+        },
+        "quality_classification": "fault_affected" if fault_reasons else "clean",
+        "fault_reasons": fault_reasons,
+    }
 
 
 _REQUIRED_READONLY_LEDGER_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -1972,6 +2213,16 @@ def inspect_shadow_ledger_readonly(
                 f"PENDING_EXIT_STATE: pending_exit_reason={account['pending_exit_reason']}"
             )
 
+        audit_metrics = build_shadow_audit_metrics(
+            fills=fills,
+            faults=faults,
+            receipts=receipts,
+            realized_pnl_usd=realized,
+            total_fees_usd=fees,
+            unclosed_risk=unclosed_risk,
+            max_holding_seconds=exit_policy.max_holding_seconds,
+        )
+
         return {
             "readonly": True,
             "degraded": False,
@@ -1982,6 +2233,7 @@ def inspect_shadow_ledger_readonly(
             "unclosed_risk": unclosed_risk,
             "alerts": alerts,
             "recovery_instructions": recovery_instructions,
+            "audit_metrics": audit_metrics,
             "cost_model": effective_cost.model_dump(mode="json"),
             "exit_policy": exit_policy.model_dump(mode="json"),
             "risk_policy": risk_policy.model_dump(mode="json"),
