@@ -64,6 +64,8 @@ services:
       - "--ExpectedDemoAccountNumber=${CTRADER_DEMO_ACCOUNT_NUMBER:?CTRADER_DEMO_ACCOUNT_NUMBER is required}"
       - "--ExpectedAccountCurrency=${CTRADER_EXPECTED_ACCOUNT_CURRENCY:-USD}"
       - "--ReconcileIntervalSeconds=15"
+      - "--MaxDisconnectSeconds=90"
+      - "--MaxIdleTickSeconds=600"
     logging:
       driver: json-file
       options:

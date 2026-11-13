@@ -812,14 +812,29 @@ class SQLiteRuntimeStore:
             ).fetchone()
             return row is not None
 
-    def count_reviews(self, *, thesis_id: str | None = None) -> int:
+    def count_reviews(
+        self,
+        *,
+        thesis_id: str | None = None,
+        since: datetime | None = None,
+    ) -> int:
         with self._lock:
-            if thesis_id is None:
+            if thesis_id is None and since is None:
                 row = self.db.execute("SELECT COUNT(*) AS cnt FROM runtime_reviews").fetchone()
-            else:
+            elif thesis_id is None and since is not None:
+                row = self.db.execute(
+                    "SELECT COUNT(*) AS cnt FROM runtime_reviews WHERE triggered_at >= ?",
+                    (_utc(since).isoformat(),),
+                ).fetchone()
+            elif since is None:
                 row = self.db.execute(
                     "SELECT COUNT(*) AS cnt FROM runtime_reviews WHERE thesis_id=?",
                     (thesis_id,),
+                ).fetchone()
+            else:
+                row = self.db.execute(
+                    "SELECT COUNT(*) AS cnt FROM runtime_reviews WHERE thesis_id=? AND triggered_at >= ?",
+                    (thesis_id, _utc(since).isoformat()),
                 ).fetchone()
             return int(row["cnt"]) if row is not None else 0
 
@@ -2660,7 +2675,7 @@ class ShadowRunner:
                 now_init,
                 allow_multiple_sessions=True,
                 allow_unclean_session_rollover=True,
-                max_start_handshake_age_seconds=30.0,
+                max_start_handshake_age_seconds=3600.0,
             )
             self._attach_active_bridge_session(now_init, BridgeStart, BridgeQuote)
         self.ledger.stop_reason_provider = self._active_stop_reason
@@ -2876,6 +2891,10 @@ class ShadowRunner:
             for raw in self._quote_tail.poll():
                 outcome = self._quote_collector.accept(raw, _utc(self.clock()))
                 self._quote_bridge_counts[outcome] = self._quote_bridge_counts.get(outcome, 0) + 1
+            if self._quote_collector.session is None or self._quote_collector.stopped:
+                from .quotes import BridgeQuote, BridgeStart
+
+                self._attach_active_bridge_session(_utc(self.clock()), BridgeStart, BridgeQuote)
 
     def _current_market(self) -> MarketSnapshot:
         self._poll_quote_bridge_sync()
@@ -3439,9 +3458,20 @@ class ShadowRunner:
 
         store = self.runtime.state_store
 
+        review_window_start: datetime | None = (
+            now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if self._run_duration_seconds is None
+            else None
+        )
+
         def _total_reviews() -> int:
             if store is not None:
-                return store.count_reviews()
+                return store.count_reviews(since=review_window_start)
+            if review_window_start is not None:
+                return sum(
+                    sum(1 for ts in v if ts >= review_window_start)
+                    for v in self._in_memory_review_times.values()
+                )
             return sum(len(v) for v in self._in_memory_review_times.values())
 
         def _thesis_reviews(tid: str) -> int:

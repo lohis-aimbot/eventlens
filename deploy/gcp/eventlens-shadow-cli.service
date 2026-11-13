@@ -27,8 +27,10 @@ ExecStart=/bin/sh -ec 'exec /opt/eventlens/.venv/bin/eventlens-shadow start \
     --news-source tier1_english \
     --supplement-calendar-actuals \
     --call-model \
+    --max-quote-age 8.0 \
+    --max-quote-wait-seconds 120 \
     --enable-stateful-reviews \
-    --review-breakout-pips 12 \
+    --review-breakout-pips 8 \
     --periodic-review-seconds 1800 \
     --max-total-review-calls 500 \
     --max-daily-llm-calls 80 \

@@ -1074,7 +1074,7 @@ async def _run_demo_smoke(
         now_attach,
         allow_multiple_sessions=True,
         allow_unclean_session_rollover=True,
-        max_start_handshake_age_seconds=30.0,
+        max_start_handshake_age_seconds=3600.0,
     )
     from .quotes import BridgeQuote, BridgeStart
 

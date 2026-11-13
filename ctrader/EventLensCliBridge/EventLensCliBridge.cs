@@ -52,6 +52,12 @@ namespace cAlgo.Robots
         [Parameter("Reconcile interval seconds", DefaultValue = 15, MinValue = 2, MaxValue = 300)]
         public int ReconcileIntervalSeconds { get; set; }
 
+        [Parameter("Max disconnect seconds (0=disable)", DefaultValue = 90, MinValue = 0, MaxValue = 3600)]
+        public int MaxDisconnectSeconds { get; set; } = 90;
+
+        [Parameter("Max open-market tick stall seconds (0=disable)", DefaultValue = 600, MinValue = 0, MaxValue = 7200)]
+        public int MaxIdleTickSeconds { get; set; } = 600;
+
         private StreamWriter? _quoteWriter;
         private StreamWriter? _execWriter;
         private Ticks? _ticks;
@@ -70,6 +76,8 @@ namespace cAlgo.Robots
             new Dictionary<string, HashSet<long>>(StringComparer.Ordinal);
         private readonly Stopwatch _sessionElapsed = new Stopwatch();
         private readonly Stopwatch _reconcileElapsed = new Stopwatch();
+        private readonly Stopwatch _disconnectElapsed = new Stopwatch();
+        private readonly Stopwatch _idleTickElapsed = new Stopwatch();
         private DateTime _lastTickTime = DateTime.MinValue;
         private DateTime _pendingTime;
         private double _pendingBid;
@@ -119,6 +127,8 @@ namespace cAlgo.Robots
 
             OpenNewQuoteSession();
             _enabled = true;
+            _disconnectElapsed.Reset();
+            _idleTickElapsed.Restart();
             _reconcileElapsed.Restart();
             EmitReconcileSnapshot("startup");
             Timer.Start(TimeSpan.FromMilliseconds(50));
@@ -320,6 +330,7 @@ namespace cAlgo.Robots
             if (tickTime <= _lastTickTime)
                 return;
             _lastTickTime = tickTime;
+            _idleTickElapsed.Restart();
             _rawTicks++;
             if (tick.Ask == tick.Bid)
                 _rawZeroSpreadTicks++;
@@ -333,10 +344,61 @@ namespace cAlgo.Robots
             FlushPendingIfDue();
         }
 
+        private void TriggerWatchdogExit(string reason, double elapsedSeconds)
+        {
+            _enabled = false;
+            Timer.Stop();
+            Print(
+                "EVENTLENS_CLI_BRIDGE|watchdog_stop|bridge_session={0}|reason={1}|elapsed_s={2:F1}",
+                _bridgeSessionId,
+                reason,
+                elapsedSeconds);
+            try
+            {
+                CloseCurrentQuoteSession();
+            }
+            finally
+            {
+                _execWriter?.Dispose();
+                _execWriter = null;
+            }
+            // Exit non-zero (EX_TEMPFAIL=75) so Docker/systemd Restart=on-failure recovers transient
+            // broker disconnects while preserving exit-code-0 permanent halts on safety refusals.
+            Environment.Exit(75);
+        }
+
         protected override void OnTimer()
         {
             if (!_enabled) return;
             if (!VerifyDemoSafetyOrStop("on_timer")) return;
+
+            if (!Server.IsConnected)
+            {
+                if (!_disconnectElapsed.IsRunning)
+                    _disconnectElapsed.Restart();
+                if (MaxDisconnectSeconds > 0 && _disconnectElapsed.Elapsed.TotalSeconds >= MaxDisconnectSeconds)
+                {
+                    TriggerWatchdogExit("server_disconnected_timeout", _disconnectElapsed.Elapsed.TotalSeconds);
+                }
+                return;
+            }
+            if (_disconnectElapsed.IsRunning)
+                _disconnectElapsed.Reset();
+
+            if (Symbol.MarketHours != null && Symbol.MarketHours.IsOpened())
+            {
+                if (!_idleTickElapsed.IsRunning)
+                    _idleTickElapsed.Restart();
+                if (MaxIdleTickSeconds > 0 && _idleTickElapsed.Elapsed.TotalSeconds >= MaxIdleTickSeconds)
+                {
+                    TriggerWatchdogExit("market_open_tick_stall_timeout", _idleTickElapsed.Elapsed.TotalSeconds);
+                    return;
+                }
+            }
+            else
+            {
+                _idleTickElapsed.Restart();
+            }
 
             if (_sessionElapsed.Elapsed.TotalSeconds >= RotationIntervalSeconds)
                 OpenNewQuoteSession();
@@ -1306,7 +1368,7 @@ namespace cAlgo.Robots
             try
             {
                 CloseCurrentQuoteSession();
-                if (!_safetyRefused && !Account.IsLive)
+                if (!_safetyRefused && !Account.IsLive && Server.IsConnected)
                     EmitReconcileSnapshot("on_stop");
             }
             finally

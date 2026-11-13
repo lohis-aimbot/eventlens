@@ -11,6 +11,13 @@ from ..quotes import BridgeQuote, BridgeStart, BridgeStop, QuoteStore, utc
 MAX_LINE_BYTES = 16384
 
 
+def _safe_lstat_mtime_ns(path: Path) -> int:
+    try:
+        return path.lstat().st_mtime_ns
+    except OSError:
+        return 0
+
+
 class DirectoryTail:
     """Ignore preexisting files; reject truncation/replacement rather than replaying them."""
 
@@ -20,8 +27,18 @@ class DirectoryTail:
         self.files: dict[Path, tuple[int, int, bytes]] = {}
 
     def poll(self) -> Iterator[str]:
-        candidates = sorted(self.directory.glob("quotes-*.jsonl"))
-        newest_candidate = candidates[-1] if candidates else None
+        raw_candidates = list(self.directory.glob("quotes-*.jsonl"))
+        # Always drain already-open session files (including their final quotes + stop frame)
+        # before opening newly rotated files, and order new files chronologically rather than by UUID.
+        candidates = sorted(
+            raw_candidates,
+            key=lambda p: (0 if p in self.files else 1, _safe_lstat_mtime_ns(p), p.name),
+        )
+        newest_candidate = (
+            max(raw_candidates, key=lambda p: (_safe_lstat_mtime_ns(p), p.name))
+            if raw_candidates
+            else None
+        )
         for path in candidates:
             if path in self.ignored:
                 continue
@@ -33,7 +50,10 @@ class DirectoryTail:
                 )
             # Evict older drained session files superseded by newer rotated files before enforcing cap.
             if len(self.files) >= 4 and path not in self.files:
-                for old_path in sorted(list(self.files.keys())):
+                for old_path in sorted(
+                    list(self.files.keys()),
+                    key=lambda p: (_safe_lstat_mtime_ns(p), p.name),
+                ):
                     if old_path == path or old_path == newest_candidate:
                         continue
                     try:
@@ -141,6 +161,7 @@ class DemoQuoteCollector:
                     not self.started <= start.started_at <= received
                     or received - start.started_at
                     > timedelta(seconds=self.max_start_handshake_age_seconds)
+                    or received > start.started_at + timedelta(seconds=start.duration_seconds)
                 ):
                     raise ValueError("Bridge must start after the watcher, with a fresh handshake")
                 if not self.store.has_session(str(start.session_id)):

@@ -30,10 +30,30 @@ from ..quotes import QuoteQualityPolicy, validate_market_quote
 from ..reasoning import MAX_INPUT_CHARACTERS, Proposal, build_thesis_changes
 
 logger = logging.getLogger(__name__)
-SINGLE_PASS_PROMPT_VERSION = "single-pass-agent-v3.1"
+SINGLE_PASS_PROMPT_VERSION = "single-pass-agent-v3.2"
 CURRENT_THESIS_TOKEN = "__current__"
 
 PortfolioAction = Literal["IGNORE_EVENT", "HOLD", "SET_TARGET", "CLOSE"]
+
+_COMPACT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "memory_action": "ignore | create | update",
+    "thesis_id": "string | null (null for ignore/create; existing thesis_id for update)",
+    "status": "active | invalidated | resolved | null",
+    "narrative": "string | null",
+    "instruments": '["EUR/USD"] | null',
+    "invalidation_conditions": 'array<string> | null (for active HOLD, include >=1 exact "EUR/USD <= <price>" or "EUR/USD >= <price>" item)',
+    "confidence": "number 0..1 | null",
+    "evidence_role": "support | contradict | null",
+    "evidence_quote": "verbatim substring from current_event_verbatim_text | null",
+    "invalidate_thesis_ids": "array<string>",
+    "portfolio_action": "IGNORE_EVENT | HOLD | SET_TARGET | CLOSE",
+    "target_direction": "flat | long | short",
+    "target_weight": "decimal string in [-max_abs_target_weight, +max_abs_target_weight] ('0' unless SET_TARGET)",
+    "target_thesis_ids": 'array<string> (use ["__current__"] for SET_TARGET/CLOSE when creating/updating thesis)',
+    "strategy_hypothesis": "trend_following | countertrend | fundamental_breakout | unspecified",
+    "cited_evidence_ids": "array<string> (only verifiable IDs present in context)",
+    "rationale": "non-empty string",
+}
 
 
 class QuoteUnavailableForDecisionError(ValueError):
@@ -52,16 +72,18 @@ Output one JSON object only, with no extra keys and no markdown fences. Never ou
 1. Event Classification & Tradeability Discipline (Separate Interpretation from Trade Execution):
    - First identify the event regime from event_metadata and current_event_verbatim_text:
      * Scheduled Macro Release (`scheduled_macro`): numeric calendar prints with actual/forecast/previous fields.
-     * Unscheduled Official / Geopolitical / Policy News (`unscheduled_news`): central bank speeches, Q&A, policy shifts, or geopolitical developments that do NOT require numeric consensus fields.
-     * Internal Stateful Review (`internal_review`, when review_context is non-null): scheduled or excursion-based re-evaluation of an existing thesis, NOT fresh news arrival.
-   - Having a macro narrative does NOT automatically justify opening risk. Before proposing a risk-increasing `SET_TARGET` (opening from flat, adding to an existing position, or reversing direction), verify:
+     * Unscheduled Official / Policy / Central-Bank News (`unscheduled_news`): Fed/ECB speaker rate guidance, official policy shifts, rate-path repricing wires, or major geopolitical shocks. These are first-class tradeable catalysts and do NOT require numeric consensus fields; when a substantive central-bank or policy catalyst shifts EUR/USD rate expectations and short-window price trajectory (`1m`/`5m`/`15m`) confirms directional momentum with verified coverage (without already being overextended), propose `SET_TARGET` (`trend_following` or `fundamental_breakout`) rather than defaulting to passive `HOLD`.
+     * Internal Stateful Review (`internal_review`, when `review_context` is non-null): re-evaluation of an existing thesis triggered by price or schedule (`review_context.trigger_kind`).
+       - When `trigger_kind` is `"structured_price_condition"` or `"price_breakout_excursion"`: if `market_snapshot.price_trajectory` confirms directional breakout momentum (`1m`/`5m`/`15m`) aligned with the thesis narrative and spread/coverage are clean, convert the monitoring thesis from `HOLD` into an active `SET_TARGET` entry (`memory_action="update"`, `target_thesis_ids=["__current__"]`, copying `evidence_quote` verbatim from the substantive origin event text inside `current_event_verbatim_text`)—do NOT abstain merely because `internal_review` is not a new headline. Conversely, if the price rule triggered against the thesis direction, mark `status="invalidated"` (and `CLOSE` if holding an opposed position).
+       - When `trigger_kind` is `"scheduled_review_at"` (or `"periodic_review"` with faded follow-through) and price failed to confirm an unheld `HOLD` thesis, retire stale memory by updating `status="resolved"` with `portfolio_action="HOLD"`.
+   - Having a macro narrative does NOT automatically justify opening risk. Do NOT trade pure technical drift without a genuine macro/policy catalyst, and before proposing any risk-increasing `SET_TARGET` (opening from flat, adding, or reversing), verify:
      (a) Data & Revision Semantics (for `scheduled_macro`): Distinguish initial/flash releases from Final/revised prints. When a Final or revised release shows `reported_forecast == previous` or follow-up text indicates the benchmark is a preliminary reading rather than a fresh consensus shock, treat the surprise as ambiguous/needs-verification and abstain from opening new risk (`HOLD` or `IGNORE_EVENT`) unless corroborated by clean multi-component details.
-     (b) Timeliness & Catch-Up Awareness: Compare `event_metadata` timestamps (`source_timestamp`, `received_timestamp`) and `as_of`. Note that `scheduled_at` is a calendar schedule, not a verified publication timestamp, and an unknown publication time alone does not prove staleness; however, if `received_timestamp` lags `source_timestamp` materially after a polling gap or the move is already extended in `market_snapshot.price_trajectory`, treat the initial impulse as potentially priced in and abstain from chasing (`HOLD`).
+     (b) Timeliness & Catch-Up Awareness: Compare `event_metadata` timestamps (`source_timestamp`, `received_timestamp`) and `as_of` (for fresh events, not `internal_review`). Note that `scheduled_at` is a calendar schedule, not a verified publication timestamp, and an unknown publication time alone does not prove staleness; however, if `received_timestamp` lags `source_timestamp` materially after a polling gap or the move is already exhausted in `market_snapshot.price_trajectory`, abstain from chasing (`HOLD`).
      (c) Multi-Window Price Trajectory & Coverage Coherence:
          - In `market_snapshot.price_trajectory`, positive pip values (`> 0`) mean EUR/USD rose (EUR stronger / USD weaker); negative pip values (`< 0`) mean EUR/USD fell (EUR weaker / USD stronger).
          - `null` in `change_1m_pips`, `change_5m_pips`, or `change_15m_pips` means missing quote coverage over that lookback window (a quote gap), NOT zero volatility or flat price action.
          - Never claim a negative pip change is "consistent with" a long EUR/USD proposal (or a positive pip change with a short proposal).
-         - Evaluate the specific lookback window (`1m`, `5m`, `15m`, `30m`) relevant to the event's arrival: a valid short-window breakout (`1m`/`5m`) in the trade direction can support a `trend_following` or `fundamental_breakout` entry even if `change_30m_pips` was previously opposite, provided you explicitly cite which window confirms the move and which window is being faded. Conversely, if short-window returns (`1m`/`5m`/`15m`) are `null` (missing coverage), do NOT propose a new risk-increasing entry.
+         - Evaluate the specific lookback window (`1m`, `5m`, `15m`, `30m`) relevant to the catalyst: a valid short-window breakout (`1m`/`5m`) in the trade direction can support a `trend_following` or `fundamental_breakout` entry even if `change_30m_pips` was previously opposite, provided you explicitly cite which window confirms the move and which window is being faded. Conversely, if short-window returns (`1m`/`5m`/`15m`) are `null` (missing coverage), do NOT propose a new risk-increasing entry.
 
 2. Asymmetric Risk Addition vs Risk Reduction (Fixing "Fast-Open / Slow-Exit" Bias):
    - Opening, Adding, or Reversing Risk (`SET_TARGET` that increases exposure or flips sign):
@@ -80,7 +102,8 @@ Output one JSON object only, with no extra keys and no markdown fences. Never ou
 4. Required Action & Field Combinations (`SinglePassProposal` Schema):
    - `memory_action`: in `("ignore", "create", "update")`.
      * If `"ignore"`: set `thesis_id=null`, `status=null`, `narrative=null`, `instruments=null`, `invalidation_conditions=null`, `confidence=null`, `evidence_role=null`, `evidence_quote=null`, `invalidate_thesis_ids=[]`.
-     * If `"create"` or `"update"`: provide all thesis fields (`status`, `narrative`, `instruments=["EUR/USD"]`, `invalidation_conditions`, `confidence` in `0..1`, `evidence_role`, and verbatim `evidence_quote` from `current_event_verbatim_text`). Do NOT invent arbitrary numeric price support/resistance levels in `invalidation_conditions`; cite only observable levels present in `market_snapshot` (such as `window_15m_low_mid` / `window_30m_high_mid`) or qualitative macro invalidation conditions, keeping soft thesis invalidation distinct from broker stop-loss rules.
+     * If `"create"` or `"update"`: provide all thesis fields (`status`, `narrative`, `instruments=["EUR/USD"]`, `invalidation_conditions`, `confidence` in `0..1`, `evidence_role`, and verbatim `evidence_quote` from `current_event_verbatim_text`).
+     * Structured Price Trigger Rule: Do NOT invent arbitrary numeric levels; use only observable bounds from `market_snapshot.price_trajectory` (`window_15m_low_mid`, `window_15m_high_mid`, `window_30m_low_mid`, `window_30m_high_mid`). Whenever `status="active"` and `portfolio_action="HOLD"`, `invalidation_conditions` MUST include at least one standalone machine-executable trigger item formatted strictly as `"EUR/USD <= <level>"` or `"EUR/USD >= <level>"` (with no extra prose inside that string, e.g. `"EUR/USD <= 1.10728"`) so runtime stateful review wakes immediately on breakout or invalidation, alongside separate qualitative macro invalidation items.
    - `portfolio_action`:
      * `"IGNORE_EVENT"`: require `memory_action="ignore"`, `target_direction="flat"`, `target_weight="0"`, `target_thesis_ids=[]`, `evidence_quote=null`.
      * `"HOLD"`: keep current portfolio exposure unchanged. Require `target_direction="flat"`, `target_weight="0"`, `target_thesis_ids=[]`. (`memory_action` may be `"create"`, `"update"`, or `"ignore"`).
@@ -570,6 +593,7 @@ class SinglePassTradingAgent:
         max_risk_per_trade_pct: Decimal | None = None,
         ex_ante_stop_loss_pips: Decimal | None = None,
         max_short_window_gap_seconds: float = 120.0,
+        max_context_theses: int = 8,
         decision_ttl: timedelta = timedelta(minutes=2),
         review_horizon: timedelta = timedelta(hours=1),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -579,9 +603,10 @@ class SinglePassTradingAgent:
             or decision_ttl <= timedelta(0)
             or review_horizon <= timedelta(0)
             or max_position_weight <= Decimal("0")
+            or max_context_theses < 1
         ):
             raise ValueError(
-                "Quote age, decision TTL, review horizon, and max position weight must be positive"
+                "Quote age, decision TTL, review horizon, max position weight, and max_context_theses must be positive"
             )
         self.client = client
         self.instrument = instrument
@@ -591,6 +616,7 @@ class SinglePassTradingAgent:
         self.max_risk_per_trade_pct = max_risk_per_trade_pct
         self.ex_ante_stop_loss_pips = ex_ante_stop_loss_pips
         self.max_short_window_gap_seconds = max_short_window_gap_seconds
+        self.max_context_theses = max_context_theses
         self.quote_policy = QuoteQualityPolicy(
             instrument=instrument,
             max_quote_age_ms=int(max_quote_age.total_seconds() * 1000),
@@ -832,6 +858,35 @@ class SinglePassTradingAgent:
                 resolved.append(item)
         return tuple(dict.fromkeys(resolved))
 
+    def _select_context_theses(self, context: AgentContext) -> tuple[list[Thesis], set[str]]:
+        pinned_ids: set[str] = (
+            {context.review_context.thesis_id} if context.review_context is not None else set()
+        )
+        candidates = [
+            t for t in context.memory.theses if t.thesis_id in pinned_ids or t.status == "active"
+        ]
+        if len(candidates) <= self.max_context_theses:
+            return candidates, pinned_ids
+        pinned = [t for t in candidates if t.thesis_id in pinned_ids]
+        unpinned = [t for t in candidates if t.thesis_id not in pinned_ids]
+        slots = max(0, self.max_context_theses - len(pinned))
+        ranked_unpinned = sorted(
+            unpinned,
+            key=lambda t: (t.updated_at, t.confidence),
+            reverse=True,
+        )[:slots]
+        keep_ids = {t.thesis_id for t in pinned} | {t.thesis_id for t in ranked_unpinned}
+        return [t for t in candidates if t.thesis_id in keep_ids], pinned_ids
+
+    @staticmethod
+    def _serialize_context_thesis(thesis: Thesis) -> dict[str, Any]:
+        dumped = thesis.model_dump(mode="json")
+        if len(dumped.get("supporting_event_ids", ())) > 5:
+            dumped["supporting_event_ids"] = dumped["supporting_event_ids"][-5:]
+        if len(dumped.get("contradicting_event_ids", ())) > 5:
+            dumped["contradicting_event_ids"] = dumped["contradicting_event_ids"][-5:]
+        return dumped
+
     def _context_json(self, context: AgentContext) -> str:
         risk_constraints: dict[str, Any] = {
             "max_abs_target_weight": str(self.max_position_weight),
@@ -845,27 +900,40 @@ class SinglePassTradingAgent:
             risk_constraints["max_risk_per_trade_pct"] = str(self.max_risk_per_trade_pct)
         if self.ex_ante_stop_loss_pips is not None:
             risk_constraints["ex_ante_stop_loss_pips"] = str(self.ex_ante_stop_loss_pips)
-        return json.dumps(
-            {
-                "instrument": self.instrument,
-                "as_of": context.as_of.isoformat(),
-                "risk_constraints": risk_constraints,
-                "review_context": (
-                    context.review_context.model_dump(mode="json")
-                    if context.review_context is not None
-                    else None
-                ),
-                "current_event_verbatim_text": context.event.raw_text,
-                "event_metadata": context.event.model_dump(mode="json", exclude={"raw_text"}),
-                "prior_memory_theses_do_not_quote": [
-                    thesis.model_dump(mode="json") for thesis in context.memory.theses
-                ],
-                "market_snapshot": context.market.model_dump(mode="json"),
-                "portfolio_snapshot": context.portfolio.model_dump(mode="json"),
-                "output_schema": SinglePassProposal.model_json_schema(),
-            },
-            ensure_ascii=False,
+        selected_theses, pinned_ids = self._select_context_theses(context)
+        review_payload = (
+            context.review_context.model_dump(mode="json")
+            if context.review_context is not None
+            else None
         )
+        event_meta = context.event.model_dump(mode="json", exclude={"raw_text"})
+        market_payload = context.market.model_dump(mode="json")
+        portfolio_payload = context.portfolio.model_dump(mode="json")
+        while True:
+            rendered = json.dumps(
+                {
+                    "instrument": self.instrument,
+                    "as_of": context.as_of.isoformat(),
+                    "risk_constraints": risk_constraints,
+                    "review_context": review_payload,
+                    "current_event_verbatim_text": context.event.raw_text,
+                    "event_metadata": event_meta,
+                    "prior_memory_theses_do_not_quote": [
+                        self._serialize_context_thesis(thesis) for thesis in selected_theses
+                    ],
+                    "market_snapshot": market_payload,
+                    "portfolio_snapshot": portfolio_payload,
+                    "output_schema": _COMPACT_OUTPUT_SCHEMA,
+                },
+                ensure_ascii=False,
+            )
+            if len(rendered) <= MAX_INPUT_CHARACTERS:
+                return rendered
+            droppable = [t for t in selected_theses if t.thesis_id not in pinned_ids]
+            if not droppable:
+                return rendered
+            oldest = min(droppable, key=lambda t: (t.updated_at, t.confidence))
+            selected_theses = [t for t in selected_theses if t.thesis_id != oldest.thesis_id]
 
 
 class ObservationReasoner:

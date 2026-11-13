@@ -291,7 +291,7 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
     - verify_decision_evidence flags contradicted_price_direction (or missing_short_window_coverage without prose)
     - cited_evidence_ids stays empty (never auto-injected)
     - DeterministicHardRiskEngine blocks new risk with all 3 independent integrity reasons."""
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v3.1"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v3.2"
     assert "scales leveraged buying power" in SINGLE_PASS_SYSTEM_PROMPT
 
     now = datetime(2026, 11, 4, 15, 0, 41, tzinfo=UTC)
