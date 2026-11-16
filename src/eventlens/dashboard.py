@@ -7,7 +7,7 @@ import mimetypes
 import os
 import re
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,11 +56,51 @@ _REASON_ZH_MAP: dict[str, str] = {
     "missing_active_thesis_backing": "缺少有效绑定档案（旧版规则）",
 }
 
+_REASON_EN_MAP: dict[str, str] = {
+    "approved": "All hard-risk controls passed",
+    "equity_below_minimum_floor": "Account equity below minimum safety floor",
+    "daily_loss_limit_exceeded": "Daily maximum loss limit reached",
+    "reversal_blocked_by_daily_loss_limit": "Daily loss limit triggered; reversal blocked",
+    "daily_close_cutoff_active": "Within NY 16:55 rollover cutoff; new risk paused",
+    "kill_switch_active": "Manual emergency kill-switch active",
+    "reversal_blocked_by_kill_switch": "Kill-switch active; reversal blocked",
+    "pending_orders_outstanding": "Outstanding broker order pending settlement",
+    "stale_market_quote": "Market quote stale; new risk rejected",
+    "missing_market_quote": "Market quote missing; new risk rejected",
+    "spread_too_wide": "Bid-ask spread exceeds hard-risk cap",
+    "ex_ante_stop_risk_exceeds_budget": "Ex-ante stop-loss risk exceeds 2% budget",
+    "below_minimum_trade_volume": "Risk-budgeted volume below 0.01 lot minimum",
+    "margin_utilization_exceeds_limit": "Margin utilization exceeds limit",
+    "delayed_event_catchup_blocks_new_risk": "Delayed catch-up wire; chasing blocked",
+    "daily_baseline_unconfirmed": "Cross-day equity baseline unconfirmed",
+    "protective_exit_pending": "Protective exit order pending",
+    "unreliable_position_valuation": "Open position valuation unreliable",
+    "missing_active_thesis_backing": "Missing active legacy thesis backing",
+}
+
+_EXIT_REASON_EN: dict[str, str] = {
+    "protective_take_profit": "Take Profit",
+    "protective_trailing_stop": "Trailing Stop",
+    "protective_stop_loss": "Hard Stop-Loss",
+    "protective_max_holding_time": "Max Hold Horizon",
+    "max_holding_horizon_exceeded": "Max Hold Horizon",
+    "protective_max_holding_horizon": "Max Hold Horizon",
+    "protective_daily_close": "NY Close Cutoff",
+    "protective_daily_loss_limit": "Daily Loss Guard",
+    "protective_max_position_loss": "Max Position USD Stop",
+    "ai_close": "AI Active Close",
+    "broker_closed": "Broker Closed",
+    "broker_deal": "Broker Closed",
+    "open": "OPEN",
+}
+
 _EXIT_REASON_ZH: dict[str, str] = {
     "protective_take_profit": "止盈触发",
     "protective_trailing_stop": "移动止盈锁利",
     "protective_stop_loss": "硬止损保护",
     "protective_max_holding_time": "持仓超时保护",
+    "max_holding_horizon_exceeded": "持仓超时保护",
+    "protective_max_holding_horizon": "持仓超时保护",
     "protective_daily_close": "纽约收盘保护平仓",
     "protective_daily_loss_limit": "日内亏损熔断平仓",
     "protective_max_position_loss": "单笔最大美元亏损止损",
@@ -87,24 +127,40 @@ def _translate_reason_zh(raw: str) -> str:
     return raw
 
 
-def _translate_exit_zh(code: str | None) -> str:
+def _translate_reason_en(raw: str) -> str:
+    head = raw.split(":", 1)[0]
+    if head in _REASON_EN_MAP:
+        return _REASON_EN_MAP[head]
+    if head == "ambiguous_macro_semantics":
+        return "Macro prelim/revision consensus semantics ambiguous"
+    if head == "unverified_decision_evidence":
+        detail = raw.split(":", 1)[1] if ":" in raw else ""
+        if "missing_short_window_coverage" in detail:
+            return "Post-gap short-window (1m/5m/15m) quote coverage incomplete"
+        return f"Market evidence verification failed ({detail})"
+    if head == "stale_or_degraded_source_blocks_new_risk":
+        return "News collector stream stale or degraded"
+    return raw
+
+
+def _translate_exit_reason(code: str | None) -> tuple[str, str]:
     if not code:
-        return "经纪商触发平仓"
-    if code in _EXIT_REASON_ZH:
-        return _EXIT_REASON_ZH[code]
+        return "经纪商触发平仓", "Broker Closed"
+    if code in _EXIT_REASON_ZH and code in _EXIT_REASON_EN:
+        return _EXIT_REASON_ZH[code], _EXIT_REASON_EN[code]
     if "take_profit" in code:
-        return "止盈触发"
+        return "止盈触发", "Take Profit"
     if "trailing" in code:
-        return "移动止盈锁利"
+        return "移动止盈锁利", "Trailing Stop"
     if "stop_loss" in code:
-        return "硬止损保护"
-    if "holding" in code:
-        return "持仓超时保护"
+        return "硬止损保护", "Hard Stop-Loss"
+    if "holding" in code or "horizon" in code:
+        return "持仓超时保护", "Max Hold Horizon"
     if "daily_close" in code:
-        return "纽约收盘保护平仓"
+        return "纽约收盘保护平仓", "NY Close Cutoff"
     if "ai" in code or "decision" in code:
-        return "AI 主动平仓"
-    return code
+        return "AI 主动平仓", "AI Active Close"
+    return code, code
 
 
 def _open_ro(path: Path | None) -> sqlite3.Connection | None:
@@ -216,20 +272,49 @@ def sanitize_and_verify_snapshot(payload: dict[str, Any]) -> str:
     return rendered
 
 
-def _extract_headline(raw_text: str) -> str:
+_REVIEW_HEADER_RE = re.compile(
+    r"^\[INTERNAL STATEFUL REVIEW\]\s*trigger=([^\s(]+)\s*\(([^)]+)\)", re.I
+)
+_LEADING_BRACKET_TAGS_RE = re.compile(r"^(?:\[[^\[\]\n]+\]\s*)+")
+_EURUSD_RULE_RE = re.compile(r"(EUR/USD\s*(?:mid|bid|ask)?\s*(?:>=|<=|>|<)\s*\d+(?:\.\d+)?)", re.I)
+
+
+def _extract_headline_and_meta(raw_text: str) -> tuple[str, dict[str, str] | None]:
     lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
-    filtered: list[str] = []
+    review_meta: dict[str, str] | None = None
+    cleaned_lines: list[str] = []
     for ln in lines:
         if ln.startswith("[INTERNAL STATEFUL REVIEW]"):
-            return ln
-        if ln.startswith("[") and ln.endswith("]"):
+            m = _REVIEW_HEADER_RE.match(ln)
+            if m:
+                t_kind = m.group(1).strip()
+                t_detail = m.group(2).strip()
+                rule_m = _EURUSD_RULE_RE.search(ln)
+                review_meta = {
+                    "trigger_kind": t_kind,
+                    "trigger_rule": rule_m.group(1).strip() if rule_m else t_detail[:64],
+                }
+            else:
+                review_meta = {"trigger_kind": "periodic_review", "trigger_rule": "Stateful Review"}
             continue
-        if ln.lower().startswith("source url:") or ln.lower().startswith("published:"):
+        stripped = _LEADING_BRACKET_TAGS_RE.sub("", ln).strip()
+        if not stripped:
             continue
-        filtered.append(ln)
-    joined = " ".join(filtered) if filtered else " ".join(lines)
+        low = stripped.lower()
+        if (
+            low.startswith("source url:")
+            or low.startswith("published:")
+            or low.startswith("categories:")
+            or stripped in ("Market", "News", "Markets")
+        ):
+            continue
+        cleaned_lines.append(stripped)
+    joined = cleaned_lines[0] if cleaned_lines else " ".join(lines)
+    if len(joined) < 36 and len(cleaned_lines) > 1:
+        joined = f"{joined} — {cleaned_lines[1]}"
     joined = re.sub(r"\s+", " ", joined).strip()
-    return joined[:160] + ("…" if len(joined) > 160 else "")
+    headline = joined[:160] + ("…" if len(joined) > 160 else "")
+    return headline, review_meta
 
 
 def _load_latest_quote(
@@ -303,6 +388,7 @@ def _collect_decisions_and_funnel(
     mem_conn: sqlite3.Connection | None,
     *,
     max_decisions: int,
+    pinned_decision_ids: set[str] | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, Any] | None,
@@ -314,7 +400,10 @@ def _collect_decisions_and_funnel(
     decisions_out: list[dict[str, Any]] = []
     system_prompts: dict[str, str] = {SINGLE_PASS_PROMPT_VERSION: SINGLE_PASS_SYSTEM_PROMPT}
     latest_card: dict[str, Any] | None = None
-    latest_model = "deepseek-reasoner"
+    active_model = (
+        os.environ.get("DEEPSEEK_MODEL") or "deepseek-reasoner"
+    ).strip() or "deepseek-reasoner"
+    pinned = pinned_decision_ids or set()
 
     mem_raw_by_event: dict[str, str] = {}
     mem_dec_by_event: dict[str, AgentDecision] = {}
@@ -339,6 +428,7 @@ def _collect_decisions_and_funnel(
 
     funnel = {
         "total_events": 0,
+        "filtered_out_events": 0,
         "evaluated_events": 0,
         "proposed_trades": 0,
         "approved_trades": 0,
@@ -362,11 +452,14 @@ def _collect_decisions_and_funnel(
         all_rows = shadow_conn.execute(
             "SELECT * FROM runtime_events ORDER BY received_at DESC, updated_at DESC"
         ).fetchall()
-        for idx, row in enumerate(all_rows):
+        non_filtered_added = 0
+        for row in all_rows:
             state = str(row["state"])
             ts_str = str(row["received_at"] or row["updated_at"])
             t_day = _trading_day_str(ts_str)
             funnel["total_events"] += 1
+            if state == "filtered_out":
+                funnel["filtered_out_events"] += 1
 
             decision: AgentDecision | None = mem_dec_by_event.get(str(row["event_id"]))
             if decision is None and row["decision_json"]:
@@ -392,8 +485,6 @@ def _collect_decisions_and_funnel(
             if decision is not None:
                 funnel["evaluated_events"] += 1
                 _day_bucket(t_day)["events_evaluated"] += 1
-                if latest_model == "deepseek-reasoner" and decision.model_version:
-                    latest_model = decision.model_version.split("@", 1)[0]
                 if latest_card is None and decision.market_state_card is not None:
                     latest_card = decision.market_state_card.model_dump(mode="json")
                 if decision.prompt_version and decision.prompt_version not in system_prompts:
@@ -417,8 +508,14 @@ def _collect_decisions_and_funnel(
                 funnel["risk_rejected"] += 1
                 _day_bucket(t_day)["signals_rejected"] += 1
 
-            if idx >= max_decisions:
+            row_dec_id = decision.decision_id if decision is not None else row["decision_id"]
+            is_pinned = bool(row_dec_id and str(row_dec_id) in pinned)
+            if state == "filtered_out" and not is_pinned:
                 continue
+            if not is_pinned and non_filtered_added >= max_decisions:
+                continue
+            if state != "filtered_out":
+                non_filtered_added += 1
 
             raw_text = (
                 ctx.event.raw_text
@@ -488,17 +585,19 @@ def _collect_decisions_and_funnel(
             ):
                 reasons_raw = [str(row["reason"])]
 
+            headline, review_meta = (
+                _extract_headline_and_meta(raw_text) if raw_text else (str(row["event_id"]), None)
+            )
             decisions_out.append(
                 {
-                    "decision_id": decision.decision_id
-                    if decision is not None
-                    else row["decision_id"],
+                    "decision_id": row_dec_id,
                     "event_id": str(row["event_id"]),
                     "trading_day": t_day,
                     "timestamp": ts_str,
                     "source": source,
                     "source_type": source_type,
-                    "headline": _extract_headline(raw_text) if raw_text else str(row["event_id"]),
+                    "headline": headline,
+                    "review_meta": review_meta,
                     "raw_text": raw_text[:4000],
                     "state": state,
                     "state_reason": str(row["reason"]),
@@ -536,6 +635,7 @@ def _collect_decisions_and_funnel(
                         ),
                         "reasons": reasons_raw,
                         "reasons_zh": [_translate_reason_zh(r) for r in reasons_raw],
+                        "reasons_en": [_translate_reason_en(r) for r in reasons_raw],
                     },
                 }
             )
@@ -544,6 +644,9 @@ def _collect_decisions_and_funnel(
         for ev_id, dec in list(mem_dec_by_event.items())[:max_decisions]:
             t_day = _trading_day_str(dec.completed_at.isoformat())
             raw_text = mem_raw_by_event.get(ev_id, "")
+            headline, review_meta = (
+                _extract_headline_and_meta(raw_text) if raw_text else (ev_id, None)
+            )
             target_dir = "flat"
             target_weight = "0"
             if dec.target and dec.target.positions:
@@ -558,7 +661,8 @@ def _collect_decisions_and_funnel(
                     "timestamp": dec.completed_at.isoformat(),
                     "source": "memory",
                     "source_type": "news",
-                    "headline": _extract_headline(raw_text) if raw_text else ev_id,
+                    "headline": headline,
+                    "review_meta": review_meta,
                     "raw_text": raw_text[:4000],
                     "state": "memory_committed",
                     "state_reason": dec.portfolio_action or "HOLD",
@@ -585,6 +689,7 @@ def _collect_decisions_and_funnel(
                         "approved_quantity_eur": None,
                         "reasons": [],
                         "reasons_zh": [],
+                        "reasons_en": [],
                     },
                 }
             )
@@ -616,7 +721,7 @@ def _collect_decisions_and_funnel(
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
-    return decisions_out, latest_card, system_prompts, daily_funnel, funnel, latest_model
+    return decisions_out, latest_card, system_prompts, daily_funnel, funnel, active_model
 
 
 def _collect_demo_trades_and_account(
@@ -677,6 +782,7 @@ def _collect_demo_trades_and_account(
                 open_pos_out = {
                     "side": side,
                     "side_zh": "做多" if side == "long" else "做空",
+                    "side_en": "LONG" if side == "long" else "SHORT",
                     "lots": round(units / 100_000.0, 2),
                     "units_eur": units,
                     "entry_price": entry_px,
@@ -694,6 +800,7 @@ def _collect_demo_trades_and_account(
                         "status": "open",
                         "side": side,
                         "side_zh": "做多" if side == "long" else "做空",
+                        "side_en": "LONG" if side == "long" else "SHORT",
                         "units_eur": units,
                         "lots": round(units / 100_000.0, 2),
                         "entry_price": entry_px,
@@ -707,6 +814,7 @@ def _collect_demo_trades_and_account(
                         "holding_seconds": None,
                         "exit_reason_code": "open",
                         "exit_reason_zh": "持仓中",
+                        "exit_reason_en": "OPEN",
                         "decision_id": entry_dec_id,
                         "close_decision_id": None,
                     }
@@ -749,6 +857,7 @@ def _collect_demo_trades_and_account(
                     else None
                 )
                 pips = _pip_delta(side=side, entry_price=entry_px, exit_price=close_px)
+                exit_zh, exit_en = _translate_exit_reason(close_reason)
                 trades.append(
                     {
                         "trade_id": f"pos-{pos_id}",
@@ -756,6 +865,7 @@ def _collect_demo_trades_and_account(
                         "status": "closed",
                         "side": side,
                         "side_zh": "做多" if side == "long" else "做空",
+                        "side_en": "LONG" if side == "long" else "SHORT",
                         "units_eur": total_units,
                         "lots": round(total_units / 100_000.0, 2),
                         "entry_price": entry_px,
@@ -768,7 +878,8 @@ def _collect_demo_trades_and_account(
                         "closed_at": closed_ts,
                         "holding_seconds": hold_s,
                         "exit_reason_code": close_reason,
-                        "exit_reason_zh": _translate_exit_zh(close_reason),
+                        "exit_reason_zh": exit_zh,
+                        "exit_reason_en": exit_en,
                         "decision_id": entry_dec_id,
                         "close_decision_id": close_dec_id,
                     }
@@ -888,6 +999,7 @@ def _collect_shadow_trades_and_account(
                 total_fee = round(float(open_leg["open_fee"]) + fee, 2)
                 pips = _pip_delta(side=side, entry_price=open_leg["entry_price"], exit_price=px)
                 net_pnl = round(net_realized - total_fee, 2)
+                exit_zh, exit_en = _translate_exit_reason(reason)
                 trades.append(
                     {
                         "trade_id": str(r["fill_id"]),
@@ -895,6 +1007,7 @@ def _collect_shadow_trades_and_account(
                         "status": "closed",
                         "side": side,
                         "side_zh": "做多" if side == "long" else "做空",
+                        "side_en": "LONG" if side == "long" else "SHORT",
                         "units_eur": int(abs(delta_q)) or open_leg["units_eur"],
                         "lots": round((int(abs(delta_q)) or open_leg["units_eur"]) / 100_000.0, 2),
                         "entry_price": open_leg["entry_price"],
@@ -907,7 +1020,8 @@ def _collect_shadow_trades_and_account(
                         "closed_at": filled_at,
                         "holding_seconds": hold_s,
                         "exit_reason_code": reason,
-                        "exit_reason_zh": _translate_exit_zh(reason),
+                        "exit_reason_zh": exit_zh,
+                        "exit_reason_en": exit_en,
                         "decision_id": open_leg["decision_id"],
                         "close_decision_id": dec_id,
                     }
@@ -931,6 +1045,7 @@ def _collect_shadow_trades_and_account(
         open_pos_out = {
             "side": side,
             "side_zh": "做多" if side == "long" else "做空",
+            "side_en": "LONG" if side == "long" else "SHORT",
             "lots": round(abs(qty) / 100_000.0, 2),
             "units_eur": int(abs(qty)),
             "entry_price": avg_entry,
@@ -986,13 +1101,19 @@ def _build_reports_and_kpis(
     daily_reports: list[dict[str, Any]] = []
     for day in sorted(all_days, reverse=True):
         day_trades = [t for t in closed_asc if t["trading_day"] == day]
+        df = daily_funnel.get(day, {})
+        try:
+            is_saturday = date.fromisoformat(day).weekday() == 5
+        except ValueError:
+            is_saturday = False
+        if is_saturday and not day_trades and int(df.get("events_evaluated", 0)) == 0:
+            continue
         net_usd = round(sum(float(t["net_pnl_usd"] or 0.0) for t in day_trades), 2)
         gross_usd = round(sum(float(t["gross_pnl_usd"] or 0.0) for t in day_trades), 2)
         comm_usd = round(sum(float(t["commissions_usd"] or 0.0) for t in day_trades), 2)
         net_pips = round(sum(float(t["pips"] or 0.0) for t in day_trades), 1)
         wins = [t for t in day_trades if float(t["net_pnl_usd"] or 0.0) > 0]
         losses = [t for t in day_trades if float(t["net_pnl_usd"] or 0.0) < 0]
-        df = daily_funnel.get(day, {})
         ds = daily_state_map.get(day, {})
         base_eq = ds.get("baseline_equity_usd")
         daily_reports.append(
@@ -1041,6 +1162,7 @@ def _build_reports_and_kpis(
             "equity_usd": round(float(start_eq), 2),
             "cum_pnl_usd": 0.0,
             "label": "初始基准",
+            "label_en": "Initial Baseline",
         }
     )
     for t in closed_asc:
@@ -1053,6 +1175,7 @@ def _build_reports_and_kpis(
                 "equity_usd": round(float(start_eq) + cum, 2),
                 "cum_pnl_usd": cum,
                 "label": f"{t['side_zh']} {t['exit_reason_zh']} ({pnl:+.2f} USD)",
+                "label_en": f"{t.get('side_en', t['side'].upper())} {t.get('exit_reason_en', t['exit_reason_code'])} ({pnl:+.2f} USD)",
             }
         )
     if live_eq > 0 and (len(curve) == 1 or abs(live_eq - curve[-1]["equity_usd"]) >= 0.01):
@@ -1063,6 +1186,7 @@ def _build_reports_and_kpis(
                 "equity_usd": round(live_eq, 2),
                 "cum_pnl_usd": round(live_eq - float(start_eq), 2),
                 "label": "最新净值",
+                "label_en": "Latest Equity",
             }
         )
 
@@ -1122,9 +1246,6 @@ def build_dashboard_snapshot(
     broker_conn = _open_ro(eff_cli_db)
     try:
         latest_quote = _load_latest_quote(quotes_conn, broker_conn)
-        decisions, market_state_card, system_prompts, daily_funnel, funnel, detected_model = (
-            _collect_decisions_and_funnel(shadow_conn, mem_conn, max_decisions=max_decisions)
-        )
 
         use_broker = broker_conn is not None and _table_exists(broker_conn, "demo_broker_events")
         has_broker_rows = bool(
@@ -1158,6 +1279,22 @@ def build_dashboard_snapshot(
             }
             trades = []
             daily_state_map = {}
+
+        pinned_decision_ids: set[str] = set()
+        for t in trades:
+            if t.get("decision_id"):
+                pinned_decision_ids.add(str(t["decision_id"]))
+            if t.get("close_decision_id"):
+                pinned_decision_ids.add(str(t["close_decision_id"]))
+
+        decisions, market_state_card, system_prompts, daily_funnel, funnel, detected_model = (
+            _collect_decisions_and_funnel(
+                shadow_conn,
+                mem_conn,
+                max_decisions=max_decisions,
+                pinned_decision_ids=pinned_decision_ids,
+            )
+        )
 
         runner_info: dict[str, Any] = {
             "status": vm_status,

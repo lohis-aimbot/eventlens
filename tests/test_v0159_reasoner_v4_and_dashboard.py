@@ -339,6 +339,17 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
         assert len(close_fills) == 1
         assert close_fills[0].new_quantity == Decimal("0")
 
+        # Add a pre-filtered noise row into runtime_events; verify it increments total_events/filtered_out_events
+        # while staying excluded from decisions[], AND verify max_decisions=1 still retains pinned trade open_dec_id!
+        store.upsert_event_state(
+            event_id="noise-filtered-1",
+            source_reference="https://example.com/noise",
+            received_at=now_box[0] + timedelta(minutes=2),
+            now=now_box[0] + timedelta(minutes=2),
+            state="filtered_out",
+            reason="below_news_importance_threshold",
+        )
+
         # Build & sanitize dashboard snapshot
         snap_out = tmp_path / "snapshot.json"
         meta = export_dashboard_snapshot(
@@ -346,8 +357,8 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
             shadow_db=shd_path,
             memory_db=mem_path,
             vm_status="running",
+            max_decisions=1,
         )
-        assert meta["decisions_exported"] == 3
         assert meta["trades_exported"] == 1
         raw_json = snap_out.read_text(encoding="utf-8")
         assert "12345678" not in raw_json
@@ -359,8 +370,17 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
         assert parsed["kpis"]["total_trades"] == 1
         assert parsed["kpis"]["win_count"] == 1
         assert parsed["kpis"]["net_pnl_usd"] > 3.0
+        assert parsed["kpis"]["funnel"]["total_events"] == 4
+        assert parsed["kpis"]["funnel"]["filtered_out_events"] == 1
+        assert all(d["state"] != "filtered_out" for d in parsed["decisions"])
+        dec_ids_exported = {d["decision_id"] for d in parsed["decisions"]}
+        assert open_dec_id in dec_ids_exported
         assert parsed["trades"][0]["decision_id"] == open_dec_id
-        assert len(parsed["equity_curve"]) >= 2
+        assert parsed["trades"][0]["side_en"] == "SHORT"
+        assert parsed["trades"][0]["exit_reason_en"]
+        assert parsed["equity_curve"][0]["label_en"] == "Initial Baseline"
+        assert any(d["review_meta"] is not None for d in parsed["decisions"])
+        assert all("[INTERNAL STATEFUL REVIEW]" not in d["headline"] for d in parsed["decisions"])
         assert parsed["market_state_card"]["market_bias"] == "neutral"
         assert "deepseek-reasoner" in parsed["model_config"]["model"]
 
@@ -393,7 +413,10 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as r_html:
                     assert r_html.status == 200
                     html_txt = r_html.read().decode("utf-8")
-                    assert "每日交易报表" in html_txt
+                    assert "每日量化报表" in html_txt
+                    assert "Live Intelligence" in html_txt
+                    assert "Performance & Ledger" in html_txt
+                    assert 'data-theme="light"' in html_txt
                 break
             except OSError:
                 time.sleep(0.05)

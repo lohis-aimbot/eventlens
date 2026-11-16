@@ -1,737 +1,485 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="EventLens" />
-  <meta name="theme-color" content="#ffffff" />
+  <meta name="theme-color" content="#ffffff" id="metaThemeColor" />
   <title>EventLens · 实时推理看板与每日报表</title>
   <link rel="icon" type="image/svg+xml" href="../assets/eventlens-logo.svg" />
   <link rel="apple-touch-icon" href="../assets/eventlens-logo.svg" />
   <link rel="manifest" href="manifest.webmanifest" />
   <style>
-    :root {
-      --bg-canvas: #f6f7f9;
-      --bg-card: #ffffff;
-      --bg-subtle: #f1f4f8;
-      --bg-thinking: #fafaf8;
-      --ink-1: #0b1220;
-      --ink-2: #475569;
+    :root, [data-theme="light"] {
+      --bg: #f4f6fa;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --surface-3: #eff2f7;
+      --surface-glass: rgba(255, 255, 255, 0.86);
+      --cot-bg: #faf9f6;
+      --ink-1: #0a0f1c;
+      --ink-2: #334155;
       --ink-3: #64748b;
       --ink-4: #94a3b8;
-      --line: rgba(15, 23, 42, 0.08);
-      --line-strong: rgba(15, 23, 42, 0.14);
-      --accent: #1d4ed8;
-      --accent-soft: #eff6ff;
+      --border: rgba(15, 23, 42, 0.08);
+      --border-strong: rgba(15, 23, 42, 0.15);
+      --accent: #2563eb;
+      --accent-soft: rgba(37, 99, 235, 0.09);
+      --accent-border: rgba(37, 99, 235, 0.24);
       --green: #059669;
-      --green-soft: #ecfdf5;
-      --green-border: rgba(5, 150, 105, 0.22);
+      --green-soft: rgba(5, 150, 105, 0.09);
+      --green-border: rgba(5, 150, 105, 0.24);
       --red: #e11d48;
-      --red-soft: #fff1f2;
-      --red-border: rgba(225, 29, 72, 0.22);
+      --red-soft: rgba(225, 29, 72, 0.09);
+      --red-border: rgba(225, 29, 72, 0.24);
       --amber: #d97706;
-      --amber-soft: #fffbeb;
-      --amber-border: rgba(217, 119, 6, 0.24);
-      --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.03), 0 8px 24px -14px rgba(15, 23, 42, 0.08);
-      --radius-lg: 14px;
-      --radius-md: 10px;
-      --radius-sm: 7px;
+      --amber-soft: rgba(217, 119, 6, 0.10);
+      --amber-border: rgba(217, 119, 6, 0.26);
+      --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.03), 0 10px 28px -16px rgba(15, 23, 42, 0.09);
+      --shadow-pop: 0 12px 32px -8px rgba(15, 23, 42, 0.14);
+      --grid-line: rgba(15, 23, 42, 0.06);
+      --axis-zero: rgba(15, 23, 42, 0.18);
+    }
+
+    [data-theme="dark"] {
+      --bg: #070b12;
+      --surface: #0d131f;
+      --surface-2: #121a2a;
+      --surface-3: #182235;
+      --surface-glass: rgba(13, 19, 31, 0.88);
+      --cot-bg: #0a101b;
+      --ink-1: #f1f5f9;
+      --ink-2: #cbd5e1;
+      --ink-3: #94a3b8;
+      --ink-4: #64748b;
+      --border: rgba(148, 163, 184, 0.12);
+      --border-strong: rgba(148, 163, 184, 0.24);
+      --accent: #3b82f6;
+      --accent-soft: rgba(59, 130, 246, 0.14);
+      --accent-border: rgba(59, 130, 246, 0.34);
+      --green: #10b981;
+      --green-soft: rgba(16, 185, 129, 0.14);
+      --green-border: rgba(16, 185, 129, 0.32);
+      --red: #f43f5e;
+      --red-soft: rgba(244, 63, 94, 0.14);
+      --red-border: rgba(244, 63, 94, 0.32);
+      --amber: #f59e0b;
+      --amber-soft: rgba(245, 158, 11, 0.14);
+      --amber-border: rgba(245, 158, 11, 0.34);
+      --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.025) inset, 0 14px 32px -18px rgba(0, 0, 0, 0.65);
+      --shadow-pop: 0 14px 36px -6px rgba(0, 0, 0, 0.65);
+      --grid-line: rgba(148, 163, 184, 0.09);
+      --axis-zero: rgba(148, 163, 184, 0.25);
+    }
+
+    :root {
+      --r-xl: 16px;
+      --r-lg: 13px;
+      --r-md: 9px;
+      --r-sm: 6px;
       --mono: "SF Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "SF Pro Text", "Inter", "Helvetica Neue", Arial, sans-serif;
+      --sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "SF Pro Display", "SF Pro Text", "Inter", "Segoe UI", sans-serif;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html {
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-      background: var(--bg-canvas);
-    }
-
+    html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: var(--bg); }
     body {
       font-family: var(--sans);
       color: var(--ink-1);
-      background: var(--bg-canvas);
+      background: var(--bg);
       line-height: 1.55;
-      padding-bottom: calc(36px + env(safe-area-inset-bottom, 0px));
+      padding-bottom: calc(44px + env(safe-area-inset-bottom, 0px));
+      transition: background-color 0.2s ease, color 0.2s ease;
     }
 
     .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
     .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
 
-    /* Sticky Glass Header */
+    /* Institutional Header */
     .topbar {
       position: sticky;
       top: 0;
-      z-index: 40;
-      background: rgba(255, 255, 255, 0.86);
-      backdrop-filter: saturate(180%) blur(18px);
-      -webkit-backdrop-filter: saturate(180%) blur(18px);
-      border-bottom: 1px solid var(--line);
+      z-index: 50;
+      background: var(--surface-glass);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid var(--border);
       padding-top: env(safe-area-inset-top, 0px);
     }
 
     .topbar-inner {
-      max-width: 1180px;
+      max-width: 1240px;
       margin: 0 auto;
-      padding: 10px 18px;
+      padding: 10px 20px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: 12px;
       flex-wrap: wrap;
     }
 
-    .brand-group {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }
-
+    .brand-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
     .brand-link {
-      display: flex;
-      align-items: center;
-      gap: 9px;
-      text-decoration: none;
-      color: var(--ink-1);
-      font-weight: 700;
-      font-size: 16.5px;
-      letter-spacing: -0.025em;
+      display: flex; align-items: center; gap: 9px;
+      text-decoration: none; color: var(--ink-1);
+      font-weight: 700; font-size: 16px; letter-spacing: -0.025em;
     }
-
-    .brand-link img {
-      width: 26px;
-      height: 26px;
-      border-radius: 6px;
-    }
-
-    .model-tag {
-      font-size: 11.5px;
-      font-weight: 500;
-      color: var(--ink-3);
-      background: var(--bg-subtle);
-      border: 1px solid var(--line);
-      padding: 2px 8px;
-      border-radius: 999px;
-      white-space: nowrap;
+    .brand-link img { width: 26px; height: 26px; border-radius: 7px; }
+    .mini-ticker {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--ink-2);
     }
 
     .seg-control {
-      display: inline-flex;
-      background: var(--bg-subtle);
-      padding: 3px;
-      border-radius: 10px;
-      border: 1px solid var(--line);
-      gap: 2px;
+      display: inline-flex; align-items: center;
+      background: var(--surface-3); padding: 3px;
+      border-radius: 10px; border: 1px solid var(--border); gap: 2px;
     }
 
     .seg-btn {
-      border: none;
-      background: transparent;
-      color: var(--ink-2);
-      font-family: inherit;
-      font-size: 13px;
-      font-weight: 600;
-      padding: 6px 14px;
-      border-radius: 7px;
-      cursor: pointer;
-      transition: all 0.16s ease;
-      min-height: 32px;
-      white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 6px;
+      border: none; background: transparent; color: var(--ink-3);
+      font-family: inherit; font-size: 12.5px; font-weight: 600;
+      padding: 6px 13px; border-radius: 7px; cursor: pointer;
+      transition: all 0.16s ease; min-height: 31px; white-space: nowrap;
     }
-
+    .seg-btn:hover { color: var(--ink-1); }
     .seg-btn.active {
-      background: var(--bg-card);
-      color: var(--ink-1);
-      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+      background: var(--surface); color: var(--ink-1);
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.10);
     }
 
-    .status-actions {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
+    .right-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 
     .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      font-weight: 550;
-      padding: 5px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: var(--bg-card);
-      color: var(--ink-2);
-      white-space: nowrap;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11.5px; font-weight: 550; padding: 5px 10px;
+      border-radius: 999px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--ink-2); white-space: nowrap;
     }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-4); flex-shrink: 0; }
+    .status-pill.live .status-dot { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+    .status-pill.sleep .status-dot { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
 
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--ink-4);
-      flex-shrink: 0;
+    .lang-switch {
+      display: inline-flex; background: var(--surface-3); padding: 2px;
+      border-radius: 8px; border: 1px solid var(--border);
     }
-
-    .status-pill.live .status-dot {
-      background: var(--green);
-      box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.16);
+    .lang-opt {
+      border: none; background: transparent; color: var(--ink-3);
+      font-family: inherit; font-size: 11.5px; font-weight: 650;
+      padding: 4px 8px; border-radius: 6px; cursor: pointer;
     }
+    .lang-opt.active { background: var(--surface); color: var(--ink-1); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
 
-    .status-pill.sleep .status-dot {
-      background: var(--amber);
-      box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.14);
+    .ctrl-btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+      height: 31px; min-width: 31px; padding: 0 9px;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--ink-2);
+      font-family: inherit; font-size: 12px; font-weight: 550; cursor: pointer;
+      transition: all 0.15s ease;
     }
-
-    .status-pill.offline .status-dot {
-      background: var(--red);
-    }
-
-    .icon-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 5px;
-      height: 32px;
-      padding: 0 10px;
-      border-radius: 8px;
-      border: 1px solid var(--line);
-      background: var(--bg-card);
-      color: var(--ink-2);
-      font-family: inherit;
-      font-size: 12.5px;
-      font-weight: 550;
-      cursor: pointer;
-      transition: border-color 0.15s ease, color 0.15s ease;
-    }
-
-    .icon-btn:hover { border-color: var(--line-strong); color: var(--ink-1); }
-    .icon-btn.spinning svg { animation: spin 0.7s linear infinite; }
+    .ctrl-btn:hover { border-color: var(--border-strong); color: var(--ink-1); }
+    .ctrl-btn.spinning svg { animation: spin 0.7s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Main Container */
+    /* Main Layout */
     .wrap {
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 18px 18px 0;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
+      max-width: 1240px; margin: 0 auto; padding: 18px 20px 0;
+      display: flex; flex-direction: column; gap: 16px;
     }
 
-    /* Hero Strip */
+    /* Bento Hero Strip */
     .hero-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: 1.25fr 1fr 1fr 1fr;
       gap: 12px;
     }
 
-    .metric-card {
-      background: var(--bg-card);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      padding: 15px 16px;
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-xl);
       box-shadow: var(--shadow-card);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      min-width: 0;
     }
 
-    .metric-label {
-      font-size: 12px;
-      font-weight: 550;
-      color: var(--ink-3);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 6px;
-    }
-
-    .metric-val {
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.025em;
-      color: var(--ink-1);
-      line-height: 1.2;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .metric-sub {
-      font-size: 12px;
-      color: var(--ink-3);
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .pos { color: var(--green); }
-    .neg { color: var(--red); }
-
-    .mini-bar-track {
-      width: 100%;
-      height: 5px;
-      background: var(--bg-subtle);
-      border-radius: 999px;
-      overflow: hidden;
-      margin-top: 2px;
-    }
-
-    .mini-bar-fill {
-      height: 100%;
-      border-radius: 999px;
-      background: var(--green);
-      transition: width 0.25s ease;
-    }
-
-    /* Market State Card */
-    .state-banner {
-      background: var(--bg-card);
-      border: 1px solid var(--line);
-      border-left: 3px solid var(--accent);
-      border-radius: var(--radius-lg);
+    .hero-card {
       padding: 16px 18px;
-      box-shadow: var(--shadow-card);
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      display: flex; flex-direction: column; justify-content: space-between; gap: 10px;
+      min-width: 0; position: relative; overflow: hidden;
     }
 
-    .state-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
+    .hero-card.primary {
+      background: linear-gradient(155deg, var(--surface) 0%, var(--surface-2) 100%);
     }
 
-    .state-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13.5px;
-      font-weight: 650;
-      color: var(--ink-1);
+    .hero-top {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      font-size: 12px; font-weight: 600; color: var(--ink-3);
     }
 
-    .state-note {
-      font-size: 14px;
-      color: var(--ink-1);
-      line-height: 1.65;
+    .hero-main-row {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
     }
 
-    .rule-chips {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      align-items: center;
+    .hero-val {
+      font-size: 27px; font-weight: 750; letter-spacing: -0.035em;
+      color: var(--ink-1); line-height: 1.1; white-space: nowrap;
+    }
+    .hero-val.md { font-size: 21px; letter-spacing: -0.025em; }
+
+    .fx-quote-fig {
+      font-family: var(--mono); font-variant-numeric: tabular-nums;
+      display: inline-flex; align-items: baseline; color: var(--ink-1); line-height: 1;
+    }
+    .fx-quote-fig .prefix { font-size: 17px; font-weight: 500; color: var(--ink-3); }
+    .fx-quote-fig .pips { font-size: 28px; font-weight: 750; letter-spacing: -0.03em; margin-left: 1px; }
+    .fx-quote-fig .pipette { font-size: 15px; font-weight: 650; color: var(--accent); transform: translateY(-9px); margin-left: 1px; }
+
+    .hero-foot {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+      font-size: 11.5px; color: var(--ink-3); padding-top: 8px; border-top: 1px solid var(--border);
     }
 
-    .chip {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 11.5px;
-      font-weight: 550;
-      padding: 3px 8px;
-      border-radius: 6px;
-      background: var(--bg-subtle);
-      color: var(--ink-2);
-      border: 1px solid var(--line);
-      white-space: nowrap;
+    .micro-stats-3 {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+      padding-top: 8px; border-top: 1px solid var(--border);
     }
+    .micro-stat .ms-l { font-size: 10.5px; color: var(--ink-4); display: block; }
+    .micro-stat .ms-v { font-size: 12px; font-weight: 650; color: var(--ink-1); }
 
-    .chip.green { background: var(--green-soft); color: var(--green); border-color: var(--green-border); }
-    .chip.red { background: var(--red-soft); color: var(--red); border-color: var(--red-border); }
-    .chip.amber { background: var(--amber-soft); color: var(--amber); border-color: var(--amber-border); }
-    .chip.blue { background: var(--accent-soft); color: var(--accent); border-color: rgba(29, 78, 216, 0.2); }
-
-    /* Filters */
-    .toolbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      flex-wrap: wrap;
+    .pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; font-weight: 600; padding: 2.5px 8px;
+      border-radius: 6px; background: var(--surface-3); color: var(--ink-2);
+      border: 1px solid var(--border); white-space: nowrap;
     }
+    .pill.green { background: var(--green-soft); color: var(--green); border-color: var(--green-border); }
+    .pill.red { background: var(--red-soft); color: var(--red); border-color: var(--red-border); }
+    .pill.amber { background: var(--amber-soft); color: var(--amber); border-color: var(--amber-border); }
+    .pill.blue { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
 
-    .filter-pills {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
+    .progress-track { width: 100%; height: 6px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 999px; transition: width 0.3s ease; }
+
+    /* Range Ruler for Active / Guardrail SL-TP */
+    .rr-ruler { display: flex; flex-direction: column; gap: 4px; }
+    .rr-bar { display: flex; height: 5px; border-radius: 999px; overflow: hidden; gap: 2px; }
+    .rr-sl { background: var(--red); flex: 1; opacity: 0.75; }
+    .rr-tp { background: var(--green); flex: 3; opacity: 0.82; }
+    .rr-labels { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-4); }
+
+    /* Market Regime Card */
+    .regime-card {
+      padding: 16px 20px;
+      display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: center;
+      border-top: 2.5px solid var(--accent);
     }
+    .regime-main { display: flex; flex-direction: column; gap: 6px; }
+    .regime-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .regime-title { font-size: 13px; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.03em; }
+    .regime-note { font-size: 14.5px; font-weight: 500; color: var(--ink-1); line-height: 1.6; }
+    .regime-params { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 440px; }
 
+    /* Toolbar */
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .filter-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .filter-pill {
-      border: 1px solid var(--line);
-      background: var(--bg-card);
-      color: var(--ink-2);
-      font-family: inherit;
-      font-size: 12.5px;
-      font-weight: 550;
-      padding: 6px 12px;
-      border-radius: 999px;
-      cursor: pointer;
-      transition: all 0.14s ease;
+      border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+      font-family: inherit; font-size: 12px; font-weight: 600;
+      padding: 6px 12px; border-radius: 999px; cursor: pointer; transition: all 0.14s ease;
     }
+    .filter-pill:hover { border-color: var(--border-strong); color: var(--ink-1); }
+    .filter-pill.active { background: var(--ink-1); color: var(--surface); border-color: var(--ink-1); }
 
-    .filter-pill.active {
-      background: var(--ink-1);
-      color: #ffffff;
-      border-color: var(--ink-1);
-    }
-
+    .search-wrap { position: relative; flex: 1 1 240px; max-width: 340px; }
+    .search-wrap svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--ink-4); pointer-events: none; }
     .search-input {
-      height: 34px;
-      min-width: 220px;
-      flex: 1 1 220px;
-      max-width: 320px;
-      padding: 0 12px;
-      border-radius: 9px;
-      border: 1px solid var(--line);
-      background: var(--bg-card);
-      color: var(--ink-1);
-      font-family: inherit;
-      font-size: 13px;
-      outline: none;
+      width: 100%; height: 34px; padding: 0 12px 0 32px;
+      border-radius: 9px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--ink-1);
+      font-family: inherit; font-size: 12.5px; outline: none;
     }
+    .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
-    .search-input:focus { border-color: var(--accent); }
-
-    /* Decision Cards */
-    .decision-list {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
+    /* Decision Feed */
+    .decision-list { display: flex; flex-direction: column; gap: 11px; }
     .dec-card {
-      background: var(--bg-card);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      padding: 15px 17px;
-      box-shadow: var(--shadow-card);
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      padding: 16px 18px;
+      transition: border-color 0.18s ease, box-shadow 0.18s ease;
     }
-
-    .dec-card.highlight {
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(29, 78, 216, 0.12), var(--shadow-card);
-    }
+    .dec-card:hover { border-color: var(--border-strong); }
+    .dec-card.highlight { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-card); }
 
     .dec-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap; margin-bottom: 10px;
     }
-
-    .dec-meta {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      flex-wrap: wrap;
-      font-size: 12px;
-      color: var(--ink-3);
-    }
-
-    .dec-badges {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
+    .dec-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-3); }
+    .dec-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
     .dec-headline {
-      font-size: 13.5px;
-      font-weight: 600;
-      color: var(--ink-2);
-      margin-bottom: 8px;
-      line-height: 1.45;
+      font-size: 15px; font-weight: 650; color: var(--ink-1);
+      line-height: 1.45; letter-spacing: -0.01em; margin-bottom: 9px;
     }
 
     .dec-rationale {
-      font-size: 14px;
-      color: var(--ink-1);
-      line-height: 1.6;
-      background: var(--bg-subtle);
-      padding: 10px 12px;
-      border-radius: var(--radius-md);
-      border: 1px solid var(--line);
+      font-size: 13.5px; color: var(--ink-2); line-height: 1.62;
+      background: var(--surface-2); padding: 11px 13px;
+      border-radius: var(--r-md); border: 1px solid var(--border);
     }
 
-    .traj-strip {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-top: 9px;
-      font-size: 11.5px;
+    .traj-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; flex-wrap: wrap; margin-top: 10px;
+    }
+    .traj-pills { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+
+    .range-15m {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-size: 11px; color: var(--ink-3);
+    }
+    .range-track {
+      width: 68px; height: 4px; background: var(--surface-3);
+      border-radius: 999px; position: relative;
+    }
+    .range-dot {
+      width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+      position: absolute; top: 50%; transform: translate(-50%, -50%);
     }
 
-    .dec-actions-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid var(--line);
-      flex-wrap: wrap;
-    }
-
-    .expand-btn {
-      border: none;
-      background: transparent;
-      color: var(--accent);
-      font-family: inherit;
-      font-size: 12.5px;
-      font-weight: 600;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      padding: 4px 2px;
-    }
-
-    .dec-details {
-      margin-top: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    .detail-box {
-      border: 1px solid var(--line);
-      border-radius: var(--radius-md);
-      padding: 12px 13px;
-      background: var(--bg-thinking);
-    }
-
-    .detail-box-title {
-      font-size: 11.5px;
-      font-weight: 650;
-      color: var(--ink-3);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-bottom: 6px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .cot-text {
-      font-size: 13px;
-      color: var(--ink-1);
-      line-height: 1.72;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 360px;
-      overflow-y: auto;
-    }
-
-    .raw-text {
-      font-size: 12.5px;
-      color: var(--ink-2);
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-      max-height: 220px;
-      overflow-y: auto;
-    }
-
-    /* Report View */
-    .report-grid-2 {
-      display: grid;
-      grid-template-columns: 1.45fr 1fr;
-      gap: 14px;
-    }
-
-    .panel {
-      background: var(--bg-card);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      padding: 16px 18px;
-      box-shadow: var(--shadow-card);
-      min-width: 0;
-    }
-
-    .panel-header {
-      display: flex;
-      align-items: baseline;
-      justify-content: space-between;
-      gap: 10px;
-      margin-bottom: 12px;
+    .dec-footer {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--border);
       flex-wrap: wrap;
     }
 
-    .panel-title {
-      font-size: 14.5px;
-      font-weight: 650;
-      color: var(--ink-1);
-      letter-spacing: -0.015em;
+    .drawer-btn {
+      border: none; background: transparent; color: var(--accent);
+      font-family: inherit; font-size: 12px; font-weight: 650; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 5px; padding: 3px 0;
+    }
+    .drawer-btn:hover { opacity: 0.82; }
+
+    /* Structured Card Drawer Tabs */
+    .drawer {
+      margin-top: 12px; border: 1px solid var(--border);
+      border-radius: var(--r-md); background: var(--cot-bg); overflow: hidden;
+    }
+    .drawer-tabs {
+      display: flex; align-items: center; gap: 4px; padding: 6px 10px;
+      border-bottom: 1px solid var(--border); background: var(--surface-2); overflow-x: auto;
+    }
+    .drawer-tab {
+      border: none; background: transparent; color: var(--ink-3);
+      font-family: inherit; font-size: 11.5px; font-weight: 600;
+      padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+    }
+    .drawer-tab.active { background: var(--surface); color: var(--ink-1); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+    .drawer-pane { padding: 13px 15px; }
+    .cot-pre {
+      font-size: 13px; color: var(--ink-1); line-height: 1.75;
+      white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto;
     }
 
-    .panel-sub {
-      font-size: 12px;
-      color: var(--ink-3);
+    /* Funnel Pipeline Banner */
+    .funnel-pipeline {
+      padding: 16px 20px;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
     }
-
-    .chart-box {
-      width: 100%;
+    .stage-box {
+      padding: 11px 14px; border-radius: var(--r-md);
+      background: var(--surface-2); border: 1px solid var(--border);
       position: relative;
-      user-select: none;
-      touch-action: pan-y;
     }
+    .stage-step { font-size: 11px; font-weight: 600; color: var(--ink-3); margin-bottom: 4px; display: flex; justify-content: space-between; }
+    .stage-num { font-size: 22px; font-weight: 750; letter-spacing: -0.03em; color: var(--ink-1); }
+    .stage-sub { font-size: 11px; color: var(--ink-4); margin-top: 2px; }
 
-    .chart-svg {
-      width: 100%;
-      height: 210px;
-      display: block;
-      overflow: visible;
+    /* Charts */
+    .charts-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; }
+    .panel { padding: 16px 18px; min-width: 0; }
+    .panel-head {
+      display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 10px; margin-bottom: 12px; flex-wrap: wrap;
     }
-
-    .kpi-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+    .panel-title { font-size: 14.5px; font-weight: 700; color: var(--ink-1); letter-spacing: -0.015em; }
+    .panel-sub { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+    .chart-box { width: 100%; position: relative; user-select: none; touch-action: pan-y; }
+    .chart-svg { width: 100%; height: 220px; display: block; overflow: visible; }
+    .chart-tooltip {
+      position: absolute; top: 8px; left: 56px; pointer-events: none;
+      background: var(--surface-glass); backdrop-filter: blur(12px);
+      border: 1px solid var(--border-strong); border-radius: 8px;
+      padding: 6px 10px; font-size: 11.5px; box-shadow: var(--shadow-pop);
+      opacity: 0; transition: opacity 0.12s ease;
     }
+    .chart-tooltip.visible { opacity: 1; }
 
-    .kpi-tile {
-      background: var(--bg-card);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-lg);
-      padding: 14px 16px;
-      box-shadow: var(--shadow-card);
-    }
-
-    .kpi-tile .k-lbl { font-size: 12px; color: var(--ink-3); margin-bottom: 4px; }
-    .kpi-tile .k-val { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
-    .kpi-tile .k-sub { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
-
-    .funnel-bar {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      margin-top: 6px;
-    }
-
-    .funnel-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 11.5px;
-      color: var(--ink-2);
-    }
-
-    .funnel-row .f-lbl { width: 68px; flex-shrink: 0; }
-    .funnel-row .f-track {
-      flex: 1;
-      height: 7px;
-      background: var(--bg-subtle);
-      border-radius: 999px;
-      overflow: hidden;
-    }
-    .funnel-row .f-fill { height: 100%; border-radius: 999px; background: var(--accent); }
-    .funnel-row .f-num { width: 32px; text-align: right; font-family: var(--mono); }
+    .kpi-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+    .kpi-tile { padding: 14px 16px; }
+    .kpi-tile .k-l { font-size: 11.5px; color: var(--ink-3); font-weight: 550; }
+    .kpi-tile .k-v { font-size: 20px; font-weight: 750; letter-spacing: -0.025em; margin: 5px 0 3px; }
+    .kpi-tile .k-s { font-size: 11.5px; color: var(--ink-3); }
 
     /* Tables */
-    .table-wrap {
-      width: 100%;
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 12.5px;
-      min-width: 640px;
-    }
-
+    .table-wrap { width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 680px; }
     th {
-      text-align: left;
-      font-weight: 600;
-      color: var(--ink-3);
-      font-size: 11.5px;
-      padding: 9px 10px;
-      border-bottom: 1px solid var(--line);
-      white-space: nowrap;
+      text-align: left; font-weight: 650; color: var(--ink-3); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 9px 11px; border-bottom: 1px solid var(--border); white-space: nowrap;
     }
-
-    td {
-      padding: 10px 10px;
-      border-bottom: 1px solid var(--line);
-      color: var(--ink-1);
-      vertical-align: middle;
-      white-space: nowrap;
-    }
-
+    td { padding: 11px; border-bottom: 1px solid var(--border); color: var(--ink-1); vertical-align: middle; white-space: nowrap; }
     tr:last-child td { border-bottom: none; }
     tr.clickable { cursor: pointer; transition: background 0.12s ease; }
-    tr.clickable:hover { background: var(--bg-subtle); }
+    tr.clickable:hover { background: var(--surface-2); }
     tr.selected-row { background: var(--accent-soft); }
 
-    .cot-jump-btn {
-      border: 1px solid var(--line);
-      background: var(--bg-card);
-      color: var(--accent);
-      font-family: inherit;
-      font-size: 11.5px;
-      font-weight: 600;
-      padding: 4px 9px;
-      border-radius: 6px;
-      cursor: pointer;
+    .jump-btn {
+      border: 1px solid var(--border); background: var(--surface); color: var(--accent);
+      font-family: inherit; font-size: 11.5px; font-weight: 650;
+      padding: 4px 10px; border-radius: 6px; cursor: pointer;
     }
-
-    .cot-jump-btn:hover { background: var(--accent-soft); border-color: rgba(29, 78, 216, 0.25); }
+    .jump-btn:hover { background: var(--accent-soft); border-color: var(--accent-border); }
 
     .empty-state {
-      text-align: center;
-      padding: 36px 18px;
-      color: var(--ink-3);
-      font-size: 13.5px;
-      background: var(--bg-card);
-      border: 1px dashed var(--line-strong);
-      border-radius: var(--radius-lg);
+      text-align: center; padding: 36px 18px; color: var(--ink-3); font-size: 13px;
+      border: 1px dashed var(--border-strong); border-radius: var(--r-xl); background: var(--surface);
     }
 
-    .pwa-tip {
-      font-size: 12px;
-      color: var(--ink-3);
-      text-align: center;
-      padding: 8px 12px 0;
+    .footer-note {
+      font-size: 11.5px; color: var(--ink-4); text-align: center; padding: 6px 12px 0;
     }
 
     [hidden] { display: none !important; }
 
-    /* Responsive Breakpoints */
-    @media (max-width: 960px) {
+    @media (max-width: 1040px) {
       .hero-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .report-grid-2 { grid-template-columns: 1fr; }
-      .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .regime-card { grid-template-columns: 1fr; }
+      .regime-params { justify-content: flex-start; max-width: none; }
+      .charts-grid { grid-template-columns: 1fr; }
+      .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
 
-    @media (max-width: 600px) {
-      .topbar-inner { padding: 10px 14px; gap: 10px; }
-      .model-tag { display: none; }
+    @media (max-width: 640px) {
+      .topbar-inner { padding: 9px 14px; gap: 9px; }
+      .mini-ticker { display: none; }
       .seg-control { order: 3; width: 100%; }
-      .seg-btn { flex: 1; text-align: center; font-size: 12.5px; padding: 7px 8px; }
+      .seg-btn { flex: 1; justify-content: center; font-size: 12px; padding: 6px 8px; }
       .wrap { padding: 12px 12px 0; gap: 12px; }
-      .metric-card { padding: 12px 13px; }
-      .metric-val { font-size: 19px; }
-      .kpi-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
-      .kpi-tile .k-val { font-size: 17px; }
-      .search-input { max-width: none; width: 100%; }
+      .hero-card { padding: 13px 14px; }
+      .hero-val { font-size: 22px; }
+      .fx-quote-fig .pips { font-size: 23px; }
+      .funnel-pipeline { grid-template-columns: repeat(2, 1fr); padding: 13px 14px; gap: 9px; }
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
+      .search-wrap { max-width: none; }
     }
   </style>
 </head>
@@ -744,197 +492,381 @@
           <img src="../assets/eventlens-logo.svg" alt="EventLens" />
           <span>EventLens</span>
         </a>
-        <span class="model-tag" id="modelVersionTag">deepseek-reasoner · v4.0</span>
+        <span class="mini-ticker mono" id="topTicker">EUR/USD —</span>
       </div>
 
-      <div class="seg-control" role="tablist" aria-label="视图切换">
-        <button class="seg-btn active" id="tabBtnDecisions" type="button" role="tab" aria-selected="true">实时决策与思考链</button>
-        <button class="seg-btn" id="tabBtnReports" type="button" role="tab" aria-selected="false">每日交易报表</button>
+      <div class="seg-control" role="tablist">
+        <button class="seg-btn active" id="tabBtnDecisions" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          <span data-i18n="tabDecisions">实时决策与思考链</span>
+        </button>
+        <button class="seg-btn" id="tabBtnReports" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+          <span data-i18n="tabReports">每日量化报表</span>
+        </button>
       </div>
 
-      <div class="status-actions">
+      <div class="right-controls">
         <div class="status-pill" id="vmStatusPill">
           <span class="status-dot"></span>
-          <span id="vmStatusText">加载中…</span>
+          <span id="vmStatusText">—</span>
         </div>
-        <button class="icon-btn" id="refreshBtn" type="button" title="刷新最新快照">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
-          <span>刷新</span>
+        <div class="lang-switch" role="group" aria-label="Language toggle">
+          <button class="lang-opt active" id="langZhBtn" type="button">中文</button>
+          <button class="lang-opt" id="langEnBtn" type="button">EN</button>
+        </div>
+        <button class="ctrl-btn" id="themeBtn" type="button" title="Toggle theme">
+          <span id="themeIcon">☾</span>
+        </button>
+        <button class="ctrl-btn" id="refreshBtn" type="button" title="Refresh">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
         </button>
       </div>
     </div>
   </header>
 
   <main class="wrap">
-    <!-- 4-Card Hero Strip -->
-    <section class="hero-grid" aria-label="核心账户状态">
-      <div class="metric-card">
-        <div class="metric-label">
-          <span>Demo 账户净值</span>
-          <span class="chip" id="accountModeChip">Pepperstone Demo</span>
+    <!-- 4-Card Asymmetric Hero Strip -->
+    <section class="hero-grid">
+      <div class="card hero-card primary">
+        <div class="hero-top">
+          <span data-i18n="heroEquityTitle">Demo 账户净值</span>
+          <span class="pill" id="accountChip">Pepperstone Demo · 200x</span>
         </div>
-        <div class="metric-val tnum" id="heroEquity">—</div>
-        <div class="metric-sub tnum" id="heroEquitySub">加载中…</div>
+        <div class="hero-main-row">
+          <div class="hero-val tnum" id="heroEquity">—</div>
+          <svg id="miniSpark" width="76" height="28" viewBox="0 0 76 28"></svg>
+        </div>
+        <div class="micro-stats-3 tnum">
+          <div class="micro-stat">
+            <span class="ms-l" data-i18n="heroTodayPnl">今日盈亏</span>
+            <span class="ms-v" id="msToday">—</span>
+          </div>
+          <div class="micro-stat">
+            <span class="ms-l" data-i18n="heroRealizedPnl">累计已实现</span>
+            <span class="ms-v" id="msRealized">—</span>
+          </div>
+          <div class="micro-stat">
+            <span class="ms-l" data-i18n="heroFloorCushion">净值安全垫</span>
+            <span class="ms-v" id="msFloor">—</span>
+          </div>
+        </div>
       </div>
 
-      <div class="metric-card">
-        <div class="metric-label">
-          <span>当前持仓状态</span>
-          <span class="chip" id="posSideChip">空仓</span>
+      <div class="card hero-card">
+        <div class="hero-top">
+          <span data-i18n="heroPosTitle">当前持仓与保护栏</span>
+          <span class="pill" id="posChip">—</span>
         </div>
-        <div class="metric-val tnum" id="heroPos">—</div>
-        <div class="metric-sub tnum" id="heroPosSub">等待高确信宏观信号</div>
+        <div class="hero-val md tnum" id="heroPos">—</div>
+        <div class="rr-ruler" id="posRuler">
+          <div class="rr-bar"><div class="rr-sl"></div><div class="rr-tp"></div></div>
+          <div class="rr-labels mono" id="posRulerLabels"><span>SL -14p</span><span>1 : 3 R:R</span><span>TP +42p</span></div>
+        </div>
       </div>
 
-      <div class="metric-card">
-        <div class="metric-label">
-          <span>EUR/USD 实时盘口</span>
-          <span class="chip mono" id="spreadChip">点差 —</span>
+      <div class="card hero-card">
+        <div class="hero-top">
+          <span data-i18n="heroQuoteTitle">EUR/USD 实时盘口</span>
+          <span class="pill mono" id="spreadChip">—</span>
         </div>
-        <div class="metric-val mono" id="heroMid">—</div>
-        <div class="metric-sub mono" id="heroQuoteSub">买/卖 —</div>
+        <div id="heroQuoteFig" class="fx-quote-fig"><span class="prefix">—</span></div>
+        <div class="hero-foot mono" id="heroQuoteSub">—</div>
       </div>
 
-      <div class="metric-card">
-        <div class="metric-label">
-          <span>日内风险预算余量</span>
-          <span class="tnum" id="lossLimitLabel">上限 $8.00</span>
+      <div class="card hero-card">
+        <div class="hero-top">
+          <span data-i18n="heroBudgetTitle">日内风控预算余量</span>
+          <span class="tnum" id="lossLimitLbl">$8.00</span>
         </div>
-        <div class="metric-val tnum" id="heroLossRem">—</div>
-        <div class="mini-bar-track"><div class="mini-bar-fill" id="lossBarFill" style="width:100%"></div></div>
-        <div class="metric-sub tnum" id="heroFunnelSub">累计评估 0 条事件</div>
+        <div class="hero-val md tnum" id="heroLossRem">—</div>
+        <div class="progress-track"><div class="progress-fill" id="lossFill" style="width:100%"></div></div>
+        <div class="hero-foot tnum" id="heroFunnelFoot">—</div>
       </div>
     </section>
 
-    <!-- TAB 1: Real-Time Decisions & CoT -->
+    <!-- TAB 1: Live Intelligence -->
     <section id="viewDecisions">
-      <div class="state-banner" id="stateBanner">
-        <div class="state-top">
-          <div class="state-title">
-            <span>当前市场状态卡</span>
-            <span class="chip" id="biasChip">中性观望</span>
-            <span class="chip blue mono" id="watchChip" hidden>盯盘触发 —</span>
+      <div class="card regime-card">
+        <div class="regime-main">
+          <div class="regime-head">
+            <span class="regime-title" data-i18n="regimeTitle">Market State Card · 当前宏观状态卡</span>
+            <span class="pill" id="biasChip">—</span>
+            <span class="pill blue mono" id="watchChip" hidden>—</span>
+            <span class="pill mono" id="modelChip">deepseek-reasoner</span>
           </div>
-          <div class="rule-chips" id="riskProfileChips"></div>
+          <div class="regime-note" id="stateNoteText">—</div>
         </div>
-        <div class="state-note" id="stateNoteText">正在同步云端最新宏观底色备忘录…</div>
+        <div class="regime-params tnum" id="riskProfileChips"></div>
       </div>
 
       <div class="toolbar" style="margin-top: 14px; margin-bottom: 12px;">
-        <div class="filter-pills" id="decFilters">
-          <button class="filter-pill active" data-filter="all" type="button">全部事件</button>
-          <button class="filter-pill" data-filter="trade" type="button">开 / 平仓信号</button>
-          <button class="filter-pill" data-filter="hold" type="button">观望 HOLD</button>
-          <button class="filter-pill" data-filter="rejected" type="button">风控拦截</button>
+        <div class="filter-group" id="decFilters">
+          <button class="filter-pill active" data-filter="all" type="button" data-i18n="fltAll">全部精评决策</button>
+          <button class="filter-pill" data-filter="trade" type="button" data-i18n="fltTrade">开 / 平仓信号</button>
+          <button class="filter-pill" data-filter="hold" type="button" data-i18n="fltHold">观望 HOLD</button>
+          <button class="filter-pill" data-filter="rejected" type="button" data-i18n="fltRej">风控拦截</button>
         </div>
-        <input class="search-input" id="decSearch" type="search" placeholder="搜索新闻关键词、思考过程或理由…" />
+        <div class="search-wrap">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input class="search-input" id="decSearch" type="search" />
+        </div>
       </div>
 
       <div class="decision-list" id="decisionList">
-        <div class="empty-state">正在从云端加载实时推理日志…</div>
+        <div class="empty-state" data-i18n="loadingText">正在加载实时推理日志…</div>
       </div>
     </section>
 
-    <!-- TAB 2: Daily Visual Reports -->
+    <!-- TAB 2: Performance & Daily Ledger -->
     <section id="viewReports" hidden>
-      <div class="report-grid-2">
-        <div class="panel">
-          <div class="panel-header">
+      <div class="card funnel-pipeline tnum" id="funnelBanner"></div>
+
+      <div class="charts-grid" style="margin-top: 14px;">
+        <div class="card panel">
+          <div class="panel-head">
             <div>
-              <div class="panel-title">账户净值与累计盈亏曲线</div>
-              <div class="panel-sub tnum" id="curveHoverInfo">悬停或滑动曲线查看每个节点净值</div>
+              <div class="panel-title" data-i18n="eqChartTitle">账户净值与累计盈亏曲线</div>
+              <div class="panel-sub tnum" id="curveHoverInfo">—</div>
             </div>
-            <div class="chip tnum" id="curveCumBadge">累计 —</div>
+            <span class="pill tnum" id="curveCumBadge">—</span>
           </div>
           <div class="chart-box" id="equityChartWrap"></div>
         </div>
 
-        <div class="panel">
-          <div class="panel-header">
+        <div class="card panel">
+          <div class="panel-head">
             <div>
-              <div class="panel-title">每日净盈亏柱状图</div>
-              <div class="panel-sub">按外汇交易日结算 · 点击柱子筛选当天明细</div>
+              <div class="panel-title" data-i18n="barChartTitle">每日净盈亏与评估活跃度</div>
+              <div class="panel-sub" data-i18n="barChartSub">按纽约外汇日切日 · 点击柱子可筛选当天订单</div>
             </div>
-            <button class="filter-pill" id="clearDayFilterBtn" type="button" hidden style="padding:3px 9px;font-size:11.5px;">显示全部日期</button>
+            <button class="filter-pill" id="clearDayBtn" type="button" hidden style="padding:3px 10px;font-size:11px;" data-i18n="showAllDays">显示全部日期</button>
           </div>
           <div class="chart-box" id="dailyBarWrap"></div>
         </div>
       </div>
 
-      <div class="kpi-grid" id="kpiGrid" style="margin-top: 14px;"></div>
+      <div class="kpi-grid tnum" id="kpiGrid" style="margin-top: 14px;"></div>
 
-      <div class="panel" style="margin-top: 14px;">
-        <div class="panel-header">
+      <div class="card panel" style="margin-top: 14px;">
+        <div class="panel-head">
           <div>
-            <div class="panel-title">每日汇总统计表</div>
-            <div class="panel-sub">点击任意一行可快速筛选下方当天成交通道</div>
+            <div class="panel-title" data-i18n="dailyTblTitle">每日量化结算汇总</div>
+            <div class="panel-sub" data-i18n="dailyTblSub">点击任意交易日可向下筛选该日成交通道与 AI 评估数据</div>
           </div>
         </div>
         <div class="table-wrap">
           <table>
-            <thead>
-              <tr>
-                <th>交易日 (NY)</th>
-                <th>日初净值</th>
-                <th>日净盈亏 (USD)</th>
-                <th>盈亏点数</th>
-                <th>成交 / 胜负</th>
-                <th>胜率</th>
-                <th>AI 评估 / 提议 / 放行</th>
-              </tr>
-            </thead>
+            <thead id="dailyTblHead"></thead>
             <tbody id="dailyReportBody"></tbody>
           </table>
         </div>
       </div>
 
-      <div class="panel" style="margin-top: 14px;">
-        <div class="panel-header">
+      <div class="card panel" style="margin-top: 14px;">
+        <div class="panel-head">
           <div>
-            <div class="panel-title" id="tradeTableTitle">交易流水与思考链溯源</div>
-            <div class="panel-sub">每一笔订单均可一键跳回当时触发开仓的 DeepSeek 完整思考链</div>
+            <div class="panel-title" id="tradeTblTitle">—</div>
+            <div class="panel-sub" data-i18n="tradeTblSub">每笔成交均可一键跳回当时触发开仓的 DeepSeek 完整思考链</div>
           </div>
         </div>
         <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>平仓 / 状态时间 (BJT)</th>
-                <th>方向 · 手数</th>
-                <th>开仓 → 平仓价</th>
-                <th>持仓时长</th>
-                <th>点数</th>
-                <th>净盈亏 (USD)</th>
-                <th>出场原因</th>
-                <th>思考链溯源</th>
-              </tr>
-            </thead>
+          <table id="tradeTbl">
+            <thead id="tradeTblHead"></thead>
             <tbody id="tradeTableBody"></tbody>
           </table>
         </div>
       </div>
     </section>
 
-    <div class="pwa-tip">
-      手机浏览器可点击「添加到主屏幕」，获得全屏小程序查看体验 · 仅展示脱敏后统计与推理，不含密钥或账号隐私
-    </div>
+    <div class="footer-note" id="footerNote">—</div>
   </main>
 
   <script>
     (function () {
       const REMOTE_SNAPSHOT_URL = "https://raw.githubusercontent.com/lohis-aimbot/eventlens/dashboard-live/snapshot.json";
-      let state = {
+
+      const I18N = {
+        zh: {
+          pageTitle: "EventLens · 实时推理看板与每日报表",
+          tabDecisions: "实时决策与思考链",
+          tabReports: "每日量化报表",
+          vmLive: "云端实盘运行",
+          vmSleep: "周末休眠省电中",
+          vmWait: "等待首次同步",
+          heroEquityTitle: "Demo 账户净值",
+          heroTodayPnl: "今日盈亏",
+          heroRealizedPnl: "累计净盈亏",
+          heroFloorCushion: "安全垫 (底线)",
+          heroPosTitle: "当前持仓与保护栏",
+          heroQuoteTitle: "EUR/USD 实时盘口",
+          heroBudgetTitle: "日内亏损预算余量",
+          regimeTitle: "市场状态卡",
+          fltAll: "全部精评决策",
+          fltTrade: "开 / 平仓信号",
+          fltHold: "观望 HOLD",
+          fltRej: "风控拦截",
+          searchPlaceholder: "搜索新闻标题、思考链或决策理由…",
+          loadingText: "正在同步云端最新决策日志…",
+          emptyDecs: "当前筛选条件下暂无 AI 精评记录（已自动折叠前置过滤的无关新闻）。",
+          eqChartTitle: "账户净值与累计盈亏曲线",
+          eqChartHint: "悬停或手指滑动曲线查看每个节点净值",
+          barChartTitle: "每日净盈亏与 AI 活跃度",
+          barChartSub: "按纽约外汇日结算 · 点击日期柱子可筛选下方流水",
+          showAllDays: "显示全部日期",
+          dailyTblTitle: "每日量化结算汇总表",
+          dailyTblSub: "点击任意交易日可筛选下方成交通道",
+          tradeTblAll: "交易流水与思考链溯源",
+          tradeTblDay: "交易流水与溯源",
+          tradeTblSub: "每笔成交均可一键跳回当时触发开仓的 DeepSeek 完整思考链",
+          flatStatus: "空仓待机",
+          flatTitle: "空仓观察中",
+          flatDesc: "等待高确信催化剂",
+          rawSpread: "Raw 点差",
+          dailyLimit: "日限",
+          scannedShort: "抓取",
+          evalShort: "精评",
+          tradedShort: "成交",
+          biasMap: {
+            bullish_eur: ["偏多欧元 · Bullish EUR", "pill green"],
+            bearish_eur: ["偏空欧元 · Bearish EUR", "pill red"],
+            mixed: ["多空交织 · Mixed", "pill amber"],
+            neutral: ["中性观望 · Neutral", "pill"],
+          },
+          actSetLong: "做多信号",
+          actSetShort: "做空信号",
+          actClose: "主动平仓",
+          actHold: "观望 HOLD",
+          actIgnore: "无关忽略",
+          actErr: "推理异常",
+          riskApproved: "风控放行",
+          riskRejected: "风控拦截",
+          riskTargetRejected: "校验拦截",
+          riskNoTrade: "未下单",
+          lotUnit: "手",
+          cotLabel: "思考链 CoT",
+          wireLabel: "事件原文",
+          riskPromptLabel: "风控与 Prompt",
+          expandBtn: "展开思维链与原文",
+          collapseBtn: "收起详情",
+          cotFallback: "该历史记录生成于切换 deepseek-reasoner 之前（旧版未保存独立思维链；启用 reasoner 后新事件均完整展示推理原文）。",
+          riskNoExposure: "本轮未提出开/平仓目标，未消耗风险预算。",
+          stageNames: ["全网新闻抓取", "AI 深度评估", "AI 提议交易", "硬风控放行"],
+          stageSubs: ["前置规则自动降噪", "通读全文与多周期轨迹", "高确信催化信号", "进入 Demo / 账本执行"],
+          kpis: ["累计已实现净盈亏", "总胜率", "获利因子 (PF)", "成交笔数 & 均持仓", "单日最佳 / 最差"],
+          dailyCols: ["交易日 (NY)", "日初净值", "日净盈亏", "点数", "成交 / 胜负", "胜率", "AI 精评 / 提议 / 放行"],
+          tradeCols: ["结算 / 开仓时间", "方向 · 手数", "入场 → 出场价", "持仓时长", "点数", "净盈亏", "出场原因", "思考链溯源"],
+          jumpBtn: "查看开仓思考链 →",
+          noTradeMsg: "当前周期暂无成交记录，系统仅在出现明确基本面催化剂与盘面共振时出手",
+          footerNote: "移动端浏览器点「添加到主屏幕」即可作为免备案全屏小程序使用 · 数据已自动脱敏，不含密钥或隐私账号",
+          triggerPrefix: "触价复评",
+        },
+        en: {
+          pageTitle: "EventLens · Live Quant Intelligence & Daily Ledger",
+          tabDecisions: "Live Intelligence",
+          tabReports: "Performance & Ledger",
+          vmLive: "Cloud Live",
+          vmSleep: "Weekend Hibernating",
+          vmWait: "Awaiting Sync",
+          heroEquityTitle: "Demo Account Equity",
+          heroTodayPnl: "Today PnL",
+          heroRealizedPnl: "Realized Net",
+          heroFloorCushion: "Floor Cushion",
+          heroPosTitle: "Open Exposure & Guardrails",
+          heroQuoteTitle: "EUR/USD Live Desk",
+          heroBudgetTitle: "Daily Risk Budget Remaining",
+          regimeTitle: "Market State Card",
+          fltAll: "All Evaluated",
+          fltTrade: "Trade Signals",
+          fltHold: "HOLD",
+          fltRej: "Risk Rejected",
+          searchPlaceholder: "Search headlines, Chain of Thought, or rationale…",
+          loadingText: "Syncing cloud intelligence snapshot…",
+          emptyDecs: "No AI-evaluated records match the current filter (pre-filtered wire noise hidden).",
+          eqChartTitle: "Account Equity & Cumulative PnL Curve",
+          eqChartHint: "Hover or scrub along curve to inspect timestamps & equity",
+          barChartTitle: "Daily Net PnL & AI Evaluation Volume",
+          barChartSub: "Settled by NY FX trading day · Tap any bar to filter trades",
+          showAllDays: "Show All Days",
+          dailyTblTitle: "Daily Performance Summary",
+          dailyTblSub: "Select any trading day row to filter the execution ledger below",
+          tradeTblAll: "Execution Ledger & CoT Traceability",
+          tradeTblDay: "Trades & CoT Trace",
+          tradeTblSub: "Click any execution to jump straight to its triggering DeepSeek Chain-of-Thought",
+          flatStatus: "FLAT",
+          flatTitle: "Flat · Standby",
+          flatDesc: "Awaiting substantive macro or CB catalyst",
+          rawSpread: "Spread",
+          dailyLimit: "Daily Cap",
+          scannedShort: "Wires",
+          evalShort: "Evaluated",
+          tradedShort: "Filled",
+          biasMap: {
+            bullish_eur: ["Bullish EUR", "pill green"],
+            bearish_eur: ["Bearish EUR", "pill red"],
+            mixed: ["Mixed / Choppy", "pill amber"],
+            neutral: ["Neutral Regime", "pill"],
+          },
+          actSetLong: "LONG",
+          actSetShort: "SHORT",
+          actClose: "CLOSE",
+          actHold: "HOLD",
+          actIgnore: "IGNORE",
+          actErr: "FAILED",
+          riskApproved: "Approved",
+          riskRejected: "Risk Rejected",
+          riskTargetRejected: "Target Invalid",
+          riskNoTrade: "No Order",
+          lotUnit: "lots",
+          cotLabel: "Chain of Thought",
+          wireLabel: "Source Wire",
+          riskPromptLabel: "Risk & Prompt",
+          expandBtn: "Inspect CoT & Source Wire",
+          collapseBtn: "Hide Details",
+          cotFallback: "Recorded under legacy fast mode prior to deepseek-reasoner switch; new events include full CoT reasoning.",
+          riskNoExposure: "No target exposure change proposed; risk budget untouched.",
+          stageNames: ["Raw Wires Scanned", "AI Deep Evaluations", "Actionable Signals", "Hard Risk Approved"],
+          stageSubs: ["Pre-filter noise removal", "Full wire + multi-window tape", "Macro & momentum aligned", "Routed to Demo / Ledger"],
+          kpis: ["Cumulative Net PnL", "Win Rate", "Profit Factor", "Trades & Avg Hold", "Best / Worst Session"],
+          dailyCols: ["FX Day (NY)", "Start Equity", "Net PnL", "Net Pips", "Trades (W/L)", "Win Rate", "Eval / Signal / Approved"],
+          tradeCols: ["Time", "Side · Size", "Entry → Exit", "Duration", "Pips", "Net PnL", "Exit Reason", "CoT Lineage"],
+          jumpBtn: "Inspect CoT ↗",
+          noTradeMsg: "No executed trades in this slice — system waits selectively for substantive catalysts.",
+          footerNote: "Add to Home Screen on iOS/Android for standalone app experience · Strictly sanitized (zero secrets/account IDs)",
+          triggerPrefix: "Price Trigger",
+        },
+      };
+
+      const SOURCE_LABELS = {
+        investinglive_fx: { zh: "investingLive 外汇", en: "investingLive FX" },
+        internal_stateful_review: { zh: "价格触发复评", en: "Price Trigger" },
+        forexfactory_calendar: { zh: "宏观经济日历", en: "Macro Calendar" },
+        ecb_news: { zh: "欧洲央行公告", en: "ECB Official" },
+        fed: { zh: "美联储官方", en: "Federal Reserve" },
+        us_bea: { zh: "美国经济分析局", en: "US BEA" },
+        wallstreetcn_news: { zh: "华尔街见闻", en: "WallStreetCN" },
+      };
+
+      const qs = new URLSearchParams(location.search);
+      const qLang = qs.get("lang");
+      const savedLang = (qLang === "en" || qLang === "zh") ? qLang : (localStorage.getItem("eventlens_lang") || "zh");
+      const savedTheme = localStorage.getItem("eventlens_theme") || "light";
+
+      const state = {
         snapshot: null,
+        lang: savedLang === "en" ? "en" : "zh",
+        theme: savedTheme === "dark" ? "dark" : "light",
         activeTab: "decisions",
         filter: "all",
         search: "",
         selectedDay: null,
         expandedIds: new Set(),
-        showPromptIds: new Set(),
+        drawerTab: {},
         highlightDecisionId: null,
       };
 
       const el = (id) => document.getElementById(id);
+      const t = (key) => I18N[state.lang][key];
 
       function esc(str) {
         return String(str ?? "")
@@ -944,10 +876,22 @@
           .replace(/"/g, "&quot;");
       }
 
-      function fmtBJT(iso, withSeconds = false) {
+      function fmtTime(iso, withSec = false) {
         if (!iso) return "—";
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return String(iso);
+        if (state.lang === "en") {
+          const opts = {
+            timeZone: "UTC",
+            month: "short",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          };
+          if (withSec) opts.second = "2-digit";
+          return new Intl.DateTimeFormat("en-US", opts).format(d) + " UTC";
+        }
         const opts = {
           timeZone: "Asia/Shanghai",
           month: "2-digit",
@@ -956,8 +900,8 @@
           minute: "2-digit",
           hour12: false,
         };
-        if (withSeconds) opts.second = "2-digit";
-        return new Intl.DateTimeFormat("zh-CN", opts).format(d).replace(/\//g, "-");
+        if (withSec) opts.second = "2-digit";
+        return new Intl.DateTimeFormat("zh-CN", opts).format(d).replace(/\//g, "-") + " BJT";
       }
 
       function relAge(iso) {
@@ -965,6 +909,12 @@
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return "";
         const sec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+        if (state.lang === "en") {
+          if (sec < 60) return `${sec}s ago`;
+          if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+          if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+          return `${Math.floor(sec / 86400)}d ago`;
+        }
         if (sec < 60) return `${sec}秒前`;
         if (sec < 3600) return `${Math.floor(sec / 60)}分钟前`;
         if (sec < 86400) return `${Math.floor(sec / 3600)}小时前`;
@@ -977,8 +927,7 @@
         if (s < 60) return `${s}s`;
         const m = Math.floor(s / 60);
         if (m < 60) return `${m}m`;
-        const h = Math.floor(m / 60);
-        return `${h}h ${m % 60}m`;
+        return `${Math.floor(m / 60)}h ${m % 60}m`;
       }
 
       function fmtSigned(num, decimals = 2, suffix = "") {
@@ -988,6 +937,57 @@
         return `${sign}${n.toFixed(decimals)}${suffix}`;
       }
 
+      function renderPipettePrice(val) {
+        if (val === null || val === undefined || Number.isNaN(Number(val))) {
+          return `<span class="prefix">—</span>`;
+        }
+        const s = Number(val).toFixed(5);
+        return `<span class="prefix">${s.slice(0, 4)}</span><span class="pips">${s.slice(4, 6)}</span><span class="pipette">${s.slice(6)}</span>`;
+      }
+
+      function applyTheme() {
+        document.documentElement.setAttribute("data-theme", state.theme);
+        el("themeIcon").textContent = state.theme === "dark" ? "☀" : "☾";
+        el("metaThemeColor").setAttribute("content", state.theme === "dark" ? "#0d131f" : "#ffffff");
+        localStorage.setItem("eventlens_theme", state.theme);
+        if (state.snapshot && state.activeTab === "reports") {
+          renderCharts(state.snapshot);
+        }
+      }
+
+      function applyStaticI18n() {
+        document.documentElement.lang = state.lang === "en" ? "en" : "zh-CN";
+        document.title = t("pageTitle");
+        el("langZhBtn").classList.toggle("active", state.lang === "zh");
+        el("langEnBtn").classList.toggle("active", state.lang === "en");
+        document.querySelectorAll("[data-i18n]").forEach((node) => {
+          const k = node.getAttribute("data-i18n");
+          if (I18N[state.lang][k]) node.textContent = I18N[state.lang][k];
+        });
+        el("decSearch").placeholder = t("searchPlaceholder");
+        el("footerNote").textContent = t("footerNote");
+        localStorage.setItem("eventlens_lang", state.lang);
+      }
+
+      el("langZhBtn").addEventListener("click", () => {
+        if (state.lang === "zh") return;
+        state.lang = "zh";
+        applyStaticI18n();
+        if (state.snapshot) renderAll(state.snapshot);
+      });
+
+      el("langEnBtn").addEventListener("click", () => {
+        if (state.lang === "en") return;
+        state.lang = "en";
+        applyStaticI18n();
+        if (state.snapshot) renderAll(state.snapshot);
+      });
+
+      el("themeBtn").addEventListener("click", () => {
+        state.theme = state.theme === "dark" ? "light" : "dark";
+        applyTheme();
+      });
+
       function switchTab(tab) {
         state.activeTab = tab;
         const isDec = tab === "decisions";
@@ -995,8 +995,6 @@
         el("viewReports").hidden = isDec;
         el("tabBtnDecisions").classList.toggle("active", isDec);
         el("tabBtnReports").classList.toggle("active", !isDec);
-        el("tabBtnDecisions").setAttribute("aria-selected", String(isDec));
-        el("tabBtnReports").setAttribute("aria-selected", String(!isDec));
         if (!isDec && state.snapshot) {
           renderCharts(state.snapshot);
         }
@@ -1018,7 +1016,7 @@
         if (state.snapshot) renderDecisions(state.snapshot);
       });
 
-      el("clearDayFilterBtn").addEventListener("click", () => {
+      el("clearDayBtn").addEventListener("click", () => {
         state.selectedDay = null;
         if (state.snapshot) renderReports(state.snapshot);
       });
@@ -1027,7 +1025,6 @@
         const btn = el("refreshBtn");
         btn.classList.add("spinning");
         try {
-          const qs = new URLSearchParams(location.search);
           const customUrl = qs.get("snapshot");
           const candidates = [];
           if (customUrl) {
@@ -1048,7 +1045,8 @@
             } catch (_) {}
           }
           if (!data) {
-            renderEmptySnapshotNotice();
+            el("vmStatusPill").className = "status-pill sleep";
+            el("vmStatusText").textContent = t("vmWait");
             return;
           }
           state.snapshot = data;
@@ -1060,124 +1058,153 @@
 
       el("refreshBtn").addEventListener("click", fetchSnapshot);
 
-      function renderEmptySnapshotNotice() {
-        el("vmStatusPill").className = "status-pill sleep";
-        el("vmStatusText").textContent = "等待首次云端同步";
-        el("decisionList").innerHTML = `<div class="empty-state">尚未获取到云端 <code>dashboard-live</code> 快照。<br/>云端定时器将在 5 分钟内自动完成首次脱敏推送，稍后点右上角「刷新」即可。</div>`;
+      function renderMiniSparkline(curve) {
+        const svg = el("miniSpark");
+        if (!curve || curve.length < 2) {
+          svg.innerHTML = "";
+          return;
+        }
+        const vals = curve.map((c) => Number(c.equity_usd || 0));
+        let minV = Math.min(...vals), maxV = Math.max(...vals);
+        if (maxV - minV < 0.01) { minV -= 1; maxV += 1; }
+        const pts = vals.map((v, i) => {
+          const x = 4 + (i / (vals.length - 1)) * 68;
+          const y = 24 - ((v - minV) / (maxV - minV)) * 20;
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        });
+        const net = vals[vals.length - 1] - vals[0];
+        const col = net >= 0 ? "var(--green)" : "var(--red)";
+        svg.innerHTML = `<polyline fill="none" stroke="${col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${pts.join(" ")}" />`;
       }
 
       function renderAll(s) {
-        // Header Status
-        const vmStat = s.vm_status || (s.account && s.account.runner && s.account.runner.status) || "running";
+        const q = s.quote || {};
+        el("topTicker").textContent = q.mid
+          ? `EUR/USD ${Number(q.mid).toFixed(5)}${q.spread_pips !== null && q.spread_pips !== undefined ? ` · ${Number(q.spread_pips).toFixed(1)}p` : ""}`
+          : "EUR/USD —";
+
+        const vmStat = s.vm_status || "running";
         const pill = el("vmStatusPill");
-        const syncAge = relAge(s.generated_at);
+        const age = relAge(s.generated_at);
         if (vmStat === "weekend_hibernating" || vmStat === "stopped") {
           pill.className = "status-pill sleep";
-          el("vmStatusText").textContent = `周末休眠省电中 · ${syncAge || fmtBJT(s.generated_at)}`;
+          el("vmStatusText").textContent = `${t("vmSleep")}${age ? ` · ${age}` : ""}`;
         } else {
           pill.className = "status-pill live";
-          el("vmStatusText").textContent = `云端实盘运行 · ${syncAge || "刚刚"}`;
+          el("vmStatusText").textContent = `${t("vmLive")}${age ? ` · ${age}` : ""}`;
         }
-        const mc = s.model_config || {};
-        el("modelVersionTag").textContent = `${mc.model || "deepseek-reasoner"} · ${(mc.prompt_version || "v4.0").replace("single-pass-agent-", "")}`;
 
-        // Hero Cards
+        const mc = s.model_config || {};
+        const rp = mc.risk_profile || {};
         const acc = s.account || {};
         const eq = Number(acc.equity_usd || 0);
         const dailyPnl = Number(acc.daily_pnl_usd || 0);
-        const pnlCls = dailyPnl > 0 ? "pos" : dailyPnl < 0 ? "neg" : "";
-        el("accountModeChip").textContent = acc.mode === "shadow" ? "Shadow 模拟" : "Pepperstone Demo";
-        el("heroEquity").innerHTML = eq > 0 ? `$${eq.toFixed(2)} <span style="font-size:13px;font-weight:500;color:var(--ink-3)">USD</span>` : "等待对账";
-        const minFloor = (mc.risk_profile && mc.risk_profile.min_equity_usd) || 140;
-        const cushion = eq > minFloor ? ` · 高出底线 $${(eq - minFloor).toFixed(0)}` : "";
-        el("heroEquitySub").innerHTML = `今日盈亏 <strong class="${pnlCls}">${fmtSigned(dailyPnl, 2, " USD")}</strong>${esc(cushion)}`;
+        const realizedPnl = Number(acc.realized_pnl_usd || 0);
+        const minFloor = Number(rp.min_equity_usd || 140);
+
+        el("accountChip").textContent = acc.mode === "shadow" ? "Shadow · 200x" : "Pepperstone Demo · 200x";
+        el("heroEquity").innerHTML = eq > 0 ? `$${eq.toFixed(2)} <span style="font-size:13px;font-weight:550;color:var(--ink-3)">USD</span>` : "—";
+        renderMiniSparkline(s.equity_curve);
+
+        el("msToday").className = `ms-v ${dailyPnl > 0 ? "pos" : dailyPnl < 0 ? "neg" : ""}`;
+        el("msToday").textContent = fmtSigned(dailyPnl, 2, " $");
+        el("msRealized").className = `ms-v ${realizedPnl > 0 ? "pos" : realizedPnl < 0 ? "neg" : ""}`;
+        el("msRealized").textContent = fmtSigned(realizedPnl, 2, " $");
+        el("msFloor").textContent = eq > minFloor ? `+$${(eq - minFloor).toFixed(1)} ($${minFloor})` : `$${minFloor}`;
 
         const pos = acc.open_position;
         if (pos) {
-          el("posSideChip").className = `chip ${pos.side === "long" ? "green" : "red"}`;
-          el("posSideChip").textContent = `${pos.side_zh}持仓中`;
-          el("heroPos").textContent = `${pos.side_zh} ${Number(pos.lots || 0).toFixed(2)} 手`;
+          const isLong = pos.side === "long";
+          const sideTxt = state.lang === "en" ? (pos.side_en || pos.side.toUpperCase()) : pos.side_zh;
+          el("posChip").className = `pill ${isLong ? "green" : "red"}`;
+          el("posChip").textContent = `${sideTxt} ${Number(pos.lots || 0).toFixed(2)} ${t("lotUnit")}`;
           const uPnl = Number(pos.unrealized_pnl_usd || 0);
-          const uPips = pos.unrealized_pips;
-          const uCls = uPnl > 0 ? "pos" : uPnl < 0 ? "neg" : "";
-          el("heroPosSub").innerHTML = `开仓 ${Number(pos.entry_price || 0).toFixed(5)} · <strong class="${uCls}">${fmtSigned(uPnl, 2, " USD")}${uPips !== null && uPips !== undefined ? ` (${fmtSigned(uPips, 1, "p")})` : ""}</strong>`;
+          el("heroPos").className = `hero-val md tnum ${uPnl > 0 ? "pos" : uPnl < 0 ? "neg" : ""}`;
+          el("heroPos").textContent = `${fmtSigned(uPnl, 2, " USD")}`;
+          el("posRulerLabels").innerHTML = `<span>SL ${pos.stop_loss ? Number(pos.stop_loss).toFixed(5) : "-14p"}</span><span>@ ${Number(pos.entry_price || 0).toFixed(5)}</span><span>TP ${pos.take_profit ? Number(pos.take_profit).toFixed(5) : "+42p"}</span>`;
         } else {
-          el("posSideChip").className = "chip";
-          el("posSideChip").textContent = "空仓";
-          el("heroPos").textContent = "空仓观望";
-          el("heroPosSub").textContent = "等待宏观/政策催化剂与盘面匹配";
+          el("posChip").className = "pill";
+          el("posChip").textContent = t("flatStatus");
+          el("heroPos").className = "hero-val md tnum";
+          el("heroPos").textContent = t("flatTitle");
+          el("posRulerLabels").innerHTML = `<span>SL -${rp.stop_loss_pips || 14}p</span><span>1 : 3 R:R (${Math.round((rp.max_holding_seconds || 18000) / 3600)}h)</span><span>TP +${rp.take_profit_pips || 42}p</span>`;
         }
 
-        const q = s.quote || {};
-        el("heroMid").textContent = q.mid ? Number(q.mid).toFixed(5) : "—";
-        el("spreadChip").textContent = q.spread_pips !== null && q.spread_pips !== undefined ? `点差 ${Number(q.spread_pips).toFixed(1)}p` : "点差 —";
-        el("heroQuoteSub").textContent = q.bid && q.ask ? `B ${Number(q.bid).toFixed(5)} / A ${Number(q.ask).toFixed(5)} (${relAge(q.received_at) || fmtBJT(q.received_at)})` : "等待实时报价";
+        el("heroQuoteFig").innerHTML = renderPipettePrice(q.mid);
+        el("spreadChip").textContent = q.spread_pips !== null && q.spread_pips !== undefined
+          ? `${t("rawSpread")} ${Number(q.spread_pips).toFixed(1)}p`
+          : `${t("rawSpread")} —`;
+        el("heroQuoteSub").textContent = q.bid && q.ask
+          ? `B ${Number(q.bid).toFixed(5)} · A ${Number(q.ask).toFixed(5)} (${relAge(q.received_at)})`
+          : t("flatDesc");
 
         const lossLim = Number(acc.daily_loss_limit_usd || 8);
         const lossRem = Number(acc.daily_loss_remaining_usd ?? lossLim);
         const remPct = Math.max(0, Math.min(100, (lossRem / Math.max(lossLim, 0.01)) * 100));
-        el("lossLimitLabel").textContent = `上限 $${lossLim.toFixed(0)}`;
+        el("lossLimitLbl").textContent = `${t("dailyLimit")} $${lossLim.toFixed(0)}`;
         el("heroLossRem").textContent = `$${lossRem.toFixed(2)}`;
-        el("lossBarFill").style.width = `${remPct}%`;
-        el("lossBarFill").style.background = remPct < 30 ? "var(--red)" : remPct < 60 ? "var(--amber)" : "var(--green)";
+        el("lossFill").style.width = `${remPct}%`;
+        el("lossFill").style.background = remPct < 30 ? "var(--red)" : remPct < 60 ? "var(--amber)" : "var(--green)";
         const f = (s.kpis && s.kpis.funnel) || {};
-        el("heroFunnelSub").textContent = `AI 已评估 ${f.evaluated_events || 0} 条 · 提议开/平 ${f.proposed_trades || 0} 次`;
+        el("heroFunnelFoot").textContent = `${t("scannedShort")} ${f.total_events || 0} → ${t("evalShort")} ${f.evaluated_events || 0} → ${t("tradedShort")} ${f.approved_trades || 0}`;
 
-        // State Card
+        // Regime Card
         const card = s.market_state_card || {};
-        const biasMap = {
-          bullish_eur: ["偏多欧元 (看涨 EUR/USD)", "chip green"],
-          bearish_eur: ["偏空欧元 (看跌 EUR/USD)", "chip red"],
-          mixed: ["多空交织", "chip amber"],
-          neutral: ["中性观望", "chip"],
-        };
+        const biasMap = I18N[state.lang].biasMap;
         const [bTxt, bCls] = biasMap[card.market_bias] || biasMap.neutral;
         el("biasChip").textContent = bTxt;
         el("biasChip").className = bCls;
+        el("modelChip").textContent = `${mc.model || "deepseek-reasoner"} · ${(mc.prompt_version || "v4.0").replace("single-pass-agent-", "")}`;
         if (card.watch_condition) {
           el("watchChip").hidden = false;
-          el("watchChip").textContent = `盯盘唤醒: ${card.watch_condition}`;
+          el("watchChip").textContent = `⚡ ${card.watch_condition}`;
         } else {
           el("watchChip").hidden = true;
         }
-        el("stateNoteText").textContent = card.market_state_note || "等待下一条宏观事件更新当前市场备忘。";
-        const rp = mc.risk_profile || {};
-        el("riskProfileChips").innerHTML = [
-          `止损 ${rp.stop_loss_pips || 14}p`,
-          `止盈 ${rp.take_profit_pips || 42}p`,
-          `移动止盈 ${rp.trailing_activation_pips || 22}/${rp.trailing_distance_pips || 10}p`,
-          `最长 ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`,
-          `单笔风险 ≤ ${rp.max_risk_per_trade_pct || 2}%`,
-        ].map((t) => `<span class="chip tnum">${esc(t)}</span>`).join("");
+        let noteTxt = card.market_state_note || "";
+        if (!noteTxt || (noteTxt.startsWith("等待下一条") && state.lang === "en")) {
+          noteTxt = state.lang === "en"
+            ? "Monitoring macro wire & central-bank feeds; awaiting next catalyst to update regime brief."
+            : "等待下一条宏观或央行事件更新当前市场状态卡。";
+        }
+        el("stateNoteText").textContent = noteTxt;
+
+        const rpLabels = state.lang === "en"
+          ? [`SL ${rp.stop_loss_pips || 14}p`, `TP ${rp.take_profit_pips || 42}p`, `Trail ${rp.trailing_activation_pips || 22}/${rp.trailing_distance_pips || 10}p`, `Max ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `Risk ≤ ${rp.max_risk_per_trade_pct || 2}%`]
+          : [`止损 ${rp.stop_loss_pips || 14}p`, `止盈 ${rp.take_profit_pips || 42}p`, `移动 ${rp.trailing_activation_pips || 22}/${rp.trailing_distance_pips || 10}p`, `持仓 ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `单笔 ≤ ${rp.max_risk_per_trade_pct || 2}%`];
+        el("riskProfileChips").innerHTML = rpLabels.map((x) => `<span class="pill tnum">${esc(x)}</span>`).join("");
 
         renderDecisions(s);
         renderReports(s);
       }
 
+      function sourceLabel(src) {
+        const entry = SOURCE_LABELS[src];
+        return entry ? entry[state.lang] : src;
+      }
+
       function actionBadge(d) {
         if (d.portfolio_action === "SET_TARGET") {
           return d.target_direction === "long"
-            ? [`建议做多 (${d.target_weight})`, "chip green"]
-            : [`建议做空 (${d.target_weight})`, "chip red"];
+            ? [`${t("actSetLong")} ${d.target_weight}`, "pill green"]
+            : [`${t("actSetShort")} ${d.target_weight}`, "pill red"];
         }
-        if (d.portfolio_action === "CLOSE") return ["建议主动平仓", "chip amber"];
-        if (d.portfolio_action === "HOLD") return ["观望 HOLD", "chip"];
-        if (d.portfolio_action === "IGNORE_EVENT") return ["无关忽略", "chip"];
-        if (d.state === "reasoning_failed") return ["推理异常", "chip red"];
-        return [d.state || "已处理", "chip"];
+        if (d.portfolio_action === "CLOSE") return [t("actClose"), "pill amber"];
+        if (d.portfolio_action === "HOLD") return [t("actHold"), "pill"];
+        if (d.portfolio_action === "IGNORE_EVENT") return [t("actIgnore"), "pill"];
+        if (d.state === "reasoning_failed") return [t("actErr"), "pill red"];
+        return [d.state || "OK", "pill"];
       }
 
       function riskBadge(d) {
         const r = d.risk || {};
         if (r.outcome === "approve") {
           const lots = r.approved_quantity_eur ? (Math.abs(Number(r.approved_quantity_eur)) / 100000).toFixed(2) : "";
-          return [`风控放行 ${lots ? lots + "手" : ""}`, "chip green"];
+          return [`${t("riskApproved")}${lots ? ` ${lots} ${t("lotUnit")}` : ""}`, "pill green"];
         }
-        if (r.outcome === "reject" || d.state === "risk_rejected") {
-          return ["风控拦截", "chip red"];
-        }
-        if (d.state === "target_rejected") return ["目标校验拦截", "chip red"];
-        return ["未触发下单", "chip"];
+        if (r.outcome === "reject" || d.state === "risk_rejected") return [t("riskRejected"), "pill red"];
+        if (d.state === "target_rejected") return [t("riskTargetRejected"), "pill red"];
+        return [t("riskNoTrade"), "pill"];
       }
 
       function renderDecisions(s) {
@@ -1189,7 +1216,7 @@
             if (!isRej) return false;
           }
           if (state.search) {
-            const blob = `${d.headline} ${d.rationale} ${d.reasoning_content || ""} ${d.raw_text || ""} ${(d.risk && d.risk.reasons_zh || []).join(" ")}`.toLowerCase();
+            const blob = `${d.headline} ${d.rationale} ${d.reasoning_content || ""} ${d.raw_text || ""} ${(d.risk && d.risk.reasons_zh || []).join(" ")} ${(d.risk && d.risk.reasons_en || []).join(" ")}`.toLowerCase();
             if (!blob.includes(state.search)) return false;
           }
           return true;
@@ -1197,50 +1224,82 @@
 
         const container = el("decisionList");
         if (!list.length) {
-          container.innerHTML = `<div class="empty-state">当前筛选条件下暂无决策记录</div>`;
+          container.innerHTML = `<div class="empty-state">${esc(t("emptyDecs"))}</div>`;
           return;
         }
 
         container.innerHTML = list.map((d) => {
           const idKey = d.decision_id || d.event_id;
           const isOpen = state.expandedIds.has(idKey);
-          const showPrompt = state.showPromptIds.has(idKey);
+          const activeSub = state.drawerTab[idKey] || "cot";
           const isHl = state.highlightDecisionId && state.highlightDecisionId === d.decision_id;
           const [aTxt, aCls] = actionBadge(d);
           const [rTxt, rCls] = riskBadge(d);
           const traj = d.trajectory;
+          let rangeHtml = "";
+          if (traj && traj.mid && traj.h15m && traj.l15m) {
+            const hi = Number(traj.h15m), lo = Number(traj.l15m), cur = Number(traj.mid);
+            const pct = hi > lo ? Math.max(4, Math.min(96, ((cur - lo) / (hi - lo)) * 100)) : 50;
+            rangeHtml = `
+              <div class="range-15m mono" title="15m Range">
+                <span>${lo.toFixed(4)}</span>
+                <div class="range-track"><div class="range-dot" style="left:${pct.toFixed(0)}%"></div></div>
+                <span>${hi.toFixed(4)}</span>
+              </div>
+            `;
+          }
+
           const trajHtml = traj
-            ? `<div class="traj-strip mono">
-                <span class="chip">当时盘口 ${esc(traj.mid || "—")}${traj.spread_pips ? ` · 点差 ${esc(traj.spread_pips)}p` : ""}</span>
-                ${["c1m", "c5m", "c15m", "c30m"].map((k, idx) => {
-                  const lbl = ["1m", "5m", "15m", "30m"][idx];
-                  const val = traj[k];
-                  if (val === null || val === undefined) return `<span class="chip">${lbl} 缺失</span>`;
-                  const n = Number(val);
-                  const cls = n > 0 ? "green" : n < 0 ? "red" : "";
-                  return `<span class="chip ${cls}">${lbl} ${n > 0 ? "+" : ""}${n.toFixed(1)}p</span>`;
-                }).join("")}
+            ? `<div class="traj-row">
+                <div class="traj-pills mono">
+                  <span class="pill">@ ${esc(traj.mid || "—")}${traj.spread_pips ? ` · ${esc(traj.spread_pips)}p` : ""}</span>
+                  ${["c1m", "c5m", "c15m", "c30m"].map((k, idx) => {
+                    const lbl = ["1m", "5m", "15m", "30m"][idx];
+                    const val = traj[k];
+                    if (val === null || val === undefined) return `<span class="pill">${lbl} N/A</span>`;
+                    const n = Number(val);
+                    const cls = n > 0 ? "green" : n < 0 ? "red" : "";
+                    return `<span class="pill ${cls}">${lbl} ${n > 0 ? "+" : ""}${n.toFixed(1)}p</span>`;
+                  }).join("")}
+                </div>
+                ${rangeHtml}
               </div>`
             : "";
 
-          const cotHtml = d.reasoning_content
-            ? esc(d.reasoning_content)
-            : "<span style='color:var(--ink-3)'>该条记录由快速模式或旧版本生成，无独立思维链字段（已启用 deepseek-reasoner 后新事件均完整保存思维链）。</span>";
+          const reasons = state.lang === "en"
+            ? ((d.risk && d.risk.reasons_en && d.risk.reasons_en.length) ? d.risk.reasons_en : (d.risk && d.risk.reasons) || [])
+            : ((d.risk && d.risk.reasons_zh && d.risk.reasons_zh.length) ? d.risk.reasons_zh : (d.risk && d.risk.reasons) || []);
 
-          const riskReasons = (d.risk && d.risk.reasons_zh && d.risk.reasons_zh.length)
-            ? d.risk.reasons_zh.map((rz, idx) => `<div>· ${esc(rz)} <span class="mono" style="color:var(--ink-4);font-size:11px">(${esc((d.risk.reasons || [])[idx] || "")})</span></div>`).join("")
-            : "<div>· 本轮未提出增减仓目标，未占用风险限额。</div>";
+          const riskBody = reasons.length
+            ? reasons.map((rz, idx) => `<div style="margin-bottom:4px">• ${esc(rz)} <span class="mono" style="color:var(--ink-4);font-size:11px">(${esc((d.risk.reasons || [])[idx] || "")})</span></div>`).join("")
+            : `<div style="color:var(--ink-3)">${esc(t("riskNoExposure"))}</div>`;
 
           const promptBody = (s.system_prompts && s.system_prompts[d.prompt_version]) || "";
+          let paneHtml = "";
+          if (isOpen) {
+            if (activeSub === "cot") {
+              paneHtml = d.reasoning_content
+                ? `<div class="cot-pre">${esc(d.reasoning_content)}</div>`
+                : `<div class="cot-pre" style="color:var(--ink-3)">${esc(t("cotFallback"))}</div>`;
+            } else if (activeSub === "wire") {
+              paneHtml = `<div class="cot-pre mono" style="font-size:12px;color:var(--ink-2)">${esc(d.raw_text || d.headline)}</div>`;
+            } else {
+              paneHtml = `
+                <div style="font-size:12.5px;margin-bottom:10px;">${riskBody}</div>
+                ${promptBody ? `<div style="font-size:11px;font-weight:650;color:var(--ink-3);margin-bottom:5px;">System Prompt (${esc(d.prompt_version)})</div><div class="cot-pre mono" style="font-size:11.5px;color:var(--ink-3);max-height:240px;">${esc(promptBody)}</div>` : ""}
+              `;
+            }
+          }
 
           return `
-            <article class="dec-card ${isHl ? "highlight" : ""}" id="dec-${esc(idKey)}">
+            <article class="card dec-card ${isHl ? "highlight" : ""}" id="dec-${esc(idKey)}">
               <div class="dec-head">
                 <div class="dec-meta tnum">
-                  <span class="chip">${esc(d.source || d.source_type)}</span>
-                  <span>${esc(fmtBJT(d.timestamp, true))}</span>
-                  ${d.receipt_to_decision_ms ? `<span>耗时 ${(d.receipt_to_decision_ms / 1000).toFixed(1)}s</span>` : ""}
-                  ${d.reasoning_tokens ? `<span>CoT ${d.reasoning_tokens} tok</span>` : ""}
+                  <span class="pill">${esc(sourceLabel(d.source || d.source_type))}</span>
+                  ${d.review_meta ? `<span class="pill blue mono">⚡ ${esc(t("triggerPrefix"))}: ${esc(d.review_meta.trigger_rule)}</span>` : ""}
+                  <span>${esc(fmtTime(d.timestamp, true))}</span>
+                  ${d.receipt_to_decision_ms ? `<span>${(d.receipt_to_decision_ms / 1000).toFixed(1)}s</span>` : ""}
+                  ${d.reasoning_tokens ? `<span>${d.reasoning_tokens} CoT tok</span>` : ""}
                 </div>
                 <div class="dec-badges">
                   <span class="${aCls}">${esc(aTxt)}</span>
@@ -1250,45 +1309,22 @@
               <div class="dec-headline">${esc(d.headline)}</div>
               <div class="dec-rationale">${esc(d.rationale || "—")}</div>
               ${trajHtml}
-              <div class="dec-actions-bar">
-                <button class="expand-btn" data-toggle="${esc(idKey)}" type="button">
-                  ${isOpen ? "收起思维链与详情 ▲" : "展开完整 DeepSeek 思考链与原文 ▼"}
+              <div class="dec-footer">
+                <button class="drawer-btn" data-toggle="${esc(idKey)}" type="button">
+                  ${isOpen ? `${esc(t("collapseBtn"))} ▲` : `${esc(t("expandBtn"))} ▼`}
                 </button>
                 <span class="mono" style="font-size:11px;color:var(--ink-4)">${esc(d.model_version || "deepseek-reasoner")}</span>
               </div>
-              <div class="dec-details" ${isOpen ? "" : "hidden"}>
-                <div class="detail-box">
-                  <div class="detail-box-title">
-                    <span>DeepSeek Reasoner 思考链原文 (CoT)</span>
-                    <span class="tnum">${d.reasoning_tokens ? `${d.reasoning_tokens} tokens` : ""}</span>
+              ${isOpen ? `
+                <div class="drawer">
+                  <div class="drawer-tabs">
+                    <button class="drawer-tab ${activeSub === "cot" ? "active" : ""}" data-sub="${esc(idKey)}:cot" type="button">${esc(t("cotLabel"))} ${d.reasoning_tokens ? `(${d.reasoning_tokens})` : ""}</button>
+                    <button class="drawer-tab ${activeSub === "wire" ? "active" : ""}" data-sub="${esc(idKey)}:wire" type="button">${esc(t("wireLabel"))}</button>
+                    <button class="drawer-tab ${activeSub === "risk" ? "active" : ""}" data-sub="${esc(idKey)}:risk" type="button">${esc(t("riskPromptLabel"))}</button>
                   </div>
-                  <div class="cot-text">${cotHtml}</div>
+                  <div class="drawer-pane">${paneHtml}</div>
                 </div>
-                <div class="detail-box">
-                  <div class="detail-box-title">
-                    <span>硬风控审理结论</span>
-                    <span>${esc((d.risk && d.risk.outcome) || "N/A")}</span>
-                  </div>
-                  <div style="font-size:12.5px;color:var(--ink-1);line-height:1.6">${riskReasons}</div>
-                </div>
-                <div class="detail-box">
-                  <div class="detail-box-title">
-                    <span>触发事件原文</span>
-                    <span class="mono">${esc(d.event_id)}</span>
-                  </div>
-                  <div class="raw-text">${esc(d.raw_text || d.headline)}</div>
-                </div>
-                ${promptBody ? `
-                  <div>
-                    <button class="expand-btn" data-toggle-prompt="${esc(idKey)}" type="button" style="color:var(--ink-3);font-size:12px;">
-                      ${showPrompt ? "隐藏 System Prompt ▲" : `查看当时使用的提示词模板 (${esc(d.prompt_version)}) ▼`}
-                    </button>
-                    <div class="detail-box" ${showPrompt ? "" : "hidden"} style="margin-top:6px">
-                      <div class="raw-text mono" style="font-size:11.5px">${esc(promptBody)}</div>
-                    </div>
-                  </div>
-                ` : ""}
-              </div>
+              ` : ""}
             </article>
           `;
         }).join("");
@@ -1303,11 +1339,10 @@
           renderDecisions(state.snapshot);
           return;
         }
-        const pBtn = e.target.closest("[data-toggle-prompt]");
-        if (pBtn) {
-          const id = pBtn.dataset.togglePrompt;
-          if (state.showPromptIds.has(id)) state.showPromptIds.delete(id);
-          else state.showPromptIds.add(id);
+        const sBtn = e.target.closest("[data-sub]");
+        if (sBtn) {
+          const [id, tabName] = sBtn.dataset.sub.split(":");
+          state.drawerTab[id] = tabName;
           renderDecisions(state.snapshot);
         }
       });
@@ -1315,57 +1350,61 @@
       function renderReports(s) {
         const k = s.kpis || {};
         const f = k.funnel || {};
+        const sNames = t("stageNames");
+        const sSubs = t("stageSubs");
+        const tot = Math.max(1, f.total_events || 0);
+        const eva = f.evaluated_events || 0;
+        const prop = f.proposed_trades || 0;
+        const app = f.approved_trades || 0;
+
+        el("funnelBanner").innerHTML = [
+          [sNames[0], f.total_events || 0, "100%", sSubs[0]],
+          [sNames[1], eva, `${((eva / tot) * 100).toFixed(1)}%`, sSubs[1]],
+          [sNames[2], prop, `${eva ? ((prop / eva) * 100).toFixed(1) : "0.0"}%`, sSubs[2]],
+          [sNames[3], app, `${prop ? ((app / prop) * 100).toFixed(0) : "0"}%`, sSubs[3]],
+        ].map(([name, val, pct, sub], idx) => `
+          <div class="stage-box">
+            <div class="stage-step"><span>0${idx + 1} · ${esc(name)}</span><span class="mono">${pct}</span></div>
+            <div class="stage-num tnum">${val}</div>
+            <div class="stage-sub">${esc(sub)}</div>
+          </div>
+        `).join("");
+
+        const kLbls = t("kpis");
         const pfTxt = k.profit_factor !== null && k.profit_factor !== undefined ? k.profit_factor.toFixed(2) : (k.win_count > 0 && k.loss_count === 0 ? "∞" : "—");
         const wrTxt = k.win_rate_pct !== null && k.win_rate_pct !== undefined ? `${k.win_rate_pct.toFixed(1)}%` : "—";
         const netCls = Number(k.net_pnl_usd || 0) > 0 ? "pos" : Number(k.net_pnl_usd || 0) < 0 ? "neg" : "";
-
-        const maxF = Math.max(1, f.evaluated_events || 0);
         el("kpiGrid").innerHTML = `
-          <div class="kpi-tile">
-            <div class="k-lbl">累计已实现净盈亏</div>
-            <div class="k-val tnum ${netCls}">${fmtSigned(k.net_pnl_usd || 0, 2, " USD")}</div>
-            <div class="k-sub tnum">平均每笔 ${k.avg_pips !== null && k.avg_pips !== undefined ? fmtSigned(k.avg_pips, 1, " pips") : "—"}</div>
+          <div class="card kpi-tile">
+            <div class="k-l">${esc(kLbls[0])}</div>
+            <div class="k-v ${netCls}">${fmtSigned(k.net_pnl_usd || 0, 2, " $")}</div>
+            <div class="k-s">${k.avg_pips !== null && k.avg_pips !== undefined ? fmtSigned(k.avg_pips, 1, " pips/trade") : "—"}</div>
           </div>
-          <div class="kpi-tile">
-            <div class="k-lbl">总胜率 (Win Rate)</div>
-            <div class="k-val tnum">${esc(wrTxt)}</div>
-            <div class="k-sub tnum">${k.win_count || 0} 胜 / ${k.loss_count || 0} 负</div>
+          <div class="card kpi-tile">
+            <div class="k-l">${esc(kLbls[1])}</div>
+            <div class="k-v">${esc(wrTxt)}</div>
+            <div class="k-s">${k.win_count || 0}W / ${k.loss_count || 0}L</div>
           </div>
-          <div class="kpi-tile">
-            <div class="k-lbl">获利因子 (Profit Factor)</div>
-            <div class="k-val tnum">${esc(pfTxt)}</div>
-            <div class="k-sub tnum">均盈 $${Number(k.avg_win_usd || 0).toFixed(2)} · 均亏 $${Number(k.avg_loss_usd || 0).toFixed(2)}</div>
+          <div class="card kpi-tile">
+            <div class="k-l">${esc(kLbls[2])}</div>
+            <div class="k-v">${esc(pfTxt)}</div>
+            <div class="k-s">+$${Number(k.avg_win_usd || 0).toFixed(2)} / -$${Number(k.avg_loss_usd || 0).toFixed(2)}</div>
           </div>
-          <div class="kpi-tile">
-            <div class="k-lbl">平仓笔数与平均持仓</div>
-            <div class="k-val tnum">${k.total_trades || 0} 笔</div>
-            <div class="k-sub tnum">平均持仓时长 ${fmtDur(k.avg_holding_seconds)}</div>
+          <div class="card kpi-tile">
+            <div class="k-l">${esc(kLbls[3])}</div>
+            <div class="k-v">${k.total_trades || 0}</div>
+            <div class="k-s">${fmtDur(k.avg_holding_seconds)}</div>
           </div>
-          <div class="kpi-tile">
-            <div class="k-lbl">单日最佳 / 最大回撤日</div>
-            <div class="k-val tnum pos" style="font-size:16px">${k.best_day ? `${k.best_day.trading_day} ${fmtSigned(k.best_day.net_pnl_usd, 2, " USD")}` : "暂无成交"}</div>
-            <div class="k-sub tnum ${k.worst_day && k.worst_day.net_pnl_usd < 0 ? "neg" : ""}">${k.worst_day ? `最差 ${k.worst_day.trading_day} ${fmtSigned(k.worst_day.net_pnl_usd, 2, " USD")}` : "—"}</div>
-          </div>
-          <div class="kpi-tile">
-            <div class="k-lbl">AI 决策漏斗（至今累计）</div>
-            <div class="funnel-bar">
-              ${[
-                ["AI 已评估", f.evaluated_events || 0, "var(--ink-1)"],
-                ["提出开/平", f.proposed_trades || 0, "var(--accent)"],
-                ["风控放行", f.approved_trades || 0, "var(--green)"],
-                ["风控拦截", f.risk_rejected || 0, "var(--red)"],
-              ].map(([lbl, num, col]) => `
-                <div class="funnel-row">
-                  <span class="f-lbl">${lbl}</span>
-                  <div class="f-track"><div class="f-fill" style="width:${Math.round((num / maxF) * 100)}%;background:${col}"></div></div>
-                  <span class="f-num">${num}</span>
-                </div>
-              `).join("")}
-            </div>
+          <div class="card kpi-tile">
+            <div class="k-l">${esc(kLbls[4])}</div>
+            <div class="k-v" style="font-size:15px">${k.best_day ? `${k.best_day.trading_day.slice(5)} ${fmtSigned(k.best_day.net_pnl_usd, 2, "$")}` : "—"}</div>
+            <div class="k-s">${k.worst_day ? `Min ${k.worst_day.trading_day.slice(5)} ${fmtSigned(k.worst_day.net_pnl_usd, 2, "$")}` : "—"}</div>
           </div>
         `;
 
-        // Daily summary table
+        el("dailyTblHead").innerHTML = `<tr>${t("dailyCols").map((c) => `<th>${esc(c)}</th>`).join("")}</tr>`;
+        el("tradeTblHead").innerHTML = `<tr>${t("tradeCols").map((c) => `<th>${esc(c)}</th>`).join("")}</tr>`;
+
         const reports = s.daily_reports || [];
         el("dailyReportBody").innerHTML = reports.length
           ? reports.map((r) => {
@@ -1374,49 +1413,46 @@
               const sel = state.selectedDay === r.trading_day ? "selected-row" : "";
               return `
                 <tr class="clickable ${sel}" data-day="${esc(r.trading_day)}">
-                  <td class="mono" style="font-weight:600">${esc(r.trading_day)}</td>
+                  <td class="mono" style="font-weight:650">${esc(r.trading_day)}</td>
                   <td class="tnum">${r.baseline_equity_usd !== null ? `$${Number(r.baseline_equity_usd).toFixed(2)}` : "—"}</td>
-                  <td class="tnum ${cls}" style="font-weight:650">${fmtSigned(pnl, 2, " USD")}</td>
+                  <td class="tnum ${cls}" style="font-weight:700">${fmtSigned(pnl, 2, " USD")}</td>
                   <td class="mono ${cls}">${fmtSigned(r.net_pips || 0, 1, "p")}</td>
-                  <td class="tnum">${r.trade_count} 笔 (${r.win_count}胜/${r.loss_count}负)</td>
+                  <td class="tnum">${r.trade_count} (${r.win_count}W/${r.loss_count}L)</td>
                   <td class="tnum">${r.win_rate_pct !== null ? `${r.win_rate_pct.toFixed(0)}%` : "—"}</td>
                   <td class="tnum">${r.events_evaluated} / ${r.signals_proposed} / ${r.signals_approved}</td>
                 </tr>
               `;
             }).join("")
-          : `<tr><td colspan="7" style="text-align:center;color:var(--ink-3)">暂无交易日结算数据</td></tr>`;
+          : `<tr><td colspan="7" style="text-align:center;color:var(--ink-3)">—</td></tr>`;
 
-        // Trades table
         const allTrades = s.trades || [];
-        const trades = state.selectedDay
-          ? allTrades.filter((t) => t.trading_day === state.selectedDay)
-          : allTrades;
-        el("clearDayFilterBtn").hidden = !state.selectedDay;
-        el("tradeTableTitle").textContent = state.selectedDay
-          ? `${state.selectedDay} 交易明细与思考链溯源 (${trades.length})`
-          : `全部交易流水与思考链溯源 (${trades.length})`;
+        const trades = state.selectedDay ? allTrades.filter((x) => x.trading_day === state.selectedDay) : allTrades;
+        el("clearDayBtn").hidden = !state.selectedDay;
+        el("tradeTblTitle").textContent = state.selectedDay
+          ? `${state.selectedDay} ${t("tradeTblDay")} (${trades.length})`
+          : `${t("tradeTblAll")} (${trades.length})`;
 
         el("tradeTableBody").innerHTML = trades.length
-          ? trades.map((t) => {
-              const pnl = Number(t.net_pnl_usd || 0);
+          ? trades.map((tr) => {
+              const pnl = Number(tr.net_pnl_usd || 0);
               const cls = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
-              const linkId = t.decision_id || t.close_decision_id;
+              const sideTxt = state.lang === "en" ? (tr.side_en || tr.side.toUpperCase()) : tr.side_zh;
+              const reasonTxt = state.lang === "en" ? (tr.exit_reason_en || tr.exit_reason_code) : tr.exit_reason_zh;
+              const linkId = tr.decision_id || tr.close_decision_id;
               return `
                 <tr>
-                  <td class="tnum">${esc(fmtBJT(t.closed_at || t.opened_at, false))}</td>
-                  <td><span class="chip ${t.side === "long" ? "green" : "red"}">${esc(t.side_zh)} ${Number(t.lots || 0).toFixed(2)}手</span></td>
-                  <td class="mono">${t.entry_price ? Number(t.entry_price).toFixed(5) : "—"} → ${t.exit_price ? Number(t.exit_price).toFixed(5) : "—"}</td>
-                  <td class="tnum">${fmtDur(t.holding_seconds)}</td>
-                  <td class="mono ${cls}">${t.pips !== null && t.pips !== undefined ? fmtSigned(t.pips, 1, "p") : "—"}</td>
-                  <td class="tnum ${cls}" style="font-weight:650">${fmtSigned(pnl, 2)}</td>
-                  <td><span class="chip">${esc(t.exit_reason_zh)}</span></td>
-                  <td>
-                    ${linkId ? `<button class="cot-jump-btn" data-jump-dec="${esc(linkId)}" type="button">查看开仓思考链 →</button>` : `<span style="color:var(--ink-4);font-size:11.5px">无关联决策</span>`}
-                  </td>
+                  <td class="tnum">${esc(fmtTime(tr.closed_at || tr.opened_at, false))}</td>
+                  <td><span class="pill ${tr.side === "long" ? "green" : "red"}">${esc(sideTxt)} ${Number(tr.lots || 0).toFixed(2)} ${esc(t("lotUnit"))}</span></td>
+                  <td class="mono">${tr.entry_price ? Number(tr.entry_price).toFixed(5) : "—"} → ${tr.exit_price ? Number(tr.exit_price).toFixed(5) : "—"}</td>
+                  <td class="tnum">${fmtDur(tr.holding_seconds)}</td>
+                  <td class="mono ${cls}">${tr.pips !== null && tr.pips !== undefined ? fmtSigned(tr.pips, 1, "p") : "—"}</td>
+                  <td class="tnum ${cls}" style="font-weight:700">${fmtSigned(pnl, 2, " USD")}</td>
+                  <td><span class="pill">${esc(reasonTxt)}</span></td>
+                  <td>${linkId ? `<button class="jump-btn" data-jump-dec="${esc(linkId)}" type="button">${esc(t("jumpBtn"))}</button>` : "—"}</td>
                 </tr>
               `;
             }).join("")
-          : `<tr><td colspan="8" style="text-align:center;color:var(--ink-3);padding:24px;">该时段暂无成交订单，AI 仅在出现明确宏观与盘面共振机会时下单</td></tr>`;
+          : `<tr><td colspan="8" style="text-align:center;color:var(--ink-3);padding:24px">${esc(t("noTradeMsg"))}</td></tr>`;
 
         renderCharts(s);
       }
@@ -1438,12 +1474,13 @@
         el("decSearch").value = "";
         el("decFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
         state.expandedIds.add(decId);
+        state.drawerTab[decId] = "cot";
         state.highlightDecisionId = decId;
         switchTab("decisions");
         renderDecisions(state.snapshot);
         requestAnimationFrame(() => {
-          const targetCard = el(`dec-${decId}`);
-          if (targetCard) targetCard.scrollIntoView({ behavior: "smooth", block: "center" });
+          const card = el(`dec-${decId}`);
+          if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
         });
       });
 
@@ -1455,22 +1492,15 @@
       function renderEquityCurve(s) {
         const wrap = el("equityChartWrap");
         const pts = (s.equity_curve || []).slice();
-        if (!pts.length) {
-          wrap.innerHTML = `<div class="empty-state">暂无净值曲线点</div>`;
-          return;
-        }
-        const W = 560, H = 200, padL = 48, padR = 14, padT = 14, padB = 26;
+        if (!pts.length) { wrap.innerHTML = `<div class="empty-state">—</div>`; return; }
+
+        el("curveHoverInfo").textContent = t("eqChartHint");
+        const W = 580, H = 220, padL = 52, padR = 14, padT = 16, padB = 26;
         const plotW = W - padL - padR, plotH = H - padT - padB;
         const vals = pts.map((p) => Number(p.equity_usd || 0));
         let minV = Math.min(...vals), maxV = Math.max(...vals);
-        if (Math.abs(maxV - minV) < 1.0) {
-          minV -= 2;
-          maxV += 2;
-        } else {
-          const pad = (maxV - minV) * 0.16;
-          minV -= pad;
-          maxV += pad;
-        }
+        if (Math.abs(maxV - minV) < 1.0) { minV -= 2; maxV += 2; }
+        else { const p = (maxV - minV) * 0.18; minV -= p; maxV += p; }
         const toX = (i) => pts.length === 1 ? padL + plotW / 2 : padL + (i / (pts.length - 1)) * plotW;
         const toY = (v) => padT + ((maxV - v) / (maxV - minV)) * plotH;
 
@@ -1480,16 +1510,18 @@
           ? `${lineD} L${coords[coords.length - 1].x.toFixed(1)},${(padT + plotH).toFixed(1)} L${coords[0].x.toFixed(1)},${(padT + plotH).toFixed(1)} Z`
           : "";
         const net = Number(pts[pts.length - 1].cum_pnl_usd || 0);
-        const stroke = net >= 0 ? "#059669" : "#e11d48";
-        el("curveCumBadge").className = `chip tnum ${net > 0 ? "green" : net < 0 ? "red" : ""}`;
-        el("curveCumBadge").textContent = `累计 ${fmtSigned(net, 2, " USD")}`;
+        const stroke = net >= 0 ? "var(--green)" : "var(--red)";
+        const strokeHex = net >= 0 ? (state.theme === "dark" ? "#10b981" : "#059669") : (state.theme === "dark" ? "#f43f5e" : "#e11d48");
 
-        const ticks = [0, 0.5, 1].map((t) => {
-          const v = minV + (maxV - minV) * (1 - t);
-          const y = padT + plotH * t;
+        el("curveCumBadge").className = `pill tnum ${net > 0 ? "green" : net < 0 ? "red" : ""}`;
+        el("curveCumBadge").textContent = `${fmtSigned(net, 2, " USD")}`;
+
+        const ticks = [0, 0.5, 1].map((fr) => {
+          const v = minV + (maxV - minV) * (1 - fr);
+          const y = padT + plotH * fr;
           return `
-            <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="rgba(15,23,42,0.06)" stroke-dasharray="3 3" />
-            <text x="${padL - 7}" y="${(y + 3.5).toFixed(1)}" text-anchor="end" font-size="10.5" fill="#64748b" font-family="var(--mono)">$${v.toFixed(1)}</text>
+            <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--grid-line)" stroke-dasharray="3 3" />
+            <text x="${padL - 8}" y="${(y + 3.5).toFixed(1)}" text-anchor="end" font-size="10.5" fill="var(--ink-3)" class="mono">$${v.toFixed(1)}</text>
           `;
         }).join("");
 
@@ -1497,88 +1529,90 @@
           <svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" id="eqSvg">
             <defs>
               <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="${stroke}" stop-opacity="0.14"/>
-                <stop offset="100%" stop-color="${stroke}" stop-opacity="0.00"/>
+                <stop offset="0%" stop-color="${strokeHex}" stop-opacity="0.22"/>
+                <stop offset="100%" stop-color="${strokeHex}" stop-opacity="0.00"/>
               </linearGradient>
             </defs>
             ${ticks}
             ${areaD ? `<path d="${areaD}" fill="url(#eqGrad)" />` : ""}
-            ${coords.length > 1 ? `<path d="${lineD}" fill="none" stroke="${stroke}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />` : `<line x1="${padL}" y1="${coords[0].y.toFixed(1)}" x2="${W - padR}" y2="${coords[0].y.toFixed(1)}" stroke="${stroke}" stroke-width="2" stroke-dasharray="5 4" />`}
-            ${coords.map((c) => `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.4" fill="#fff" stroke="${stroke}" stroke-width="2" />`).join("")}
-            <line id="eqCross" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="rgba(15,23,42,0.22)" stroke-width="1" stroke-dasharray="2 2" visibility="hidden" />
-            <text x="${padL}" y="${H - 6}" font-size="10.5" fill="#94a3b8" class="mono">${esc(fmtBJT(pts[0].ts))}</text>
-            <text x="${W - padR}" y="${H - 6}" text-anchor="end" font-size="10.5" fill="#94a3b8" class="mono">${esc(fmtBJT(pts[pts.length - 1].ts))}</text>
+            ${coords.length > 1 ? `<path d="${lineD}" fill="none" stroke="${stroke}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" />` : ""}
+            ${coords.map((c) => `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.6" fill="var(--surface)" stroke="${stroke}" stroke-width="2" />`).join("")}
+            <line id="eqCross" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="2 2" visibility="hidden" />
+            <text x="${padL}" y="${H - 6}" font-size="10.5" fill="var(--ink-4)" class="mono">${esc(fmtTime(pts[0].ts))}</text>
+            <text x="${W - padR}" y="${H - 6}" text-anchor="end" font-size="10.5" fill="var(--ink-4)" class="mono">${esc(fmtTime(pts[pts.length - 1].ts))}</text>
           </svg>
+          <div class="chart-tooltip tnum" id="eqTip"></div>
         `;
 
         const svg = el("eqSvg");
         const cross = el("eqCross");
-        const info = el("curveHoverInfo");
-        const updateHover = (clientX) => {
+        const tip = el("eqTip");
+        const onMove = (clientX) => {
           const rect = svg.getBoundingClientRect();
           if (!rect.width) return;
           const relX = ((clientX - rect.left) / rect.width) * W;
-          let best = coords[0];
-          let bestDist = Infinity;
+          let best = coords[0], bestDist = Infinity;
           for (const c of coords) {
-            const dist = Math.abs(c.x - relX);
-            if (dist < bestDist) {
-              bestDist = dist;
-              best = c;
-            }
+            const d = Math.abs(c.x - relX);
+            if (d < bestDist) { bestDist = d; best = c; }
           }
           cross.setAttribute("x1", best.x.toFixed(1));
           cross.setAttribute("x2", best.x.toFixed(1));
           cross.setAttribute("visibility", "visible");
-          info.textContent = `${fmtBJT(best.p.ts)} · 净值 $${Number(best.p.equity_usd).toFixed(2)} (${best.p.label})`;
+          const lbl = state.lang === "en" ? (best.p.label_en || best.p.label) : best.p.label;
+          tip.innerHTML = `<div style="font-weight:700">$${Number(best.p.equity_usd).toFixed(2)} USD</div><div style="color:var(--ink-3);font-size:10.5px">${esc(fmtTime(best.p.ts))} · ${esc(lbl)}</div>`;
+          tip.classList.add("visible");
         };
-        svg.addEventListener("pointermove", (e) => updateHover(e.clientX));
-        svg.addEventListener("pointerdown", (e) => updateHover(e.clientX));
+        svg.addEventListener("pointermove", (e) => onMove(e.clientX));
+        svg.addEventListener("pointerdown", (e) => onMove(e.clientX));
         svg.addEventListener("pointerleave", () => {
           cross.setAttribute("visibility", "hidden");
-          info.textContent = "悬停或滑动曲线查看每个节点净值";
+          tip.classList.remove("visible");
         });
       }
 
       function renderDailyBars(s) {
         const wrap = el("dailyBarWrap");
         const days = (s.daily_reports || []).slice().reverse().slice(-14);
-        if (!days.length) {
-          wrap.innerHTML = `<div class="empty-state">暂无每日统计柱状图</div>`;
-          return;
-        }
-        const W = 400, H = 200, padL = 42, padR = 12, padT = 18, padB = 30;
+        if (!days.length) { wrap.innerHTML = `<div class="empty-state">—</div>`; return; }
+
+        const W = 420, H = 220, padL = 44, padR = 12, padT = 22, padB = 34;
         const plotW = W - padL - padR, plotH = H - padT - padB;
         const pnls = days.map((d) => Number(d.net_pnl_usd || 0));
-        const maxAbs = Math.max(2, ...pnls.map((v) => Math.abs(v))) * 1.18;
-        const zeroY = padT + plotH / 2;
+        const maxAbs = Math.max(2, ...pnls.map((v) => Math.abs(v))) * 1.2;
+        const zeroY = padT + plotH * 0.54;
+        const posMaxH = zeroY - padT;
+        const negMaxH = padT + plotH - zeroY;
         const slotW = plotW / days.length;
-        const barW = Math.min(28, Math.max(10, slotW * 0.56));
+        const barW = Math.min(30, Math.max(12, slotW * 0.56));
 
         const barsHtml = days.map((d, i) => {
           const val = Number(d.net_pnl_usd || 0);
-          const barH = Math.max(val === 0 ? 2 : 4, (Math.abs(val) / maxAbs) * (plotH / 2));
+          const barH = val === 0 ? 3 : Math.max(5, (Math.abs(val) / maxAbs) * (val >= 0 ? posMaxH : negMaxH));
           const x = padL + i * slotW + (slotW - barW) / 2;
           const y = val >= 0 ? zeroY - barH : zeroY;
-          const col = val > 0 ? "#059669" : val < 0 ? "#e11d48" : "#cbd5e1";
+          const col = val > 0 ? "var(--green)" : val < 0 ? "var(--red)" : "var(--ink-4)";
           const isSel = state.selectedDay === d.trading_day;
           const shortDate = String(d.trading_day).slice(5);
+          const evalPill = d.events_evaluated > 0 ? `${d.events_evaluated}e` : "";
           return `
-            <g class="bar-day" data-bar-day="${esc(d.trading_day)}" style="cursor:pointer">
-              ${isSel ? `<rect x="${(x - 4).toFixed(1)}" y="${padT}" width="${(barW + 8).toFixed(1)}" height="${plotH}" rx="4" fill="rgba(29,78,216,0.08)" />` : ""}
-              <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="3" fill="${col}" />
-              ${val !== 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(val >= 0 ? y - 5 : y + barH + 11).toFixed(1)}" text-anchor="middle" font-size="9.5" fill="${col}" class="mono">${val > 0 ? "+" : ""}${val.toFixed(1)}</text>` : ""}
-              <text x="${(x + barW / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" font-size="10" fill="${isSel ? "#1d4ed8" : "#64748b"}" font-weight="${isSel ? "700" : "500"}" class="mono">${esc(shortDate)}</text>
+            <g data-bar-day="${esc(d.trading_day)}" style="cursor:pointer">
+              ${isSel ? `<rect x="${(x - 5).toFixed(1)}" y="${padT - 4}" width="${(barW + 10).toFixed(1)}" height="${plotH + 8}" rx="5" fill="var(--accent-soft)" />` : ""}
+              <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" rx="3.5" fill="${col}" fill-opacity="${val === 0 ? 0.35 : 0.92}" />
+              ${val !== 0
+                ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(val >= 0 ? y - 6 : y + barH + 12).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="650" fill="${col}" class="mono">${val > 0 ? "+" : ""}${val.toFixed(2)}</text>`
+                : (evalPill ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(zeroY - 8).toFixed(1)}" text-anchor="middle" font-size="9.5" fill="var(--ink-4)" class="mono">${evalPill}</text>` : "")}
+              <text x="${(x + barW / 2).toFixed(1)}" y="${H - 10}" text-anchor="middle" font-size="10" fill="${isSel ? "var(--accent)" : "var(--ink-3)"}" font-weight="${isSel ? "700" : "500"}" class="mono">${esc(shortDate)}</text>
             </g>
           `;
         }).join("");
 
         wrap.innerHTML = `
           <svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-            <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="rgba(15,23,42,0.14)" />
-            <text x="${padL - 6}" y="${padT + 8}" text-anchor="end" font-size="10" fill="#94a3b8" class="mono">+$${maxAbs.toFixed(1)}</text>
-            <text x="${padL - 6}" y="${(zeroY + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="#64748b" class="mono">$0</text>
-            <text x="${padL - 6}" y="${padT + plotH}" text-anchor="end" font-size="10" fill="#94a3b8" class="mono">-$${maxAbs.toFixed(1)}</text>
+            <line x1="${padL}" y1="${zeroY.toFixed(1)}" x2="${W - padR}" y2="${zeroY.toFixed(1)}" stroke="var(--axis-zero)" />
+            <text x="${padL - 7}" y="${padT + 8}" text-anchor="end" font-size="10" fill="var(--ink-4)" class="mono">+$${maxAbs.toFixed(1)}</text>
+            <text x="${padL - 7}" y="${(zeroY + 3).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--ink-3)" class="mono">$0</text>
+            <text x="${padL - 7}" y="${padT + plotH}" text-anchor="end" font-size="10" fill="var(--ink-4)" class="mono">-$${maxAbs.toFixed(1)}</text>
             ${barsHtml}
           </svg>
         `;
@@ -1592,6 +1626,8 @@
         });
       }
 
+      applyTheme();
+      applyStaticI18n();
       fetchSnapshot();
       setInterval(() => {
         if (document.visibilityState === "visible") fetchSnapshot();
