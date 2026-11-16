@@ -291,7 +291,7 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
     - verify_decision_evidence flags contradicted_price_direction (or missing_short_window_coverage without prose)
     - cited_evidence_ids stays empty (never auto-injected)
     - DeterministicHardRiskEngine blocks new risk with all 3 independent integrity reasons."""
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v3.2"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.0"
     assert "scales leveraged buying power" in SINGLE_PASS_SYSTEM_PROMPT
 
     now = datetime(2026, 11, 4, 15, 0, 41, tzinfo=UTC)
@@ -530,10 +530,10 @@ def test_golden_clean_macro_1m_breakout_against_30m_drift_and_unscheduled_news_a
     )
     assert decision.evidence_verification_status == "verified"
     assert decision.target is not None
-    # Guarded $200 / 2% ($4.00) risk budget quantizes 0.12 weight to 3,000 EUR instead of 4,000 EUR
+    # Guarded $200 / 2% ($4.00) risk budget at 14.0-pip SL quantizes 0.12 weight to 2,000 EUR
     assert policy.quantize_target_quantity_eur(
         Decimal("200"), Decimal("1.12510"), decision.target.positions[0].weight
-    ) == Decimal("3000")
+    ) == Decimal("2000")
 
     DeterministicTargetValidator().validate(decision.target, portfolio)
     risk_engine = DeterministicHardRiskEngine(policy=policy, clock=lambda: now)

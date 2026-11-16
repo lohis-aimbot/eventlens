@@ -1,0 +1,19 @@
+{
+  "name": "EventLens 实时决策与交易报表",
+  "short_name": "EventLens",
+  "description": "EUR/USD 宏观事件推理思考链、市场状态卡与每日交易可视化报表",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#ffffff",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "../assets/eventlens-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

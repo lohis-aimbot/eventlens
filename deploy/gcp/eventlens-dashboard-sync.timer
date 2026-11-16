@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic EventLens dashboard snapshot sync (every 90s)
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=90s
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

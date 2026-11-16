@@ -162,7 +162,7 @@ class RiskPolicy(Contract):
             volume_step_eur=Decimal("1000"),
             max_position_weight=Decimal("0.25"),
             max_gross_weight=Decimal("0.25"),
-            min_equity_usd=Decimal("180.00"),
+            min_equity_usd=Decimal("140.00"),
             max_daily_loss_usd=Decimal("8.00"),
             max_quote_age_ms=max_quote_age_ms,
             max_spread_pips=Decimal("2.0"),
@@ -181,7 +181,7 @@ class RiskPolicy(Contract):
         kill_switch_active: bool = False,
         max_quote_age_ms: int = 2000,
         max_risk_per_trade_pct: Decimal = Decimal("0.02"),
-        ex_ante_stop_loss_pips: Decimal = Decimal("11.0"),
+        ex_ante_stop_loss_pips: Decimal = Decimal("14.0"),
         max_margin_utilization_pct: Decimal = Decimal("0.25"),
         cap_quantity_by_risk_budget: bool = True,
     ) -> "RiskPolicy":

@@ -2314,8 +2314,8 @@ def test_pepperstone_razor_200_leverage_lot_quantization_and_pmi_profit(tmp_path
         assert rep_open["leverage"] == "200"
         assert rep_open["margin_used_usd"] == "22.40"
 
-        # 2. 15-minute (900s) protective exit at 07:30:23Z on Razor quote 1.11942
-        now = now + timedelta(seconds=900)
+        # 2. 5-hour (18000s) protective exit at 12:15:23Z on Razor quote 1.11942
+        now = now + timedelta(seconds=18000)
         q_exit = make_quote(
             bid="1.11942",
             ask="1.11942",
@@ -2430,12 +2430,12 @@ def test_pepperstone_razor_200_protective_take_profit_and_stop_loss(tmp_path):
         )
         assert len(ledger.fill_pending(mkt_fill)) == 1
 
-        # Fast 21-pip drop to 1.11790 (> $8.00 unrealized profit on 4,000 EUR) triggers protective_take_profit immediately
+        # Fast 44-pip drop to 1.11560 (>= 42.0 pip take_profit_pips on 4,000 EUR) triggers protective_take_profit immediately
         now = now + timedelta(seconds=60)
         mkt_tp = make_market(
             quote=make_quote(
-                bid="1.11790",
-                ask="1.11790",
+                bid="1.11560",
+                ask="1.11560",
                 received_at=now,
                 commission="3",
                 commission_type="UsdPerMillionUsdVolume",
@@ -2445,7 +2445,7 @@ def test_pepperstone_razor_200_protective_take_profit_and_stop_loss(tmp_path):
         tp_fills = ledger.evaluate_protective_exits(mkt_tp)
         assert len(tp_fills) == 1
         assert tp_fills[0].reason == "protective_take_profit"
-        assert tp_fills[0].realized_pnl_usd >= Decimal("8.00")
+        assert tp_fills[0].realized_pnl_usd >= Decimal("16.00")
         assert tp_fills[0].new_quantity == Decimal("0")
     finally:
         ledger.close()

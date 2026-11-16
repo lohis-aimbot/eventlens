@@ -1,0 +1,17 @@
+[Unit]
+Description=Export and publish sanitized EventLens dashboard snapshot to GitHub branch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eventlens
+Group=eventlens
+WorkingDirectory=/opt/eventlens
+ExecStart=/bin/bash /opt/eventlens/deploy/gcp/publish_dashboard_snapshot.sh running
+TimeoutStartSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eventlens

@@ -1,0 +1,22 @@
+[Unit]
+Description=Publish weekend hibernation status to EventLens dashboard before VM shutdown
+After=network-online.target eventlens-shadow-cli.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=eventlens
+Group=eventlens
+WorkingDirectory=/opt/eventlens
+ExecStart=/bin/true
+ExecStop=/bin/bash /opt/eventlens/deploy/gcp/publish_dashboard_snapshot.sh weekend_hibernating
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eventlens
+
+[Install]
+WantedBy=multi-user.target

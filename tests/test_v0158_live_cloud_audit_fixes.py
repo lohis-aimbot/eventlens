@@ -395,7 +395,7 @@ def test_directory_tail_drains_tracked_file_before_smaller_uuid_new_file(tmp_pat
 def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_resets_next_day(
     tmp_path: Path,
 ) -> None:
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v3.2"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.0"
     assert '"EUR/USD <= <level>"' in SINGLE_PASS_SYSTEM_PROMPT
     assert '"EUR/USD >= <level>"' in SINGLE_PASS_SYSTEM_PROMPT
     assert '"structured_price_condition"' in SINGLE_PASS_SYSTEM_PROMPT

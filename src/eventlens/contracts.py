@@ -423,12 +423,22 @@ class AgentContext(Contract):
         return self
 
 
+class MarketStateCard(Contract):
+    """Lightweight rolling macro-market state card decoupled from hard thesis gates."""
+
+    market_bias: Literal["bullish_eur", "bearish_eur", "neutral", "mixed"] = "neutral"
+    market_state_note: str = ""
+    watch_condition: str | None = None
+    updated_at: Timestamp
+    source_event_id: Identifier | None = None
+
+
 class TargetPosition(Contract):
     """Signed fraction of account equity; e.g. -0.1 means 10% short notional."""
 
     instrument: Identifier
     weight: Decimal
-    thesis_ids: tuple[Identifier, ...] = Field(min_length=1)
+    thesis_ids: tuple[Identifier, ...] = ()
 
 
 class TargetPortfolio(Contract):
@@ -463,6 +473,9 @@ class AgentDecision(Contract):
     target: TargetPortfolio | None = None
     portfolio_action: Literal["IGNORE_EVENT", "HOLD", "SET_TARGET", "CLOSE"] | None = None
     rationale: str = Field(min_length=1)
+    reasoning_content: str | None = None
+    reasoning_tokens: int = Field(default=0, ge=0)
+    market_state_card: MarketStateCard | None = None
     strategy_hypothesis: Literal[
         "trend_following", "countertrend", "fundamental_breakout", "unspecified"
     ] = "unspecified"

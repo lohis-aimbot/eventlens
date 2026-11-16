@@ -869,7 +869,7 @@ def _build_policies(
             max_quote_age_ms=max_quote_age_ms,
         )
         exit_pol = ProtectiveExitPolicy.pepperstone_razor_200(
-            max_holding_seconds=int(raw_holding) if raw_holding is not None else 900,
+            max_holding_seconds=int(raw_holding) if raw_holding is not None else 18000,
             max_quote_age_ms=max_quote_age_ms,
         )
         cost_model = ShadowCostModel.pepperstone_razor()
@@ -958,7 +958,7 @@ def _build_policies(
                 {
                     **risk.model_dump(),
                     "max_risk_per_trade_pct": risk_pct,
-                    "ex_ante_stop_loss_pips": exit_pol.stop_loss_pips or Decimal("11.0"),
+                    "ex_ante_stop_loss_pips": exit_pol.stop_loss_pips or Decimal("14.0"),
                     "cap_quantity_by_risk_budget": True,
                 }
             )
@@ -1404,6 +1404,21 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             exit_policy=exit_policy,
         )
 
+    if args.command == "export-dashboard":
+        from .dashboard import export_dashboard_snapshot
+
+        diag_mem_db, _, diag_quotes_db = _resolve_companion_dbs(args)
+        cli_db = _resolve_cli_demo_state_db(args)
+        return export_dashboard_snapshot(
+            output_path=Path(args.output),
+            shadow_db=Path(args.shadow_db),
+            memory_db=diag_mem_db,
+            quotes_db=diag_quotes_db,
+            cli_demo_db=cli_db if cli_db.is_file() else None,
+            vm_status=str(getattr(args, "vm_status", "running")),
+            max_decisions=int(getattr(args, "max_decisions", 80)),
+        )
+
     if args.command in ("status", "report"):
         diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
         market = _load_latest_market(diag_quotes_db, basis, now=now)
@@ -1552,7 +1567,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             review_horizon_s = float(getattr(args, "review_horizon_seconds", 3600.0))
             agent = (
                 SinglePassTradingAgent(
-                    DeepSeekClient.from_environment(),
+                    DeepSeekClient.from_environment(model=getattr(args, "deepseek_model", None)),
                     max_quote_age=timedelta(seconds=getattr(args, "max_quote_age", 2.0)),
                     allow_commission_bearing_zero_spread=(
                         risk_policy.allow_commission_bearing_zero_spread
@@ -1699,12 +1714,12 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                     default_stop_loss_pips=(
                         float(exit_policy.stop_loss_pips)
                         if exit_policy.stop_loss_pips is not None
-                        else 11.0
+                        else 14.0
                     ),
                     default_take_profit_pips=(
                         float(exit_policy.take_profit_pips)
                         if exit_policy.take_profit_pips is not None
-                        else 22.0
+                        else 42.0
                     ),
                 )
                 cli_demo_adapter.reconcile()
@@ -1924,6 +1939,12 @@ def main(argv: list[str] | None = None) -> None:
         default="live_poll",
     )
     start_p.add_argument("--call-model", action="store_true", help="Opt in to paid DeepSeek calls")
+    start_p.add_argument(
+        "--deepseek-model",
+        type=str,
+        default=None,
+        help="Optional DeepSeek model override (defaults to DEEPSEEK_MODEL env var or deepseek-reasoner)",
+    )
     start_p.add_argument(
         "--poll-news",
         action="store_true",
@@ -2270,6 +2291,60 @@ def main(argv: list[str] | None = None) -> None:
     )
     recover_p.add_argument("--kill-switch", action="store_true")
 
+    exp_dash_p = sub.add_parser(
+        "export-dashboard",
+        help="Export strictly sanitized JSON snapshot for the Chinese web & mobile PWA dashboard",
+    )
+    _add_common_db_args(exp_dash_p, suppress_defaults=False)
+    exp_dash_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional path to cli-demo-broker.sqlite (defaults to shadow-db sibling)",
+    )
+    exp_dash_p.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Destination path for sanitized snapshot.json",
+    )
+    exp_dash_p.add_argument(
+        "--vm-status",
+        choices=("running", "weekend_hibernating", "stopped"),
+        default="running",
+        help="Cloud VM runtime status badge written into snapshot metadata",
+    )
+    exp_dash_p.add_argument(
+        "--max-decisions",
+        type=int,
+        default=80,
+        help="Maximum recent decision records to include (default: 80)",
+    )
+
+    dash_p = sub.add_parser(
+        "dashboard",
+        help="Serve local read-only Chinese web dashboard against local SQLite databases",
+    )
+    _add_common_db_args(dash_p, suppress_defaults=False)
+    dash_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional path to cli-demo-broker.sqlite (defaults to shadow-db sibling)",
+    )
+    dash_p.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1)",
+    )
+    dash_p.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="Bind port (default: 8787)",
+    )
+
     args = parser.parse_args(argv)
     if hasattr(args, "max_quote_wait_seconds") and (
         not math.isfinite(args.max_quote_wait_seconds) or args.max_quote_wait_seconds <= 0
@@ -2328,6 +2403,21 @@ def main(argv: list[str] | None = None) -> None:
         except ValueError as exc:
             parser.error(str(exc))
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING)
+    if args.command == "dashboard":
+        from .dashboard import serve_dashboard
+
+        diag_mem_db, _, diag_quotes_db = _resolve_companion_dbs(args)
+        cli_db = _resolve_cli_demo_state_db(args)
+        print(f"EventLens dashboard listening on http://{args.host}:{args.port}/")
+        serve_dashboard(
+            host=str(args.host),
+            port=int(args.port),
+            shadow_db=Path(args.shadow_db),
+            memory_db=diag_mem_db,
+            quotes_db=diag_quotes_db,
+            cli_demo_db=cli_db if cli_db.is_file() else None,
+        )
+        return
     result = asyncio.run(_run_command(args))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
