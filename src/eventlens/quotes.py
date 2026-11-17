@@ -181,10 +181,13 @@ class QuoteStore:
                         source_at TEXT NOT NULL, bridge_at TEXT NOT NULL, received_at TEXT NOT NULL,
                         recorded_at TEXT NOT NULL, available_at TEXT, raw_line TEXT NOT NULL,
                         quote TEXT NOT NULL, PRIMARY KEY(session_id, sequence));
-                    CREATE INDEX IF NOT EXISTS quote_lookup ON quote_observations
-                        (symbol, basis, available_at, received_at);
+                    DROP INDEX IF EXISTS quote_lookup;
+                    CREATE INDEX IF NOT EXISTS quote_recent_lookup
+                        ON quote_observations(symbol, basis, received_at, source_at, sequence, available_at);
                     CREATE TABLE IF NOT EXISTS quote_failures (
                         received_at TEXT NOT NULL, reason TEXT NOT NULL, raw_line TEXT NOT NULL);
+                    CREATE INDEX IF NOT EXISTS quote_failures_received
+                        ON quote_failures(received_at);
                     """
                 )
                 self.db.execute(f"PRAGMA application_id={self.APPLICATION_ID}")
@@ -396,7 +399,7 @@ class QuoteStore:
             cutoff = utc(cutoff)
             row = self.db.execute(
                 """SELECT o.*, s.start AS session_start FROM quote_observations o
-                JOIN quote_sessions s ON s.session_id = o.session_id
+                CROSS JOIN quote_sessions s ON s.session_id = o.session_id
                 WHERE o.symbol=? AND o.basis=?
                 AND o.available_at IS NOT NULL AND o.available_at<=? ORDER BY o.received_at DESC,
                 o.source_at DESC, o.sequence DESC LIMIT 1""",
@@ -433,7 +436,7 @@ class QuoteStore:
                 WHERE symbol=? AND basis=?
                   AND available_at IS NOT NULL AND available_at <= ?
                   AND received_at >= ? AND received_at <= ?
-                ORDER BY received_at ASC, sequence ASC""",
+                ORDER BY received_at ASC, source_at ASC, sequence ASC""",
                 (
                     symbol,
                     basis,

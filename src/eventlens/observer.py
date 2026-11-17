@@ -499,8 +499,6 @@ class ObserverStore:
                         metadata TEXT NOT NULL);
                     CREATE INDEX IF NOT EXISTS idx_observer_enrichments_lookup
                         ON observer_enrichments(provider, basis, source_id, available_at);
-                    CREATE INDEX IF NOT EXISTS idx_observer_polls_lookup
-                        ON observer_polls(provider, basis, kind, available_at);
                     CREATE INDEX IF NOT EXISTS idx_observer_polls_stream
                         ON observer_polls(provider, basis, stream);
                     """
@@ -517,6 +515,7 @@ class ObserverStore:
         with self._lock:
             with self.db:
                 self.db.execute("DROP INDEX IF EXISTS idx_observer_sightings_source_rev")
+                self.db.execute("DROP INDEX IF EXISTS idx_observer_polls_lookup")
             has_repeat = (
                 self.db.execute(
                     "SELECT 1 FROM observer_sightings WHERE state='repeat' LIMIT 1"
@@ -680,7 +679,7 @@ class ObserverStore:
                         already_published = (
                             self.db.execute(
                                 """SELECT 1 FROM observer_sightings s
-                                JOIN observer_polls p ON p.poll_id = s.poll_id
+                                CROSS JOIN observer_polls p ON p.poll_id = s.poll_id
                                 WHERE s.source_id=? AND s.revision=?
                                   AND p.provider=? AND p.basis=? AND p.kind=?
                                   AND p.available_at IS NOT NULL
@@ -929,7 +928,7 @@ class ObserverStore:
             row = self.db.execute(
                 """SELECT s.state
                 FROM observer_sightings s
-                JOIN observer_polls p ON p.poll_id = s.poll_id
+                CROSS JOIN observer_polls p ON p.poll_id = s.poll_id
                 WHERE p.provider=? AND p.basis=? AND p.kind=?
                   AND s.source_id=? AND s.revision=?
                 ORDER BY p.rowid ASC LIMIT 1""",
@@ -991,14 +990,15 @@ class ObserverStore:
                 raise ValueError("History cutoff requires a timezone")
             query = """SELECT r.*, MIN(p.available_at) AS available_at,
                     (SELECT p2.result FROM observer_sightings s2
-                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
+                     CROSS JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
                      WHERE p2.provider=r.provider AND p2.basis=r.basis AND p2.kind=r.kind
                        AND s2.source_id=r.source_id AND s2.revision=r.revision
                        AND p2.available_at IS NOT NULL
                      ORDER BY p2.rowid ASC LIMIT 1) AS first_poll_result
-                FROM observer_revisions r JOIN observer_sightings s
+                FROM observer_revisions r
+                CROSS JOIN observer_sightings s
                     ON s.source_id=r.source_id AND s.revision=r.revision
-                JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
+                CROSS JOIN observer_polls p ON p.poll_id=s.poll_id AND p.provider=r.provider
                     AND p.basis=r.basis AND p.kind=r.kind
                 WHERE r.basis=? AND r.kind=? AND r.source_id=?
                     AND p.available_at IS NOT NULL"""
@@ -1067,9 +1067,9 @@ class ObserverStore:
                 WITH bounded AS (
                     SELECT r.*, MIN(p.available_at) AS available_at
                     FROM observer_revisions r
-                    JOIN observer_sightings s
+                    CROSS JOIN observer_sightings s
                         ON s.source_id=r.source_id AND s.revision=r.revision
-                    JOIN observer_polls p
+                    CROSS JOIN observer_polls p
                         ON p.poll_id=s.poll_id AND p.provider=r.provider
                         AND p.basis=r.basis AND p.kind=r.kind
                     WHERE {where_sql}
@@ -1080,7 +1080,7 @@ class ObserverStore:
                 )
                 SELECT b.*,
                     (SELECT p2.result FROM observer_sightings s2
-                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
+                     CROSS JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
                      WHERE p2.provider=b.provider AND p2.basis=b.basis AND p2.kind=b.kind
                        AND s2.source_id=b.source_id AND s2.revision=b.revision
                        AND p2.available_at IS NOT NULL
@@ -1310,9 +1310,9 @@ def evaluate_observer_stream_health(
             """SELECT r.provider, p.stream, r.kind, r.source_id, r.revision, r.received_at,
                       p.available_at, r.record
             FROM observer_revisions r
-            JOIN observer_sightings s
+            CROSS JOIN observer_sightings s
               ON s.source_id = r.source_id AND s.revision = r.revision
-            JOIN observer_polls p
+            CROSS JOIN observer_polls p
               ON p.poll_id = s.poll_id
              AND p.provider = r.provider
              AND p.basis = r.basis

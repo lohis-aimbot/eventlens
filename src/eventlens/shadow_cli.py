@@ -260,9 +260,9 @@ def _build_objective_diagnostics(
                         obs_row = obs_conn.execute(
                             """SELECT r.record, MIN(p.available_at) AS available_at
                             FROM observer_revisions r
-                            JOIN observer_sightings s
+                            CROSS JOIN observer_sightings s
                               ON s.source_id = r.source_id AND s.revision = r.revision
-                            JOIN observer_polls p
+                            CROSS JOIN observer_polls p
                               ON p.poll_id = s.poll_id
                              AND p.provider = r.provider
                              AND p.basis = r.basis
