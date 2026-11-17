@@ -436,6 +436,7 @@ class ObserverStore:
         self.path, self.clock = path.resolve(), clock
         self._lock = threading.RLock()
         self._failure_writes = 0
+        self._write_seq = 0
         if readonly and not self.path.exists():
             raise FileNotFoundError(self.path)
         if not readonly:
@@ -806,7 +807,25 @@ class ObserverStore:
                         "UPDATE observer_enrichments SET available_at=? WHERE poll_id=?",
                         (result["available_at"], poll_id),
                     )
+                self._write_seq += 1
             return result
+
+    def change_marker(self, *, as_of: datetime | None = None) -> tuple[int, int, str | None, bool]:
+        """Return an O(1) cache validation token for whether published observer state changed."""
+        with self._lock:
+            dv = int(self.db.execute("PRAGMA data_version").fetchone()[0])
+            row = self.db.execute(
+                "SELECT available_at FROM observer_polls ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            latest_avail = (
+                str(row["available_at"]) if row is not None and row["available_at"] else None
+            )
+            has_future = (
+                latest_avail is not None
+                and as_of is not None
+                and latest_avail > as_of.astimezone(UTC).isoformat()
+            )
+            return (self._write_seq, dv, latest_avail, has_future)
 
     def failure(self, provider: str, stream: str, error: str) -> None:
         with self._lock:

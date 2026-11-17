@@ -442,6 +442,12 @@ class CTraderCliDemoBrokerAdapter:
                     received_at TEXT NOT NULL,
                     UNIQUE(bridge_session_id, event_seq)
                 );
+                CREATE INDEX IF NOT EXISTS idx_demo_events_kind_rowid
+                    ON demo_broker_events(kind, event_rowid);
+                CREATE INDEX IF NOT EXISTS idx_demo_events_kind_sess_seq
+                    ON demo_broker_events(kind, bridge_session_id, event_seq);
+                CREATE INDEX IF NOT EXISTS idx_demo_events_kind_status
+                    ON demo_broker_events(kind, status, event_rowid);
 
                 CREATE TABLE IF NOT EXISTS demo_emitted_fills (
                     fill_key TEXT PRIMARY KEY,

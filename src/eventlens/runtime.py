@@ -207,6 +207,7 @@ class SQLiteRuntimeStore:
         self.path = path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._write_seq = 0
         self.db = sqlite3.connect(self.path, timeout=10, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         with self._lock, self.db:
@@ -429,6 +430,13 @@ class SQLiteRuntimeStore:
                         event_id,
                     ),
                 )
+            self._write_seq += 1
+
+    def event_state_marker(self) -> tuple[int, int]:
+        """Return an O(1) marker tracking writes to runtime event/bundle state."""
+        with self._lock:
+            dv = int(self.db.execute("PRAGMA data_version").fetchone()[0])
+            return (self._write_seq, dv)
 
     def mark_fill_completed(self, fill: ShadowFill) -> None:
         if fill.execution_id is None:
@@ -447,6 +455,7 @@ class SQLiteRuntimeStore:
                 WHERE event_id=?""",
                 (fill.filled_at.isoformat(), lag_ms, row["event_id"]),
             )
+            self._write_seq += 1
 
     def mark_order_cancelled(self, execution_id: str, reason: str, now: datetime) -> str | None:
         with self._lock, self.db:
@@ -463,6 +472,7 @@ class SQLiteRuntimeStore:
                 WHERE event_id=? AND state='shadow_recorded'""",
                 (reason, _utc(now).isoformat(), ev_id),
             )
+            self._write_seq += 1
             return ev_id
 
     def get_bound_bundle_id(self, member_event_id: str) -> str | None:
@@ -580,6 +590,7 @@ class SQLiteRuntimeStore:
                             None,
                         ),
                     )
+            self._write_seq += 1
 
     def finalize_bundle_members(
         self,
@@ -2632,6 +2643,7 @@ class ShadowRunner:
         self._stop_reason: str | None = None
         self._run_started_at: datetime | None = None
         self._run_duration_seconds: float | None = None
+        self._idle_event_scan_marker: tuple[Any, ...] | None = None
         self._protection_lock = threading.Lock()
         self._protection_checks_total = 0
         self._protection_checks_valid_quote = 0
@@ -3133,6 +3145,20 @@ class ShadowRunner:
         )
 
         now = _utc(self.clock())
+        obs_change: tuple[int, int, str | None, bool] | None = None
+        state_store = self.runtime.state_store
+        if state_store is not None:
+            obs_change = await asyncio.to_thread(ostore.change_marker, as_of=now)
+            st_marker = state_store.event_state_marker()
+            cur_marker = (
+                obs_change[0],
+                obs_change[1],
+                obs_change[2],
+                st_marker,
+                self.allow_baseline_revisions,
+            )
+            if not obs_change[3] and self._idle_event_scan_marker == cur_marker:
+                return ()
 
         async def _enrich_revision_delta(rev_item: Any, ev_item: Event) -> Event:
             if rev_item.revision < 2 or rev_item.record.kind != "news":
@@ -3185,11 +3211,13 @@ class ShadowRunner:
                 )
             )
 
+        broke_on_stop = False
         for rev in revisions:
             if self._stop_event.is_set() or (
                 self.runtime.state_store is not None
                 and self.runtime.state_store.is_stop_requested()
             ):
+                broke_on_stop = True
                 break
             ev_id = revision_event_id(rev)
             revisions_by_ev_id[ev_id] = rev
@@ -3321,6 +3349,19 @@ class ShadowRunner:
                     await self.runtime.audit_sink.append(rec)
 
         # Phase A: Reconcile already-bound bundles and in-progress singletons without regrouping
+        if pending_in_progress_ids or eligible_pairs or broke_on_stop:
+            self._idle_event_scan_marker = None
+        elif state_store is not None and obs_change is not None and not obs_change[3]:
+            self._idle_event_scan_marker = (
+                obs_change[0],
+                obs_change[1],
+                obs_change[2],
+                state_store.event_state_marker(),
+                self.allow_baseline_revisions,
+            )
+        else:
+            self._idle_event_scan_marker = None
+
         if self.runtime.state_store is not None:
             for p_id in pending_in_progress_ids:
                 if self._stop_event.is_set() or self.runtime.state_store.is_stop_requested():
@@ -3727,6 +3768,7 @@ class ShadowRunner:
         self._drain_stop_event = asyncio.Event()
         self._event_wakeup = asyncio.Event()
         self._stop_reason = None
+        self._idle_event_scan_marker = None
         started_at = _utc(self.clock())
         self._run_started_at = started_at
         self._run_duration_seconds = duration_seconds
