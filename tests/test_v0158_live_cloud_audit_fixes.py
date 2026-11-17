@@ -23,6 +23,7 @@ from eventlens.contracts import (
     ReviewContext,
 )
 from eventlens.deepseek import ModelResponse
+from eventlens.observer import CaptureBatch, ObserverStore, SourceRecord
 from eventlens.quotes import BridgeQuote, BridgeStart, BridgeStop, QuoteStore
 from eventlens.runtime import (
     DeterministicTargetValidator,
@@ -431,3 +432,133 @@ def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_re
     finally:
         ledger.close()
         store.close()
+
+
+def test_observer_store_skips_redundant_repeats_prunes_clutter_and_bounds_revisions(
+    tmp_path: Path,
+) -> None:
+    t0 = datetime(2026, 11, 17, 10, 0, 0, tzinfo=UTC)
+    now_box = [t0]
+    db_path = tmp_path / "observer.sqlite"
+    obs = ObserverStore(db_path, clock=lambda: now_box[0])
+    try:
+        r1 = SourceRecord(
+            source_id="ev-1",
+            kind="news",
+            source_url="https://example.com/1",
+            title="ECB holds rates steady",
+            text="ECB left deposit rate unchanged as expected.",
+            publisher_display_at=t0 - timedelta(seconds=5),
+        )
+        r2 = SourceRecord(
+            source_id="ev-2",
+            kind="news",
+            source_url="https://example.com/2",
+            title="Eurozone CPI flash prints 2.1%",
+            text="Flash HICP prints 2.1% y/y.",
+            publisher_display_at=t0 + timedelta(seconds=1),
+        )
+        r3 = SourceRecord(
+            source_id="ev-3",
+            kind="news",
+            source_url="https://example.com/3",
+            title="US payrolls beat consensus",
+            text="Nonfarm payrolls rose 210k vs 170k expected.",
+            publisher_display_at=t0 + timedelta(seconds=8),
+        )
+
+        def _batch(ts: datetime, records: tuple[SourceRecord, ...], tag: str) -> CaptureBatch:
+            return CaptureBatch(
+                provider="investinglive_fx",
+                stream="forex",
+                kind="news",
+                request_url="https://example.com/feed",
+                request_started_at=ts - timedelta(milliseconds=50),
+                received_at=ts,
+                elapsed_ms=25.0,
+                attempts=1,
+                payload=tag.encode("utf-8"),
+                records=records,
+            )
+
+        res1 = obs.record(_batch(t0, (r1,), "p1"))
+        assert res1["counts"]["baseline"] == 1
+        now_box[0] = t0 + timedelta(seconds=2)
+        res2 = obs.record(_batch(now_box[0], (r1,), "p2"))
+        assert res2["counts"]["repeat"] == 1
+        sight_cnt = obs.db.execute(
+            "SELECT COUNT(*) FROM observer_sightings WHERE source_id='ev-1'"
+        ).fetchone()[0]
+        assert sight_cnt == 1
+
+        # Crash between data commit and available_at publication -> subsequent repeat publishes it
+        now_box[0] = t0 + timedelta(seconds=3)
+        res_unpub = obs.record(_batch(now_box[0], (r1, r2), "p3"))
+        assert res_unpub["counts"]["new"] == 1
+        with obs.db:
+            obs.db.execute(
+                "UPDATE observer_polls SET available_at=NULL WHERE poll_id=?",
+                (res_unpub["poll_id"],),
+            )
+        assert [x.record.source_id for x in obs.revisions(limit=10)] == ["ev-1"]
+        now_box[0] = t0 + timedelta(seconds=4)
+        res_pub = obs.record(_batch(now_box[0], (r1, r2), "p4"))
+        assert res_pub["counts"]["repeat"] == 2
+        assert [x.record.source_id for x in obs.revisions(limit=10)] == ["ev-1", "ev-2"]
+
+        now_box[0] = t0 + timedelta(seconds=10)
+        obs.record(_batch(now_box[0], (r1, r2, r3), "p5"))
+
+        # Inject legacy redundant repeat sighting on published ev-1 + >48h & <48h failures and reopen
+        with obs.db:
+            obs.db.execute(
+                "INSERT INTO observer_sightings VALUES (?, ?, ?, ?)",
+                (res_pub["poll_id"], "ev-1", 1, "repeat"),
+            )
+            obs.db.execute(
+                "INSERT INTO observer_failures VALUES (?, ?, ?, ?, ?)",
+                (
+                    "old-fail",
+                    "investinglive_fx",
+                    "forex",
+                    (t0 - timedelta(hours=60)).isoformat(),
+                    "old",
+                ),
+            )
+            obs.db.execute(
+                "INSERT INTO observer_failures VALUES (?, ?, ?, ?, ?)",
+                (
+                    "new-fail",
+                    "investinglive_fx",
+                    "forex",
+                    (t0 + timedelta(hours=3)).isoformat(),
+                    "recent",
+                ),
+            )
+    finally:
+        obs.close()
+
+    reopened = ObserverStore(db_path, clock=lambda: t0 + timedelta(hours=5))
+    try:
+        # Both legacy redundant repeat sightings pruned cleanly; unpublished/published preserved
+        repeat_rows = reopened.db.execute(
+            "SELECT source_id FROM observer_sightings WHERE state='repeat'"
+        ).fetchall()
+        assert [r[0] for r in repeat_rows] == ["ev-2"]
+        fail_ids = [
+            r[0]
+            for r in reopened.db.execute(
+                "SELECT failure_id FROM observer_failures ORDER BY recorded_at"
+            ).fetchall()
+        ]
+        assert fail_ids == ["new-fail"]
+
+        bounded_all = reopened.revisions(limit=2)
+        assert [x.record.source_id for x in bounded_all] == ["ev-2", "ev-3"]
+        bounded_as_of = reopened.revisions(as_of=t0 + timedelta(seconds=5), limit=1)
+        assert [x.record.source_id for x in bounded_as_of] == ["ev-2"]
+        # Deterministic ascending order with full slice
+        all_revs = reopened.revisions(limit=10)
+        assert [x.record.source_id for x in all_revs] == ["ev-1", "ev-2", "ev-3"]
+    finally:
+        reopened.close()

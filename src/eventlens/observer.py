@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, Self
@@ -435,6 +435,7 @@ class ObserverStore:
     ) -> None:
         self.path, self.clock = path.resolve(), clock
         self._lock = threading.RLock()
+        self._failure_writes = 0
         if readonly and not self.path.exists():
             raise FileNotFoundError(self.path)
         if not readonly:
@@ -498,14 +499,60 @@ class ObserverStore:
                         metadata TEXT NOT NULL);
                     CREATE INDEX IF NOT EXISTS idx_observer_enrichments_lookup
                         ON observer_enrichments(provider, basis, source_id, available_at);
+                    CREATE INDEX IF NOT EXISTS idx_observer_sightings_source_rev
+                        ON observer_sightings(source_id, revision, poll_id);
+                    CREATE INDEX IF NOT EXISTS idx_observer_polls_lookup
+                        ON observer_polls(provider, basis, kind, available_at);
+                    CREATE INDEX IF NOT EXISTS idx_observer_polls_stream
+                        ON observer_polls(provider, basis, stream);
                     """
                 )
                 self.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 self.db.execute("PRAGMA user_version=1")
                 self.db.commit()
+                self._prune_startup_clutter()
         except BaseException:
             self.db.close()
             raise
+
+    def _prune_startup_clutter(self) -> None:
+        with self._lock:
+            if (
+                self.db.execute(
+                    "SELECT 1 FROM observer_sightings WHERE state='repeat' LIMIT 1"
+                ).fetchone()
+                is not None
+            ):
+                with self.db:
+                    self.db.execute(
+                        """DELETE FROM observer_sightings
+                        WHERE state = 'repeat'
+                          AND EXISTS (
+                              SELECT 1
+                              FROM observer_polls p_cur
+                              JOIN observer_sightings s0
+                                ON s0.source_id = observer_sightings.source_id
+                               AND s0.revision = observer_sightings.revision
+                               AND s0.state != 'repeat'
+                              JOIN observer_polls p0
+                                ON p0.poll_id = s0.poll_id
+                               AND p0.provider = p_cur.provider
+                               AND p0.basis = p_cur.basis
+                               AND p0.kind = p_cur.kind
+                              WHERE p_cur.poll_id = observer_sightings.poll_id
+                                AND p0.available_at IS NOT NULL
+                          )"""
+                    )
+            if self.db.execute("SELECT 1 FROM observer_failures LIMIT 1").fetchone() is not None:
+                now = self.clock()
+                if now.tzinfo is None or now.utcoffset() is None:
+                    raise ValueError("Observer storage requires timezone-aware clocks")
+                cutoff_iso = (now.astimezone(UTC) - timedelta(hours=48)).isoformat()
+                with self.db:
+                    self.db.execute(
+                        "DELETE FROM observer_failures WHERE recorded_at < ?",
+                        (cutoff_iso,),
+                    )
 
     def _has_enrichments_table(self) -> bool:
         row = self.db.execute(
@@ -586,9 +633,22 @@ class ObserverStore:
                     ).fetchone()
                     if latest and latest["content_hash"] == digest:
                         revision, state = latest["revision"], "repeat"
+                        already_published = (
+                            self.db.execute(
+                                """SELECT 1 FROM observer_sightings s
+                                JOIN observer_polls p ON p.poll_id = s.poll_id
+                                WHERE s.source_id=? AND s.revision=?
+                                  AND p.provider=? AND p.basis=? AND p.kind=?
+                                  AND p.available_at IS NOT NULL
+                                LIMIT 1""",
+                                (item.source_id, revision, batch.provider, batch.basis, item.kind),
+                            ).fetchone()
+                            is not None
+                        )
                     else:
                         revision = latest["revision"] + 1 if latest else 1
                         state = "revised" if latest else "baseline" if previous is None else "new"
+                        already_published = False
                         self.db.execute(
                             "INSERT INTO observer_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
@@ -601,7 +661,8 @@ class ObserverStore:
                             ),
                         )
                     counts[state] += 1
-                    sightings.append((poll_id, item.source_id, revision, state))
+                    if not already_published:
+                        sightings.append((poll_id, item.source_id, revision, state))
                 result = {
                     "poll_id": poll_id,
                     "provider": batch.provider,
@@ -709,11 +770,18 @@ class ObserverStore:
             now = self.clock()
             if now.tzinfo is None or now.utcoffset() is None:
                 raise ValueError("Observer storage requires timezone-aware clocks")
+            now_utc = now.astimezone(UTC)
             with self.db:
                 self.db.execute(
                     "INSERT INTO observer_failures VALUES (?, ?, ?, ?, ?)",
-                    (str(uuid4()), provider, stream, now.astimezone(UTC).isoformat(), error),
+                    (str(uuid4()), provider, stream, now_utc.isoformat(), error),
                 )
+                self._failure_writes += 1
+                if self._failure_writes % 500 == 0:
+                    self.db.execute(
+                        "DELETE FROM observer_failures WHERE recorded_at < ?",
+                        ((now_utc - timedelta(hours=48)).isoformat(),),
+                    )
 
     def payload(self, poll_id: str) -> bytes:
         with self._lock:
@@ -937,32 +1005,44 @@ class ObserverStore:
                 raise ValueError("Revision cutoff requires a timezone")
             if not 1 <= limit <= 1000:
                 raise ValueError("Revision limit must be between 1 and 1000")
-            query = """
-                SELECT r.*, MIN(p.available_at) AS available_at,
-                    (SELECT p2.result FROM observer_sightings s2
-                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
-                     WHERE p2.provider=r.provider AND p2.basis=r.basis AND p2.kind=r.kind
-                       AND s2.source_id=r.source_id AND s2.revision=r.revision
-                       AND p2.available_at IS NOT NULL
-                     ORDER BY p2.rowid ASC LIMIT 1) AS first_poll_result
-                FROM observer_revisions r
-                JOIN observer_sightings s
-                    ON s.source_id=r.source_id AND s.revision=r.revision
-                JOIN observer_polls p
-                    ON p.poll_id=s.poll_id AND p.provider=r.provider
-                    AND p.basis=r.basis AND p.kind=r.kind
-                WHERE r.basis=? AND p.available_at IS NOT NULL
-            """
+            where_clauses = ["r.basis=?", "p.available_at IS NOT NULL"]
             params: list[Any] = [basis]
             if provider is not None:
-                query += " AND r.provider=?"
+                where_clauses.append("r.provider=?")
                 params.append(provider)
             if kind is not None:
-                query += " AND r.kind=?"
+                where_clauses.append("r.kind=?")
                 params.append(kind)
-            query += """
-                GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
-                ORDER BY available_at ASC, r.provider ASC, r.kind ASC, r.source_id ASC, r.revision ASC
+            having_clause = ""
+            if as_of is not None:
+                having_clause = "HAVING MIN(p.available_at) <= ?"
+                params.append(as_of.astimezone(UTC).isoformat())
+            params.append(limit)
+            where_sql = " AND ".join(where_clauses)
+            query = f"""
+                WITH bounded AS (
+                    SELECT r.*, MIN(p.available_at) AS available_at
+                    FROM observer_revisions r
+                    JOIN observer_sightings s
+                        ON s.source_id=r.source_id AND s.revision=r.revision
+                    JOIN observer_polls p
+                        ON p.poll_id=s.poll_id AND p.provider=r.provider
+                        AND p.basis=r.basis AND p.kind=r.kind
+                    WHERE {where_sql}
+                    GROUP BY r.provider, r.basis, r.kind, r.source_id, r.revision
+                    {having_clause}
+                    ORDER BY available_at DESC, r.provider DESC, r.kind DESC, r.source_id DESC, r.revision DESC
+                    LIMIT ?
+                )
+                SELECT b.*,
+                    (SELECT p2.result FROM observer_sightings s2
+                     JOIN observer_polls p2 ON p2.poll_id = s2.poll_id
+                     WHERE p2.provider=b.provider AND p2.basis=b.basis AND p2.kind=b.kind
+                       AND s2.source_id=b.source_id AND s2.revision=b.revision
+                       AND p2.available_at IS NOT NULL
+                     ORDER BY p2.rowid ASC LIMIT 1) AS first_poll_result
+                FROM bounded b
+                ORDER BY b.available_at ASC, b.provider ASC, b.kind ASC, b.source_id ASC, b.revision ASC
             """
             rows = self.db.execute(query, params).fetchall()
 
@@ -988,8 +1068,7 @@ class ObserverStore:
                 )
                 for row in rows
             )
-            filtered = tuple(item for item in items if as_of is None or item.available_at <= as_of)
-            return filtered[-limit:]
+            return tuple(item for item in items if as_of is None or item.available_at <= as_of)
 
     def report(self) -> dict[str, Any]:
         with self._lock:
