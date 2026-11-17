@@ -499,8 +499,6 @@ class ObserverStore:
                         metadata TEXT NOT NULL);
                     CREATE INDEX IF NOT EXISTS idx_observer_enrichments_lookup
                         ON observer_enrichments(provider, basis, source_id, available_at);
-                    CREATE INDEX IF NOT EXISTS idx_observer_sightings_source_rev
-                        ON observer_sightings(source_id, revision, poll_id);
                     CREATE INDEX IF NOT EXISTS idx_observer_polls_lookup
                         ON observer_polls(provider, basis, kind, available_at);
                     CREATE INDEX IF NOT EXISTS idx_observer_polls_stream
@@ -517,32 +515,78 @@ class ObserverStore:
 
     def _prune_startup_clutter(self) -> None:
         with self._lock:
-            if (
+            with self.db:
+                self.db.execute("DROP INDEX IF EXISTS idx_observer_sightings_source_rev")
+            has_repeat = (
                 self.db.execute(
                     "SELECT 1 FROM observer_sightings WHERE state='repeat' LIMIT 1"
                 ).fetchone()
                 is not None
-            ):
-                with self.db:
+            )
+            if has_repeat:
+                try:
+                    self.db.execute("DROP TABLE IF EXISTS temp._keep_sightings")
+                    self.db.execute("DROP TABLE IF EXISTS temp._unpub_revs")
                     self.db.execute(
-                        """DELETE FROM observer_sightings
-                        WHERE state = 'repeat'
-                          AND EXISTS (
-                              SELECT 1
-                              FROM observer_polls p_cur
-                              JOIN observer_sightings s0
-                                ON s0.source_id = observer_sightings.source_id
-                               AND s0.revision = observer_sightings.revision
-                               AND s0.state != 'repeat'
-                              JOIN observer_polls p0
-                                ON p0.poll_id = s0.poll_id
-                               AND p0.provider = p_cur.provider
-                               AND p0.basis = p_cur.basis
-                               AND p0.kind = p_cur.kind
-                              WHERE p_cur.poll_id = observer_sightings.poll_id
-                                AND p0.available_at IS NOT NULL
-                          )"""
+                        """CREATE TEMP TABLE _keep_sightings AS
+                        SELECT poll_id, source_id, revision, state
+                        FROM observer_sightings
+                        WHERE state != 'repeat'"""
                     )
+                    self.db.execute(
+                        "CREATE INDEX temp.idx_keep_sr ON _keep_sightings(source_id, revision)"
+                    )
+                    self.db.execute(
+                        """CREATE TEMP TABLE _unpub_revs AS
+                        SELECT DISTINCT r.source_id, r.revision
+                        FROM observer_revisions r
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM _keep_sightings k
+                            JOIN observer_polls p ON p.poll_id = k.poll_id
+                            WHERE k.source_id = r.source_id
+                              AND k.revision = r.revision
+                              AND p.provider = r.provider
+                              AND p.basis = r.basis
+                              AND p.kind = r.kind
+                              AND p.available_at IS NOT NULL
+                        )"""
+                    )
+                    if self.db.execute("SELECT 1 FROM _unpub_revs LIMIT 1").fetchone() is not None:
+                        self.db.execute(
+                            "CREATE UNIQUE INDEX temp.idx_keep_pk ON _keep_sightings(poll_id, source_id)"
+                        )
+                        self.db.execute(
+                            """INSERT OR IGNORE INTO _keep_sightings
+                            SELECT s.poll_id, s.source_id, s.revision, s.state
+                            FROM observer_sightings s
+                            JOIN _unpub_revs u
+                              ON u.source_id = s.source_id AND u.revision = s.revision
+                            WHERE s.state = 'repeat'"""
+                        )
+                        self.db.commit()
+                    total_cnt = int(
+                        self.db.execute("SELECT COUNT(*) FROM observer_sightings").fetchone()[0]
+                    )
+                    keep_cnt = int(
+                        self.db.execute("SELECT COUNT(*) FROM _keep_sightings").fetchone()[0]
+                    )
+                    if keep_cnt < total_cnt:
+                        with self.db:
+                            self.db.execute("DROP INDEX IF EXISTS idx_observer_sightings_lookup")
+                            self.db.execute("DELETE FROM observer_sightings")
+                            self.db.execute(
+                                """INSERT INTO observer_sightings (poll_id, source_id, revision, state)
+                                SELECT poll_id, source_id, revision, state FROM _keep_sightings"""
+                            )
+                finally:
+                    self.db.execute("DROP TABLE IF EXISTS temp._unpub_revs")
+                    self.db.execute("DROP TABLE IF EXISTS temp._keep_sightings")
+                    self.db.commit()
+            with self.db:
+                self.db.execute(
+                    """CREATE INDEX IF NOT EXISTS idx_observer_sightings_lookup
+                    ON observer_sightings(source_id, revision, state, poll_id)"""
+                )
             if self.db.execute("SELECT 1 FROM observer_failures LIMIT 1").fetchone() is not None:
                 now = self.clock()
                 if now.tzinfo is None or now.utcoffset() is None:
