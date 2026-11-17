@@ -29,6 +29,7 @@ from ..contracts import Event, FilterResult
 from ..observer import (
     ArticleEnrichment,
     CaptureBatch,
+    CaptureError,
     Kind,
     MacroValues,
     ObserverStore,
@@ -37,12 +38,25 @@ from ..observer import (
     StoredEnrichment,
     StoredRevision,
     analyze_macro_semantics,
-)
-from .wallstreetcn import (
-    CaptureError,
-    WallStreetCNFilter,
     revision_event_id,
     revision_to_event,
+)
+
+EURUSD_NEWS_KEYWORDS: tuple[str, ...] = (
+    "fomc",
+    "powell",
+    "treasury",
+    "nonfarm",
+    "payroll",
+    "ecb",
+    "lagarde",
+    "eur/usd",
+    "eurusd",
+    "eurozone",
+    "euro area",
+    "federal reserve",
+    "cpi",
+    "pce",
 )
 
 logger = logging.getLogger(__name__)
@@ -1396,8 +1410,8 @@ class Tier1EnglishSource:
         return results
 
 
-class EURUSDEventFilter(WallStreetCNFilter):
-    """Unified deterministic EUR/USD event filter supporting Tier-1 English sources and legacy revisions."""
+class EURUSDEventFilter:
+    """Unified deterministic EUR/USD event filter for Tier-1 English sources."""
 
     filter_version: str = TIER1_FILTER_VERSION
 
@@ -1407,20 +1421,25 @@ class EURUSDEventFilter(WallStreetCNFilter):
         min_news_importance: int = 2,
         min_calendar_importance: int = 2,
         english_calendar_countries: frozenset[str] = frozenset({"USD", "EUR"}),
+        news_keywords: tuple[str, ...] = EURUSD_NEWS_KEYWORDS,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        super().__init__(
-            min_news_importance=min_news_importance,
-            min_calendar_importance=min_calendar_importance,
-            clock=clock,
-        )
+        if min_news_importance < 0 or min_calendar_importance < 0:
+            raise ValueError("Importance thresholds must be nonnegative")
+        self.min_news_importance = min_news_importance
+        self.min_calendar_importance = min_calendar_importance
         self.english_calendar_countries = frozenset(c.upper() for c in english_calendar_countries)
+        self.news_keywords = tuple(keyword.lower() for keyword in news_keywords)
+        self.clock = clock
+        self._seen: set[str] = set()
+
+    def unmark_seen(self, event_id: str) -> None:
+        """Allow a filtered event to be re-evaluated after a transient downstream failure."""
+        self._seen.discard(event_id)
 
     def evaluate_revision(
         self, revision: StoredRevision, *, checked_at: datetime | None = None
     ) -> tuple[FilterResult, Event | None]:
-        if revision.provider == "wallstreetcn":
-            return super().evaluate_revision(revision, checked_at=checked_at)
 
         now = checked_at or self.clock()
         if now.tzinfo is None or now.utcoffset() is None:
@@ -1558,8 +1577,6 @@ class EURUSDEventFilter(WallStreetCNFilter):
         )
 
     async def evaluate(self, event: Event) -> FilterResult:
-        if event.source.startswith("wallstreetcn") and not event.event_id.startswith("bundle:"):
-            return await super().evaluate(event)
         now = self.clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("Filter check clock requires a timezone")

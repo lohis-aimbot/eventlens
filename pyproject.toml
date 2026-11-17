@@ -11,17 +11,7 @@ requires-python = ">=3.11"
 dependencies = ["pydantic>=2.8,<3", "httpx>=0.27,<1"]
 
 [project.scripts]
-eventlens = "eventlens.cli:main"
-eventlens-observe = "eventlens.observer_cli:main"
 eventlens-shadow = "eventlens.shadow_cli:main"
-eventlens-memory = "eventlens.memory_cli:main"
-eventlens-fed = "eventlens.fed_cli:main"
-eventlens-market = "eventlens.market_cli:main"
-eventlens-replay = "eventlens.replay_cli:main"
-eventlens-research = "eventlens.research_cli:main"
-eventlens-decision = "eventlens.decision_cli:main"
-eventlens-infer = "eventlens.inference_cli:main"
-eventlens-series = "eventlens.series_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1", "mypy>=1.13,<2", "build>=1,<2"]
@@ -30,6 +20,7 @@ dev = ["pytest>=8,<10", "ruff>=0.9,<1", "mypy>=1.13,<2", "build>=1,<2"]
 where = ["src"]
 
 [tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
 testpaths = ["tests"]
 
 [tool.ruff]

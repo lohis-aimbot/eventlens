@@ -6,7 +6,6 @@ import pytest
 
 from eventlens.contracts import AgentDecision, Event, Thesis, ThesisChange
 from eventlens.memory import MemoryConflict
-from eventlens.memory_cli import demo
 from eventlens.sqlite_memory import EventAlreadyProcessed, IdentityConflict, SQLiteThesisMemory
 
 T = datetime(2026, 1, 1, tzinfo=UTC)
@@ -161,18 +160,6 @@ def test_stale_revision_and_expired_decision(tmp_path):
         run(store.commit(decision("d2", "e2", version=1, revision=2)))
     # Exact delivery retry stays idempotent even after its expiry.
     assert run(store.commit(decision())) == 1
-
-
-def test_demo_can_repeat_without_extra_revisions(tmp_path, capsys):
-    path = tmp_path / "demo.db"
-    run(demo(path))
-    run(demo(path))
-    store = SQLiteThesisMemory(path)
-    history = run(store.history("demo-supply"))
-    assert len(history) == 3
-    assert history[-1].thesis.status == "invalidated"
-    assert history[-1].thesis.contradicting_event_ids == ("demo-event-2",)
-    assert run(store.snapshot(as_of=T + timedelta(minutes=1))).theses[0].revision == 2
 
 
 def test_atomic_multi_thesis_validation(tmp_path):

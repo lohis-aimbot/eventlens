@@ -9,7 +9,6 @@ from uuid import UUID
 
 import pytest
 
-from eventlens.cli import main
 from eventlens.contracts import (
     AgentDecision,
     Event,
@@ -34,7 +33,8 @@ from eventlens.runtime import (
     ShadowRunner,
     SQLiteRuntimeStore,
 )
-from eventlens.sources.wallstreetcn import WallStreetCNFilter
+from eventlens.shadow_cli import main as shadow_main
+from eventlens.sources.english_tier1 import EURUSDEventFilter
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
     SinglePassProposal,
@@ -291,35 +291,24 @@ def test_ignore_and_hold_never_liquidate_open_position_and_close_requires_thesis
     )
 
     open_prop = SinglePassProposal(
-        memory_action="create",
-        thesis_id=None,
-        status="active",
-        narrative="ECB hawkish hike supports EUR/USD.",
-        instruments=("EUR/USD",),
-        invalidation_conditions=("ECB turns dovish",),
-        confidence=0.8,
-        evidence_role="support",
-        evidence_quote="ECB signals rate hike",
         portfolio_action="SET_TARGET",
         target_direction="long",
         target_weight=Decimal("0.20"),
-        target_thesis_ids=("__current__",),
+        strategy_hypothesis="fundamental_breakout",
+        market_bias="bullish_eur",
+        market_state_note="ECB hawkish hike supports EUR/USD.",
         rationale="Open 20% long EUR/USD.",
     )
     ignore_prop = SinglePassProposal(
-        memory_action="ignore",
         portfolio_action="IGNORE_EVENT",
         target_direction="flat",
         target_weight=Decimal("0"),
-        target_thesis_ids=(),
         rationale="Irrelevant noise; ignore event.",
     )
     hold_prop = SinglePassProposal(
-        memory_action="ignore",
         portfolio_action="HOLD",
         target_direction="flat",
         target_weight=Decimal("0"),
-        target_thesis_ids=(),
         rationale="Uncertain follow-up; hold existing EUR/USD position.",
     )
     client = SequencedJSONClient(open_prop, ignore_prop, hold_prop)
@@ -384,16 +373,15 @@ def test_ignore_and_hold_never_liquidate_open_position_and_close_requires_thesis
         assert r3.decision is not None and r3.decision.target is None
         assert ledger.snapshot_sync(market=make_market(as_of=now)).positions[0].quantity == held_qty
 
-        # 4. CLOSE without target_thesis_ids is rejected by schema
-        with pytest.raises(ValueError, match="CLOSE requires explicit target_thesis_ids"):
+        # 4. CLOSE requires flat direction and zero target weight
+        with pytest.raises(
+            ValueError, match="CLOSE requires flat direction and zero target weight"
+        ):
             SinglePassProposal(
-                memory_action="ignore",
-                evidence_quote="ECB signals",
                 portfolio_action="CLOSE",
                 target_direction="flat",
-                target_weight=Decimal("0"),
-                target_thesis_ids=(),
-                rationale="Try close without thesis",
+                target_weight=Decimal("0.10"),
+                rationale="Try close with non-zero weight",
             )
     finally:
         ledger.close()
@@ -410,35 +398,21 @@ def test_post_llm_market_refresh_and_inference_state_change_invalidation(tmp_pat
     )
 
     open_prop = SinglePassProposal(
-        memory_action="create",
-        thesis_id=None,
-        status="active",
-        narrative="ECB rate hike supports EUR/USD.",
-        instruments=("EUR/USD",),
-        invalidation_conditions=("ECB pauses",),
-        confidence=0.8,
-        evidence_role="support",
-        evidence_quote="ECB Governing Council signals a 25 bps rate hike",
         portfolio_action="SET_TARGET",
         target_direction="long",
         target_weight=Decimal("0.20"),
-        target_thesis_ids=("__current__",),
+        strategy_hypothesis="fundamental_breakout",
+        market_bias="bullish_eur",
+        market_state_note="ECB rate hike supports EUR/USD.",
         rationale="Open 20% long EUR/USD.",
     )
     add_prop = SinglePassProposal(
-        memory_action="create",
-        thesis_id=None,
-        status="active",
-        narrative="Follow-up ECB comment adds conviction.",
-        instruments=("EUR/USD",),
-        invalidation_conditions=("ECB pauses",),
-        confidence=0.85,
-        evidence_role="support",
-        evidence_quote="Lagarde confirms further tightening",
         portfolio_action="SET_TARGET",
         target_direction="long",
         target_weight=Decimal("0.25"),
-        target_thesis_ids=("__current__",),
+        strategy_hypothesis="fundamental_breakout",
+        market_bias="bullish_eur",
+        market_state_note="Follow-up ECB comment adds conviction.",
         rationale="Increase long EUR/USD to 25%.",
     )
 
@@ -760,22 +734,15 @@ def test_crash_after_memory_commit_recovers_and_transient_failure_retries(tmp_pa
     shd_path = tmp_path / "shadow.sqlite"
     memory = SQLiteThesisMemory(mem_path, clock=lambda: now, allow_targets=True)
     ledger = SQLiteShadowLedger(shd_path, clock=lambda: now)
-    wscn_filter = WallStreetCNFilter(clock=lambda: now)
+    wscn_filter = EURUSDEventFilter(clock=lambda: now)
 
     good_prop = SinglePassProposal(
-        memory_action="create",
-        thesis_id=None,
-        status="active",
-        narrative="ECB rate hike supports EUR/USD.",
-        instruments=("EUR/USD",),
-        invalidation_conditions=("ECB pauses",),
-        confidence=0.8,
-        evidence_role="support",
-        evidence_quote="ECB Governing Council signals a 25 bps rate hike",
         portfolio_action="SET_TARGET",
         target_direction="long",
         target_weight=Decimal("0.20"),
-        target_thesis_ids=("__current__",),
+        strategy_hypothesis="fundamental_breakout",
+        market_bias="bullish_eur",
+        market_state_note="ECB rate hike supports EUR/USD.",
         rationale="Open 20% long EUR/USD.",
     )
     # First call raises ConnectionError; second call succeeds
@@ -1120,7 +1087,7 @@ def test_automated_shadow_runner_protection_independent_of_hung_llm_and_cli(tmp_
 
     # Verify CLI status, stop, recover, and report commands
     for subcmd in ("status", "stop", "recover", "report"):
-        main(["shadow", "--shadow-db", str(shd_db), "--memory-db", str(mem_db), subcmd])
+        shadow_main(["--shadow-db", str(shd_db), "--memory-db", str(mem_db), subcmd])
         out = json.loads(capsys.readouterr().out)
         assert out["execution_authorized"] is False
 
@@ -2124,19 +2091,12 @@ def test_pepperstone_razor_commission_bearing_ecn_zero_spread_quote_pipeline(tmp
 
         # 2. Full runtime cycle + fill + protective exit on Razor 0.0-pip ECN quotes
         open_prop = SinglePassProposal(
-            memory_action="create",
-            thesis_id=None,
-            status="active",
-            narrative="ECB hawkish surprise supports EUR/USD.",
-            instruments=("EUR/USD",),
-            invalidation_conditions=("ECB reverses stance",),
-            confidence=0.8,
-            evidence_role="support",
-            evidence_quote="ECB Governing Council raises deposit facility rate",
             portfolio_action="SET_TARGET",
             target_direction="long",
             target_weight=Decimal("0.20"),
-            target_thesis_ids=("__current__",),
+            strategy_hypothesis="fundamental_breakout",
+            market_bias="bullish_eur",
+            market_state_note="ECB hawkish surprise supports EUR/USD.",
             rationale="Open 20% long EUR/USD on Razor ECN feed.",
         )
         client = SequencedJSONClient(open_prop)

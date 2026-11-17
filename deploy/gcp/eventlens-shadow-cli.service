@@ -25,7 +25,6 @@ ExecStart=/bin/sh -ec 'exec /opt/eventlens/.venv/bin/eventlens-shadow start \
     --quote-bridge-dir /var/lib/eventlens/bridge \
     --poll-news \
     --news-source tier1_english \
-    --supplement-calendar-actuals \
     --call-model \
     --max-quote-age 8.0 \
     --max-quote-wait-seconds 120 \

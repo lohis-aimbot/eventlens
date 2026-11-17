@@ -4,7 +4,6 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -321,101 +320,6 @@ def test_foreign_database_readonly_and_lock_guards(tmp_path):
     assert path.read_bytes() == before
 
 
-def test_bridge_source_has_no_order_api_and_keeps_historical_probe_separate():
-    code = Path("ctrader/EventLensQuoteBridge.cs").read_text()
-    assert (
-        "Account.IsLive" in code and "RunningMode.RealTime" in code and "AccessRights.None" in code
-    )
-    assert "FlushPendingIfDue" in code and "raw_zero_spread_ticks" in code
-    assert "symbol_mismatch_ticks" in code and "commission_type" in code
-    for operation in (
-        "ExecuteMarketOrder",
-        "PlaceLimitOrder",
-        "ModifyPosition",
-        "ClosePosition",
-        "Account.Number",
-    ):
-        assert operation not in code
-    assert "IsBacktesting" in Path("ctrader/EventLensTickProbe.cs").read_text()
-
-
-@pytest.mark.parametrize("seconds", ["0", "nan", "601"])
-def test_quote_cli_rejects_bad_duration_without_creating_database(tmp_path, seconds):
-    from eventlens.quotes_cli import main
-
-    database = tmp_path / "quotes.sqlite"
-    with pytest.raises(SystemExit) as exc:
-        main(["--database", str(database), "watch", str(tmp_path), "--seconds", seconds])
-    assert exc.value.code == 2 and not database.exists()
-
-
-def test_quote_group_help_and_misplaced_database_are_explicit(tmp_path, capsys):
-    from eventlens.cli import main
-
-    with pytest.raises(SystemExit) as help_result:
-        main(["observe", "quotes", "--help"])
-    assert help_result.value.code == 0
-    assert "watch" in capsys.readouterr().out
-    path = tmp_path / "wrong.sqlite"
-    with pytest.raises(SystemExit) as misplaced:
-        main(["observe", "--database", str(path), "quotes", "report"])
-    assert misplaced.value.code == 2 and not path.exists()
-
-
-@pytest.mark.parametrize("include_stop", [True, False])
-def test_watch_cli_requires_clean_stop_and_reports_sample_gaps(
-    tmp_path, monkeypatch, capsys, include_stop
-):
-    from eventlens import quotes_cli
-
-    stop = {
-        "version": 1,
-        "kind": "stop",
-        "session_id": SESSION,
-        "stopped_at": (NOW + timedelta(seconds=2)).isoformat(),
-        "quotes": 2,
-    }
-    lines = [start().model_dump_json(), quote(sequence=2).model_dump_json()]
-    if include_stop:
-        lines.append(json.dumps(stop))
-
-    class Tail:
-        def __init__(self, directory):
-            pass
-
-        def poll(self):
-            return iter(lines)
-
-    clocks = iter(
-        [
-            NOW - timedelta(seconds=1),
-            NOW,
-            NOW + timedelta(seconds=1, milliseconds=20),
-            NOW + timedelta(seconds=2),
-        ]
-    )
-    ticks = iter([0, 1, 20])
-    monkeypatch.setattr(quotes_cli, "DirectoryTail", Tail)
-    monkeypatch.setattr(
-        quotes_cli,
-        "QuoteStore",
-        lambda path, readonly: QuoteStore(path, clock=lambda: NOW + timedelta(seconds=2)),
-    )
-    monkeypatch.setattr(quotes_cli, "now_utc", lambda: next(clocks))
-    monkeypatch.setattr(quotes_cli.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(quotes_cli.time, "sleep", lambda seconds: None)
-    args = ["--database", str(tmp_path / "watch.sqlite"), "watch", str(tmp_path), "--seconds", "10"]
-    if include_stop:
-        quotes_cli.main(args)
-    else:
-        with pytest.raises(SystemExit) as unclosed:
-            quotes_cli.main(args)
-        assert unclosed.value.code == 1
-    result = json.loads(capsys.readouterr().out.splitlines()[-1])
-    assert result["status"] == ("observed_closed" if include_stop else "observed_unclosed")
-    assert result["report"]["session_details"][0]["missing_sequences"] == 1
-
-
 def test_alignment_does_not_fall_back_past_newest_zero_spread_quote(tmp_path):
     events = ObserverStore(tmp_path / "events.sqlite", clock=lambda: NOW)
     add_event(events)
@@ -545,11 +449,6 @@ def test_receiver_rejects_numeric_symbol_metadata_decimals(tmp_path):
 
 
 def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
-    code = Path("ctrader/EventLensQuoteBridge.cs").read_text()
-    assert "spreadStateChanged" in code and "_lastEmittedPositiveSpread" in code
-    assert "priceChanged" in code and "_lastEmittedBid" in code
-    assert "FlushPendingIfDue(true)" in code
-    assert "MaxValue = 86400" in code
     with pytest.raises(ValidationError):
         start(sample_interval_ms=50)
     assert start(duration_seconds=1500).duration_seconds == 1500

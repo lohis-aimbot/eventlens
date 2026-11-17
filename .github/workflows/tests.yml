@@ -16,25 +16,7 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: ruff check .
       - run: ruff format --check .
-      - run: mypy src scripts
+      - run: mypy src
       - run: pytest -q
-      - run: eventlens --help
-      - run: eventlens observe --help
-      - run: eventlens observe quotes --help
-      - run: eventlens observe demo examples/synthetic-observer.json
-      - run: eventlens observe --database data/observer-demo.sqlite report
-      - run: eventlens source fed --help
-      - run: eventlens research decision check examples/synthetic-position-proposal.json
-      - run: eventlens research infer plan examples/synthetic-inference-case.json
-      - run: eventlens research series plan examples/synthetic-series-plan.json
-      - run: eventlens-memory demo
-      - run: eventlens-memory history demo-supply
-      - run: eventlens-fed --help
-      - run: eventlens-market examples/synthetic-ctrader-ticks.json
-      - run: eventlens-research window examples/synthetic-research-window.json
-      - run: eventlens-decision schema
-      - run: eventlens-decision check examples/synthetic-position-proposal.json
-      - run: eventlens-decision replay-context examples/synthetic-historical-context.json
-      - run: eventlens-infer plan examples/synthetic-inference-case.json
-      - run: eventlens-series plan examples/synthetic-series-plan.json
+      - run: eventlens-shadow --help
       - run: python -m build

@@ -40,7 +40,6 @@ from .runtime import (
     inspect_runtime_store_readonly,
 )
 from .sources.english_tier1 import EURUSDEventFilter, Tier1EnglishSource
-from .sources.wallstreetcn import WallStreetCNSource
 from .sqlite_memory import SQLiteThesisMemory
 from .trading.agent import SinglePassTradingAgent
 from .trading.execution import (
@@ -1529,8 +1528,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
         args.memory_db.parent.mkdir(parents=True, exist_ok=True)
         memory = SQLiteThesisMemory(args.memory_db, allow_targets=True)
         quote_bridge_dir: Path | None = getattr(args, "quote_bridge_dir", None)
-        use_ctrader_openapi = bool(getattr(args, "ctrader_openapi", False))
-        writable_quotes = quote_bridge_dir is not None or use_ctrader_openapi
+        writable_quotes = quote_bridge_dir is not None
         if writable_quotes:
             args.quotes_db.parent.mkdir(parents=True, exist_ok=True)
         qstore = (
@@ -1653,16 +1651,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 }
 
             allow_baseline = getattr(args, "allow_baseline", None)
-            news_source_mode = getattr(args, "news_source", "tier1_english")
-            active_news_source: Any = None
-            supplemental_cal: WallStreetCNSource | None = None
-            if args.poll_news:
-                if news_source_mode == "wallstreetcn":
-                    active_news_source = WallStreetCNSource()
-                else:
-                    active_news_source = Tier1EnglishSource()
-                    if getattr(args, "supplement_calendar_actuals", False):
-                        supplemental_cal = WallStreetCNSource()
+            active_news_source: Any = Tier1EnglishSource() if args.poll_news else None
             raw_breakout_pips = getattr(args, "review_breakout_pips", None)
             raw_periodic_s = getattr(args, "periodic_review_seconds", None)
             review_policy = ReviewPolicy(
@@ -1683,18 +1672,6 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 max_reviews_per_thesis=int(getattr(args, "max_reviews_per_thesis", 3)),
                 max_total_review_calls=int(getattr(args, "max_total_review_calls", 10)),
             )
-            openapi_streamer: Any = None
-            if use_ctrader_openapi:
-                from .ctrader_openapi import CTraderOpenApiConfig, CTraderOpenApiQuoteStreamer
-
-                assert qstore is not None
-                oa_cfg = CTraderOpenApiConfig.from_environment()
-                openapi_streamer = CTraderOpenApiQuoteStreamer(
-                    config=oa_cfg,
-                    quote_store=qstore,
-                    basis=basis,
-                    sample_interval_ms=int(getattr(args, "ctrader_sample_interval_ms", 200)),
-                )
             if getattr(args, "ctrader_cli_demo_orders", False):
                 from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
 
@@ -1730,12 +1707,9 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 observer_store=ostore,
                 quote_store=qstore,
                 quote_bridge_dir=quote_bridge_dir,
-                ctrader_openapi_streamer=openapi_streamer,
-                ctrader_demo_mirror=bool(getattr(args, "ctrader_demo_mirror_orders", False)),
                 ctrader_cli_demo_adapter=cli_demo_adapter,
-                enforce_fx_weekend_pause=continuous_mode or use_ctrader_openapi,
+                enforce_fx_weekend_pause=continuous_mode,
                 news_source=active_news_source,
-                supplemental_calendar_source=supplemental_cal,
                 basis=basis,
                 poll_news=args.poll_news,
                 allow_baseline_revisions=(
@@ -1810,7 +1784,7 @@ def _add_common_db_args(p: argparse.ArgumentParser, *, suppress_defaults: bool =
         "--observer-db",
         type=Path,
         default=default_flag if suppress_defaults else Path("data/observer.sqlite"),
-        help="SQLite database for captured WallStreetCN revisions",
+        help="SQLite database for captured macro and news revisions",
     )
     p.add_argument(
         "--quotes-db",
@@ -1952,14 +1926,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     start_p.add_argument(
         "--news-source",
-        choices=("tier1_english", "wallstreetcn"),
+        choices=("tier1_english",),
         default="tier1_english",
         help="Live news/macro source stack when --poll-news is enabled (default: tier1_english)",
-    )
-    start_p.add_argument(
-        "--supplement-calendar-actuals",
-        action="store_true",
-        help="Optionally poll structured numeric calendar actuals alongside tier1_english (without Chinese news)",
     )
     start_p.add_argument(
         "--bundle-events",
@@ -1983,17 +1952,7 @@ def main(argv: list[str] | None = None) -> None:
         "--quote-bridge-dir",
         type=Path,
         default=None,
-        help="Optional EventLensQuoteBridge sandbox directory to tail live Demo EUR/USD quotes",
-    )
-    start_p.add_argument(
-        "--ctrader-openapi",
-        action="store_true",
-        help="Stream live Demo EUR/USD quotes directly from headless cTrader Open API (demo.ctraderapi.com:5036)",
-    )
-    start_p.add_argument(
-        "--ctrader-demo-mirror-orders",
-        action="store_true",
-        help="Unavailable: Open API Demo broker mirroring is blocked; use --ctrader-cli-demo-orders with EventLensCliBridge",
+        help="EventLensCliBridge directory to tail live Demo EUR/USD quotes and reconcile execution",
     )
     start_p.add_argument(
         "--ctrader-cli-demo-orders",
@@ -2022,12 +1981,6 @@ def main(argv: list[str] | None = None) -> None:
         type=str,
         default=None,
         help="Optional ex-ante risk budget fraction of equity per trade (e.g. '0.02' for 2%% ROUND_DOWN lot cap)",
-    )
-    start_p.add_argument(
-        "--ctrader-sample-interval-ms",
-        type=int,
-        default=200,
-        help="cTrader Open API tick sampling throttle in ms (default: 200; positive-spread ticks always flush immediately)",
     )
     start_p.add_argument(
         "--max-daily-llm-calls",
@@ -2355,15 +2308,6 @@ def main(argv: list[str] | None = None) -> None:
             not math.isfinite(args.duration) or not 0 < args.duration <= 604800
         ):
             parser.error("--duration must be a finite number in (0, 604800] seconds")
-        if getattr(args, "ctrader_demo_mirror_orders", False):
-            from .ctrader_openapi import DEMO_EXECUTION_UNAVAILABLE
-
-            parser.error(DEMO_EXECUTION_UNAVAILABLE)
-        if (
-            getattr(args, "ctrader_openapi", False)
-            and getattr(args, "quote_bridge_dir", None) is not None
-        ):
-            parser.error("--ctrader-openapi and --quote-bridge-dir are mutually exclusive")
         if getattr(args, "ctrader_cli_demo_orders", False):
             if getattr(args, "quote_bridge_dir", None) is None:
                 parser.error("--ctrader-cli-demo-orders requires --quote-bridge-dir")
@@ -2380,8 +2324,6 @@ def main(argv: list[str] | None = None) -> None:
                 parser.error(str(exc))
         if getattr(args, "max_daily_llm_calls", None) is not None and args.max_daily_llm_calls < 1:
             parser.error("--max-daily-llm-calls must be >= 1")
-        if getattr(args, "ctrader_sample_interval_ms", 200) < 0:
-            parser.error("--ctrader-sample-interval-ms must be >= 0")
         if args.poll_news and args.news_interval < 10.0:
             parser.error("--news-interval must be at least 10 seconds when polling live news")
     elif args.command == "demo-smoke":

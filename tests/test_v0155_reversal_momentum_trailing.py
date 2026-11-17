@@ -14,10 +14,8 @@ import httpx
 import pytest
 
 from eventlens.contracts import (
-    AgentContext,
     Event,
     MarketSnapshot,
-    PortfolioSnapshot,
     Quote,
     TargetPortfolio,
     TargetPosition,
@@ -45,7 +43,7 @@ from eventlens.sources.english_tier1 import (
     format_revision_marginal_delta,
 )
 from eventlens.sqlite_memory import SQLiteThesisMemory
-from eventlens.trading.agent import SinglePassTradingAgent, resolve_verbatim_quote
+from eventlens.trading.agent import SinglePassTradingAgent
 from eventlens.trading.execution import ProtectiveExitPolicy, SQLiteShadowLedger
 from eventlens.trading.portfolio import DeterministicTargetValidator
 from eventlens.trading.risk import DeterministicHardRiskEngine, RiskPolicy
@@ -137,54 +135,25 @@ def test_atomic_thesis_reversal_invalidates_prior_and_creates_new_target(tmp_pat
         raw_text="Fed Chair Warsh Q&A: Further rate hikes are not our base case and inflation progress continues.",
     )
 
-    class _DynamicReversalClient(_StubModelClient):
-        async def complete_json(self, *, system: str, user: str) -> ModelResponse:
-            ctx = json.loads(user)
-            if self.calls == 1:
-                prior_id = ctx["prior_memory_theses_do_not_quote"][0]["thesis_id"]
-                self._payloads[1] = {
-                    **self._payloads[1],
-                    "memory_action": "update",
-                    "thesis_id": prior_id,
-                    "status": "invalidated",
-                    "evidence_role": "contradict",
-                    "invalidate_thesis_ids": [prior_id],
-                }
-            return await super().complete_json(system=system, user=user)
-
-    client = _DynamicReversalClient(
+    client = _StubModelClient(
         {
-            "memory_action": "create",
-            "thesis_id": None,
-            "invalidate_thesis_ids": [],
-            "status": "active",
-            "narrative": "FOMC rate hold supports near-term USD firmness against EUR.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["Dovish press conference Q&A reversal above 1.1150"],
-            "confidence": 0.72,
-            "evidence_quote": "maintain the target range for the federal funds rate at 3-1/2 to 3-3/4 percent.",
-            "evidence_role": "support",
             "portfolio_action": "SET_TARGET",
             "target_direction": "short",
             "target_weight": "-0.10",
-            "target_thesis_ids": ["__current__"],
+            "strategy_hypothesis": "fundamental_breakout",
+            "market_bias": "bearish_eur",
+            "market_state_note": "Hawkish hold supports near-term USD firmness against EUR.",
+            "watch_condition": None,
             "rationale": "Hawkish hold favors tactical short EUR/USD.",
         },
         {
-            "memory_action": "create",
-            "thesis_id": None,
-            "invalidate_thesis_ids": ["thesis_1"],
-            "status": "active",
-            "narrative": "Warsh Q&A rules out hikes as base case, triggering USD long squeeze and EUR/USD upside reversal.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD falls back below 1.1140"],
-            "confidence": 0.80,
-            "evidence_quote": "Further rate hikes are not our base case and inflation progress continues.",
-            "evidence_role": "support",
             "portfolio_action": "SET_TARGET",
             "target_direction": "long",
             "target_weight": "0.20",
-            "target_thesis_ids": ["__current__"],
+            "strategy_hypothesis": "fundamental_breakout",
+            "market_bias": "bullish_eur",
+            "market_state_note": "Dovish Q&A pivot triggers EUR/USD upside reversal.",
+            "watch_condition": None,
             "rationale": "Dovish Q&A pivot invalidates prior short thesis and justifies reversing long.",
         },
     )
@@ -216,91 +185,30 @@ def test_atomic_thesis_reversal_invalidates_prior_and_creates_new_target(tmp_pat
         assert res1.status == "shadow_recorded"
         snap1 = asyncio.run(mem.snapshot(as_of=now))
         assert len(snap1.theses) == 1
-        first_id = snap1.theses[0].thesis_id
-        assert snap1.theses[0].status == "active"
+        assert snap1.theses[0].thesis_id == "market-state-watch"
+        assert snap1.theses[0].revision == 1
 
         # Fill first short leg
         now = T0 + timedelta(seconds=7)
         assert len(shd.fill_pending(_razor_market("1.11420", now))) == 1
 
-        # Advance to Warsh Q&A at +39m06s and execute atomic reversal
+        # Advance to Warsh Q&A at +39m06s and execute reversal
         now = T0 + timedelta(minutes=39, seconds=6)
         res2 = asyncio.run(runtime.run_cycle(ev2))
         assert res2.status == "shadow_recorded"
         assert res2.decision is not None
         assert res2.decision.target is not None
         assert res2.decision.target.positions[0].weight == Decimal("0.20")
-        second_id = res2.decision.target.positions[0].thesis_ids[0]
-        assert second_id != first_id
 
-        # Check memory snapshot: first_id is invalidated (with ev2 in contradicting_event_ids) and second_id is active!
+        # MarketStateCard rolling record updated cleanly to revision 2
         snap2 = asyncio.run(mem.snapshot(as_of=now))
-        by_id = {t.thesis_id: t for t in snap2.theses}
-        assert by_id[first_id].status == "invalidated"
-        assert by_id[first_id].revision == 2
-        assert ev2.event_id in by_id[first_id].contradicting_event_ids
-        assert by_id[second_id].status == "active"
-        assert by_id[second_id].revision == 1
-        assert ev2.event_id in by_id[second_id].supporting_event_ids
+        assert snap2.theses[0].thesis_id == "market-state-watch"
+        assert snap2.theses[0].revision == 2
 
         # Context JSON exposed max_abs_target_weight = 0.25
         assert client.contexts[-1]["risk_constraints"]["max_abs_target_weight"] == "0.25"
     finally:
         shd.close()
-
-
-def test_atomic_thesis_reversal_rejects_unknown_or_inactive_invalidation_id() -> None:
-    """invalidate_thesis_ids rejects unknown or already invalidated thesis IDs cleanly."""
-    now = T0 + timedelta(seconds=5)
-    ev = Event(
-        event_id="fed:news:1:r1",
-        source="fed_news",
-        source_type="news",
-        source_reference="https://www.federalreserve.gov/1",
-        source_timestamp=T0,
-        received_timestamp=now - timedelta(seconds=1),
-        raw_text="Warsh signals dovish shift on EUR/USD outlook.",
-    )
-    client = _StubModelClient(
-        {
-            "memory_action": "create",
-            "thesis_id": None,
-            "invalidate_thesis_ids": ["thesis_999"],
-            "status": "active",
-            "narrative": "Bullish EUR/USD reversal.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["Below 1.1100"],
-            "confidence": 0.7,
-            "evidence_quote": "Warsh signals dovish shift on EUR/USD outlook.",
-            "evidence_role": "support",
-            "portfolio_action": "SET_TARGET",
-            "target_direction": "long",
-            "target_weight": "0.10",
-            "target_thesis_ids": ["__current__"],
-            "rationale": "Reversal.",
-        }
-    )
-    agent = SinglePassTradingAgent(
-        client,
-        clock=lambda: now,
-        allow_commission_bearing_zero_spread=True,
-    )
-    from eventlens.contracts import MemorySnapshot
-
-    valid_ctx = AgentContext(
-        event=ev,
-        memory=MemorySnapshot(memory_version=0, as_of=now),
-        portfolio=PortfolioSnapshot(
-            snapshot_id="p0",
-            as_of=now,
-            base_currency="USD",
-            equity=Decimal("200"),
-        ),
-        market=_razor_market("1.11500", now),
-        as_of=now,
-    )
-    with pytest.raises(ValueError, match="unknown thesis ID"):
-        asyncio.run(agent.decide(valid_ctx))
 
 
 def test_causal_price_trajectory_summary_and_strict_anti_lookahead(tmp_path: Path) -> None:
@@ -531,37 +439,23 @@ def test_revision_marginal_delta_in_shadow_runner_and_centralbank_dedup(tmp_path
 
         client = _StubModelClient(
             {
-                "memory_action": "none",
-                "thesis_id": None,
-                "invalidate_thesis_ids": [],
-                "status": None,
-                "narrative": None,
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": [],
-                "confidence": None,
-                "evidence_quote": "Policy is well positioned to respond to risks.",
-                "evidence_role": "none",
                 "portfolio_action": "HOLD",
-                "target_direction": None,
-                "target_weight": None,
-                "target_thesis_ids": [],
+                "target_direction": "flat",
+                "target_weight": "0",
+                "strategy_hypothesis": "unspecified",
+                "market_bias": "neutral",
+                "market_state_note": "Wait for Q&A.",
+                "watch_condition": None,
                 "rationale": "Wait for Q&A.",
             },
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "invalidate_thesis_ids": [],
-                "status": "active",
-                "narrative": "Warsh Q&A rules out hikes, lifting EUR/USD.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD below 1.1135"],
-                "confidence": 0.78,
-                "evidence_quote": "Warsh says further rate hikes are not our base case for EUR/USD rates divergence.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.15",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Warsh Q&A rules out hikes, lifting EUR/USD.",
+                "watch_condition": None,
                 "rationale": "Marginal Q&A delta triggers long EUR/USD.",
             },
         )
@@ -601,15 +495,10 @@ def test_revision_marginal_delta_in_shadow_runner_and_centralbank_dedup(tmp_path
         r2_verbatim = client.contexts[1]["current_event_verbatim_text"]
         assert r2_verbatim.startswith("[REVISION r2 MARGINAL UPDATE")
         assert "[FULL UPDATED ARTICLE TEXT]" in r2_verbatim
-        assert resolve_verbatim_quote(
-            r2_verbatim,
-            "Warsh says further rate hikes are not our base case for EUR/USD rates divergence.",
+        assert (
+            "Warsh says further rate hikes are not our base case for EUR/USD rates divergence."
+            in r2_verbatim
         )
-        with pytest.raises(ValueError, match="not adapter metadata tags"):
-            resolve_verbatim_quote(
-                "[INVESTINGLIVE] [Categories: Central Banks]\nSubstantive body",
-                "[INVESTINGLIVE] [Categories: Central Banks]",
-            )
     finally:
         shd.close()
         state_store.close()

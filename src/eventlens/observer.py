@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from pydantic import Field, model_validator
 
-from .contracts import Contract, Identifier, MacroSemantics, Timestamp
+from .contracts import Contract, Event, Identifier, MacroSemantics, Timestamp
 
 Kind = Literal["news", "calendar"]
 Basis = Literal["live_poll", "synthetic_fixture"]
@@ -870,7 +870,7 @@ class ObserverStore:
         kind: Kind,
         source_id: str,
         *,
-        provider: str | None = "wallstreetcn",
+        provider: str | None = None,
         basis: Basis = "live_poll",
         as_of: datetime | None = None,
     ) -> tuple[StoredRevision, ...]:
@@ -1427,3 +1427,120 @@ def evaluate_observer_stream_health(
             }
         )
     return reports
+
+
+class CaptureError(RuntimeError):
+    """Transport/status/size failure; never synthesize an event or retry forever."""
+
+
+def revision_event_id(revision: StoredRevision) -> str:
+    return f"{revision.provider}:{revision.record.kind}:{revision.record.source_id}:r{revision.revision}"
+
+
+def revision_to_event(revision: StoredRevision) -> Event:
+    """Convert a published observer revision into an immutable Event contract."""
+    record = revision.record
+    scheduled_at = record.scheduled_at
+    publication_at: datetime | None = None
+    timestamp_source: str = "unknown"
+    publication_time_status: str = "unknown"
+
+    if record.kind == "calendar":
+        source_time = record.original_published_at or record.scheduled_at or revision.received_at
+        source_type: Literal["news", "macro"] = "macro"
+        if record.original_published_at is not None:
+            publication_at = record.original_published_at
+            timestamp_source = "official_publication"
+            publication_time_status = "verified"
+        elif record.scheduled_at is not None:
+            # Never disguise unknown release publication time as scheduled_at.
+            publication_at = None
+            timestamp_source = "scheduled"
+            publication_time_status = "unknown"
+        else:
+            publication_at = None
+            timestamp_source = "receipt_only"
+            publication_time_status = "unknown"
+    elif revision.revision >= 2:
+        # Never attribute a revised item's modification time to r1's original publisher_display_at.
+        source_time = record.modified_at or revision.received_at
+        source_type = "news"
+        if record.modified_at is not None:
+            publication_at = record.modified_at
+            timestamp_source = "modified"
+            publication_time_status = "estimated"
+        elif record.original_published_at is not None:
+            publication_at = record.original_published_at
+            timestamp_source = "official_publication"
+            publication_time_status = "verified"
+        else:
+            publication_at = None
+            timestamp_source = "receipt_only"
+            publication_time_status = "unknown"
+    else:
+        source_time = (
+            record.original_published_at
+            or record.modified_at
+            or record.publisher_display_at
+            or revision.received_at
+        )
+        source_type = "news"
+        if record.original_published_at is not None:
+            publication_at = record.original_published_at
+            timestamp_source = "official_publication"
+            publication_time_status = "verified"
+        elif record.publisher_display_at is not None:
+            publication_at = record.publisher_display_at
+            timestamp_source = "publisher_display"
+            publication_time_status = "estimated"
+        elif record.modified_at is not None:
+            publication_at = record.modified_at
+            timestamp_source = "modified"
+            publication_time_status = "estimated"
+        else:
+            publication_at = None
+            timestamp_source = "receipt_only"
+            publication_time_status = "unknown"
+    title = record.title.strip()
+    body = record.text.strip()
+    raw_text = f"{title}\n{body}" if title and title not in body else body
+    macro_sem = analyze_macro_semantics(record.title, record.macro, raw_text=raw_text)
+    sched_lag = (
+        (revision.received_at - scheduled_at).total_seconds() if scheduled_at is not None else None
+    )
+    pub_lag = (
+        (revision.received_at - publication_at).total_seconds()
+        if publication_at is not None and publication_time_status != "unknown"
+        else None
+    )
+    delayed_catchup = bool(
+        (
+            sched_lag is not None
+            and sched_lag > 600.0
+            and (revision.poll_gap_seconds is None or revision.poll_gap_seconds > 300.0)
+        )
+        or (
+            pub_lag is not None
+            and pub_lag > 600.0
+            and revision.poll_gap_seconds is not None
+            and revision.poll_gap_seconds > 300.0
+        )
+    )
+    return Event(
+        event_id=revision_event_id(revision),
+        source=f"{revision.provider}_{record.kind}",
+        source_type=source_type,
+        source_reference=record.source_url,
+        source_timestamp=source_time,
+        received_timestamp=revision.available_at,
+        raw_text=raw_text,
+        scheduled_at=scheduled_at,
+        publication_at=publication_at,
+        receipt_at=revision.received_at,
+        available_at=revision.available_at,
+        timestamp_source=timestamp_source,
+        publication_time_status=publication_time_status,
+        poll_gap_seconds=revision.poll_gap_seconds,
+        is_delayed_catchup=delayed_catchup,
+        macro_semantics=macro_sem,
+    )

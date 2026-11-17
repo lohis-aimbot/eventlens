@@ -16,19 +16,14 @@ from typing import Any
 from uuid import UUID
 
 from eventlens.contracts import (
-    AgentContext,
     Event,
     MarketSnapshot,
-    MemorySnapshot,
-    PortfolioSnapshot,
     PriceTrajectorySummary,
     Quote,
     ReviewContext,
-    Thesis,
 )
 from eventlens.deepseek import ModelResponse
 from eventlens.quotes import BridgeQuote, BridgeStart, BridgeStop, QuoteStore
-from eventlens.reasoning import MAX_INPUT_CHARACTERS
 from eventlens.runtime import (
     DeterministicTargetValidator,
     IntradayEventRuntime,
@@ -39,6 +34,7 @@ from eventlens.runtime import (
 from eventlens.sources.ctrader_demo import DirectoryTail
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
+    MAX_INPUT_CHARACTERS,
     SINGLE_PASS_PROMPT_VERSION,
     SINGLE_PASS_SYSTEM_PROMPT,
     SinglePassTradingAgent,
@@ -120,124 +116,6 @@ def _live_market(
             max_gap_30m_seconds=2.5,
         ),
     )
-
-
-def test_context_pruning_prevents_overflow_across_many_verbose_theses_and_keeps_pinned_review() -> (
-    None
-):
-    t0 = datetime(2026, 11, 12, 16, 0, 0, tzinfo=UTC)
-    theses: list[Thesis] = []
-    for idx in range(28):
-        status = "invalidated" if idx % 5 == 0 and idx > 0 else "active"
-        ts = t0 - timedelta(minutes=(30 - idx) * 10)
-        theses.append(
-            Thesis(
-                thesis_id=f"thesis-{idx:02d}",
-                revision=3,
-                status=status,  # type: ignore[arg-type]
-                narrative=(
-                    f"Verbose monitoring thesis #{idx}: ECB/Fed rate differential narrative "
-                    + ("detailed macro commentary " * 45)
-                ),
-                instruments=("EUR/USD",),
-                supporting_event_ids=tuple(f"ev-{idx}-{j}" for j in range(12)),
-                contradicting_event_ids=tuple(f"cev-{idx}-{j}" for j in range(6)),
-                invalidation_conditions=(
-                    "EUR/USD <= 1.15580",
-                    "Qualitative shift in Fed guidance " + ("detail " * 20),
-                ),
-                confidence=0.60,
-                created_at=ts - timedelta(minutes=5),
-                updated_at=ts,
-                review_at=ts + timedelta(hours=1),
-            )
-        )
-
-    # Pin the very oldest active thesis (`thesis-00`) via review_context while also invalidating `thesis-01`
-    review_ctx = ReviewContext(
-        review_id="rev-pin-00",
-        trigger_kind="structured_price_condition",
-        trigger_detail="EUR/USD <= 1.15580 (observed=1.15550)",
-        triggered_at=t0,
-        thesis_id="thesis-00",
-        thesis_revision=3,
-        origin_event_id="ev-origin-00",
-        origin_source="investinglive_fx",
-        origin_source_timestamp=t0 - timedelta(minutes=25),
-        origin_received_timestamp=t0 - timedelta(minutes=25),
-        origin_event_age_seconds=1500.0,
-    )
-    ev = Event(
-        event_id="internal_review:rev-pin-00",
-        source="internal_stateful_review",
-        source_type="internal_review",
-        source_reference="review://thesis-00/r3/structured_price_condition",
-        source_timestamp=t0 - timedelta(minutes=25),
-        received_timestamp=t0 - timedelta(minutes=25),
-        raw_text=(
-            "[INTERNAL STATEFUL REVIEW] trigger=structured_price_condition\n\n"
-            "Fed's Hammack says inflation remains too high and rates may need to stay restrictive."
-        ),
-    )
-
-    def reply_fn(payload: dict[str, Any], _call: int) -> dict[str, Any]:
-        prior = payload["prior_memory_theses_do_not_quote"]
-        prior_ids = [item["thesis_id"] for item in prior]
-        assert "thesis-00" in prior_ids
-        assert len(prior) <= 8
-        assert all(item["status"] == "active" or item["thesis_id"] == "thesis-00" for item in prior)
-        assert all(len(item["supporting_event_ids"]) <= 5 for item in prior)
-        return {
-            "memory_action": "update",
-            "thesis_id": "thesis-00",
-            "status": "active",
-            "narrative": "Downside breakout confirmed below 1.15580 on hawkish Fed stance.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD >= 1.15710", "Dovish Fed pivot"],
-            "confidence": 0.78,
-            "evidence_role": "support",
-            "evidence_quote": "inflation remains too high and rates may need to stay restrictive",
-            "invalidate_thesis_ids": ["thesis-01"],
-            "portfolio_action": "SET_TARGET",
-            "target_direction": "short",
-            "target_weight": "-0.15",
-            "target_thesis_ids": ["__current__"],
-            "strategy_hypothesis": "fundamental_breakout",
-            "cited_evidence_ids": [ev.event_id, payload["market_snapshot"]["snapshot_id"]],
-            "rationale": (
-                "Structured downside breakout confirmed by 1m -2.5 pips, 5m -5.0 pips, and 15m -8.5 pips."
-            ),
-        }
-
-    client = _RecordingClient(reply_fn)
-    agent = SinglePassTradingAgent(
-        client,
-        allow_commission_bearing_zero_spread=True,
-        clock=lambda: t0 + timedelta(milliseconds=100),
-    )
-    ctx = AgentContext(
-        event=ev,
-        memory=MemorySnapshot(memory_version=28, as_of=t0, theses=tuple(theses)),
-        portfolio=PortfolioSnapshot(
-            snapshot_id="port-flat",
-            as_of=t0,
-            base_currency="USD",
-            equity=Decimal("176.10"),
-        ),
-        market=_live_market(t0),
-        as_of=t0,
-        review_context=review_ctx,
-    )
-    res = asyncio.run(agent.decide_with_usage(ctx))
-    assert client.calls == 1
-    assert res.decision.portfolio_action == "SET_TARGET"
-    assert res.decision.target is not None
-    assert res.decision.target.positions[0].weight == Decimal("-0.15")
-    assert res.decision.evidence_verification_status == "verified"
-    # Even though thesis-01 was pruned from the prompt view, full memory lookup still invalidates it cleanly
-    assert len(res.decision.thesis_changes) == 2
-    assert res.decision.thesis_changes[1].thesis.thesis_id == "thesis-01"
-    assert res.decision.thesis_changes[1].thesis.status == "invalidated"
 
 
 def test_12h_quote_rotation_with_smaller_uuid_and_delayed_poll_streams_seamlessly(
@@ -422,44 +300,26 @@ def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_re
         return now_box[0] + timedelta(milliseconds=tick[0])
 
     def handle_llm(payload: dict[str, Any], call_no: int) -> dict[str, Any]:
-        ev_id = payload["event_metadata"]["event_id"]
-        mkt_id = payload["market_snapshot"]["snapshot_id"]
+        del payload
         if call_no == 1:
             return {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Hawkish Fed speech watches 1.15580 downside breakout.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.15580", "Dovish Fed reversal"],
-                "confidence": 0.68,
-                "evidence_role": "support",
-                "evidence_quote": "rates may need to stay restrictive for longer",
                 "portfolio_action": "HOLD",
                 "target_direction": "flat",
                 "target_weight": "0",
-                "target_thesis_ids": [],
                 "strategy_hypothesis": "fundamental_breakout",
-                "cited_evidence_ids": [ev_id, mkt_id],
+                "market_bias": "bearish_eur",
+                "market_state_note": "Hawkish Fed speech watches 1.15580 downside breakout.",
+                "watch_condition": "EUR/USD <= 1.15580",
                 "rationale": "Monitor 15m low 1.15580 for downside breakout confirmation.",
             }
-        prior_id = payload["prior_memory_theses_do_not_quote"][0]["thesis_id"]
         return {
-            "memory_action": "update",
-            "thesis_id": prior_id,
-            "status": "active",
-            "narrative": "Downside breakout below 1.15580 confirmed with short-window momentum.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD >= 1.15720", "Dovish Fed reversal"],
-            "confidence": 0.80,
-            "evidence_role": "support",
-            "evidence_quote": "rates may need to stay restrictive for longer",
             "portfolio_action": "SET_TARGET",
             "target_direction": "short",
             "target_weight": "-0.15",
-            "target_thesis_ids": ["__current__"],
             "strategy_hypothesis": "fundamental_breakout",
-            "cited_evidence_ids": [ev_id, mkt_id],
+            "market_bias": "bearish_eur",
+            "market_state_note": "Downside breakout below 1.15580 confirmed.",
+            "watch_condition": None,
             "rationale": "Breakout below 1.15580 confirmed by 1m -2.5 pips and 5m -5.0 pips.",
         }
 

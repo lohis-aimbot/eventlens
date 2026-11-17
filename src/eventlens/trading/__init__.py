@@ -6,7 +6,6 @@ from .agent import (
     SinglePassProposal,
     SinglePassTradingAgent,
     TradingAgent,
-    resolve_verbatim_quote,
 )
 from .execution import (
     ProtectiveExitPolicy,
@@ -52,6 +51,5 @@ __all__ = [
     "classify_exposure_change",
     "is_in_daily_close_window",
     "quantize_target_quantity_eur",
-    "resolve_verbatim_quote",
     "trading_day_window",
 ]

@@ -195,3 +195,38 @@ class DemoQuoteCollector:
 
 def now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def prune_old_bridge_quote_files(
+    directory: Path,
+    *,
+    now_utc: datetime,
+    retention_hours: float = 48.0,
+    ignored: set[Path] | None = None,
+) -> int:
+    """Delete historical quotes-*.jsonl files older than retention_hours while preserving newest."""
+    resolved = directory.resolve()
+    if not resolved.is_dir():
+        return 0
+    candidates = [p for p in resolved.glob("quotes-*.jsonl") if p.is_file() and not p.is_symlink()]
+    if len(candidates) <= 1:
+        return 0
+    newest = max(candidates, key=lambda p: (_safe_lstat_mtime_ns(p), p.name))
+    cutoff_ts = (utc(now_utc) - timedelta(hours=retention_hours)).timestamp()
+    removed = 0
+    for path in candidates:
+        if path == newest:
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        if st.st_mtime < cutoff_ts:
+            try:
+                path.unlink(missing_ok=True)
+                removed += 1
+                if ignored is not None:
+                    ignored.discard(path)
+            except OSError:
+                continue
+    return removed

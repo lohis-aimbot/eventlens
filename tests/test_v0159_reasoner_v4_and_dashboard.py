@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -36,7 +38,7 @@ from eventlens.dashboard import (
     serve_dashboard,
 )
 from eventlens.deepseek import DeepSeekClient, ModelResponse
-from eventlens.reasoning import MAX_INPUT_CHARACTERS
+from eventlens.quotes import BridgeQuote, BridgeStart, QuoteStore, is_fx_weekend_closed
 from eventlens.runtime import (
     DeterministicTargetValidator,
     IntradayEventRuntime,
@@ -44,9 +46,11 @@ from eventlens.runtime import (
     ShadowRunner,
     SQLiteRuntimeStore,
 )
+from eventlens.sources.ctrader_demo import prune_old_bridge_quote_files
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
     MARKET_STATE_WATCH_THESIS_ID,
+    MAX_INPUT_CHARACTERS,
     SINGLE_PASS_PROMPT_VERSION,
     SinglePassProposal,
     SinglePassTradingAgent,
@@ -483,20 +487,6 @@ def test_single_pass_proposal_normalizes_short_and_long_target_weight_sign() -> 
     )
     assert long_negative.target_weight == Decimal("0.12")
 
-    legacy_inferred = SinglePassProposal.model_validate(
-        {
-            "memory_action": "ignore",
-            "evidence_quote": "Fed signals further tightening",
-            "portfolio_action": None,
-            "target_direction": "short",
-            "target_weight": "0.20",
-            "target_thesis_ids": ["t-1"],
-            "rationale": "Legacy inferred short weight.",
-        }
-    )
-    assert legacy_inferred.portfolio_action == "SET_TARGET"
-    assert legacy_inferred.target_weight == Decimal("-0.20")
-
     with pytest.raises(ValidationError):
         SinglePassProposal(
             portfolio_action="SET_TARGET",
@@ -624,3 +614,154 @@ def test_evaluate_bridge_watchdog_handles_zombie_cbot_stalls_weekend_and_safety_
     )
     assert verdict_refusal.should_restart is False
     assert verdict_refusal.reason == "safety_refusal_halt"
+
+
+def test_is_fx_weekend_closed_and_48h_bridge_and_quote_failure_pruning(tmp_path: Path) -> None:
+    ny = ZoneInfo("America/New_York")
+    assert is_fx_weekend_closed(datetime(2026, 11, 13, 16, 59, tzinfo=ny).astimezone(UTC)) is False
+    assert is_fx_weekend_closed(datetime(2026, 11, 13, 17, 1, tzinfo=ny).astimezone(UTC)) is True
+    assert is_fx_weekend_closed(datetime(2026, 11, 14, 12, 0, tzinfo=ny).astimezone(UTC)) is True
+    assert is_fx_weekend_closed(datetime(2026, 11, 15, 16, 59, tzinfo=ny).astimezone(UTC)) is True
+    assert is_fx_weekend_closed(datetime(2026, 11, 15, 17, 1, tzinfo=ny).astimezone(UTC)) is False
+
+    now = datetime(2026, 11, 17, 14, 0, 0, tzinfo=UTC)
+    bdir = tmp_path / "bridge"
+    bdir.mkdir()
+
+    old_q = bdir / "quotes-00000000-0000-0000-0000-000000000001.jsonl"
+    recent_stopped_q = bdir / "quotes-00000000-0000-0000-0000-000000000002.jsonl"
+    active_q = bdir / "quotes-00000000-0000-0000-0000-000000000003.jsonl"
+    exec_ev = bdir / "execution-events.jsonl"
+
+    old_session = UUID("00000000-0000-0000-0000-000000000001")
+    stopped_session = UUID("00000000-0000-0000-0000-000000000002")
+    active_session = UUID("00000000-0000-0000-0000-000000000003")
+
+    old_q.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "start",
+                "session_id": str(old_session),
+                "account_mode": "demo",
+                "running_mode": "realtime",
+                "symbol": "EURUSD",
+                "started_at": (now - timedelta(hours=72)).isoformat(),
+                "sample_interval_ms": 200,
+                "duration_seconds": 43200,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(old_q, ((now - timedelta(hours=60)).timestamp(),) * 2)
+
+    recent_stopped_q.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "start",
+                "session_id": str(stopped_session),
+                "account_mode": "demo",
+                "running_mode": "realtime",
+                "symbol": "EURUSD",
+                "started_at": (now - timedelta(hours=6)).isoformat(),
+                "sample_interval_ms": 200,
+                "duration_seconds": 43200,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "version": 1,
+                "kind": "stop",
+                "session_id": str(stopped_session),
+                "stopped_at": (now - timedelta(hours=5)).isoformat(),
+                "quotes": 0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.utime(recent_stopped_q, ((now - timedelta(hours=5)).timestamp(),) * 2)
+
+    active_start = BridgeStart(
+        version=1,
+        kind="start",
+        session_id=active_session,
+        account_mode="demo",
+        running_mode="realtime",
+        symbol="EURUSD",
+        started_at=now - timedelta(seconds=30),
+        sample_interval_ms=200,
+        duration_seconds=43200,
+    )
+    active_quote = BridgeQuote(
+        version=1,
+        kind="quote",
+        session_id=active_session,
+        sequence=1,
+        symbol="EURUSD",
+        source_at=now - timedelta(seconds=1),
+        bridge_at=now - timedelta(milliseconds=500),
+        bid=Decimal("1.10000"),
+        ask=Decimal("1.10002"),
+    )
+    active_q.write_text(
+        active_start.model_dump_json() + "\n" + active_quote.model_dump_json() + "\n",
+        encoding="utf-8",
+    )
+    os.utime(active_q, ((now - timedelta(seconds=1)).timestamp(),) * 2)
+
+    exec_ev.write_text('{"kind":"reconcile_snapshot"}\n', encoding="utf-8")
+    os.utime(exec_ev, ((now - timedelta(hours=72)).timestamp(),) * 2)
+
+    # 1. Prune files >48h directly, preserving recent, newest, and execution-events.jsonl
+    deleted = prune_old_bridge_quote_files(bdir, now_utc=now, retention_hours=48.0)
+    assert deleted == 1
+    assert not old_q.exists()
+    assert recent_stopped_q.exists()
+    assert active_q.exists()
+    assert exec_ev.exists()
+
+    # 2. QuoteStore.prune_old_failures deletes >48h rows and preserves recent rows
+    qstore = QuoteStore(tmp_path / "quotes.sqlite", clock=lambda: now)
+    mem = SQLiteThesisMemory(tmp_path / "mem.sqlite", clock=lambda: now, allow_targets=True)
+    ledger = SQLiteShadowLedger(tmp_path / "shd.sqlite", clock=lambda: now)
+    try:
+        qstore.failure(now - timedelta(hours=72), "stale_failure", "{}")
+        qstore.failure(now - timedelta(hours=2), "recent_failure", "{}")
+        removed_failures = qstore.prune_old_failures(before=now - timedelta(hours=48))
+        assert removed_failures == 1
+        rem_rows = qstore.db.execute("SELECT reason FROM quote_failures").fetchall()
+        assert [r["reason"] for r in rem_rows] == ["recent_failure"]
+
+        # 3. ShadowRunner.__init__ attaches cleanly to active_q via bounded read
+        runtime = IntradayEventRuntime(
+            memory=mem,
+            portfolio_state=ledger,
+            market_provider=lambda ts: MarketSnapshot(snapshot_id="m0", as_of=ts, quotes=()),
+            agent=SinglePassTradingAgent(
+                DeepSeekClient(api_key="test-key", model="deepseek-reasoner"), clock=lambda: now
+            ),
+            target_validator=DeterministicTargetValidator(),
+            risk_engine=DeterministicHardRiskEngine(clock=lambda: now),
+            shadow_executor=ledger,
+            clock=lambda: now,
+        )
+        runner = ShadowRunner(
+            runtime=runtime,
+            ledger=ledger,
+            quote_store=qstore,
+            quote_bridge_dir=bdir,
+            clock=lambda: now,
+        )
+        assert runner._quote_collector is not None
+        assert runner._quote_collector.session is not None
+        assert runner._quote_collector.session.session_id == active_session
+        assert runner._quote_tail is not None
+        assert active_q.resolve() in runner._quote_tail.files
+        assert qstore.latest("EURUSD", now) is not None
+    finally:
+        ledger.close()
+        qstore.close()

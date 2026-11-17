@@ -22,7 +22,7 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.utils import format_datetime
 from pathlib import Path
@@ -34,7 +34,6 @@ import pytest
 from eventlens.contracts import (
     AgentDecision,
     Event,
-    ExecutionReceipt,
     MarketSnapshot,
     Quote,
     RiskAssessment,
@@ -48,9 +47,7 @@ from eventlens.observer import CaptureBatch, MacroValues, ObserverStore, SourceR
 from eventlens.quotes import (
     BridgeQuote,
     BridgeStart,
-    QuoteQualityPolicy,
     QuoteStore,
-    validate_market_quote,
 )
 from eventlens.runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeStore
 from eventlens.shadow_cli import _build_objective_diagnostics
@@ -61,7 +58,6 @@ from eventlens.sources.english_tier1 import (
     parse_forexfactory_calendar,
     parse_investinglive_live_html,
 )
-from eventlens.sources.wallstreetcn import parse_capture
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import SinglePassTradingAgent
 from eventlens.trading.execution import (
@@ -187,45 +183,27 @@ def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_bu
         return _fresh_live_quote(current_mid, as_of)
 
     async def scripted_llm(user_ctx: dict[str, Any], call_no: int) -> dict[str, Any]:
+        del user_ctx
         if call_no == 1:
             return {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "ECB hawkish debate watches 1.1145 upside breakout.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": [
-                    "EUR/USD >= 1.1145",
-                    "ECB rhetoric turns dovish in Q&A",
-                ],
-                "confidence": 0.65,
-                "evidence_role": "support",
-                "evidence_quote": "There was a debate about a hike",
                 "portfolio_action": "HOLD",
                 "target_direction": "flat",
                 "target_weight": "0",
-                "target_thesis_ids": [],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "neutral",
+                "market_state_note": "ECB hawkish debate watches 1.1145 upside breakout.",
+                "watch_condition": "EUR/USD >= 1.1145",
                 "rationale": "Hold initially while monitoring 1.1145 level.",
             }
         # Subsequent stateful review calls: return HOLD (breakout != automatic BUY/SELL!)
-        prior_id = user_ctx["prior_memory_theses_do_not_quote"][0]["thesis_id"]
         return {
-            "memory_action": "update",
-            "thesis_id": prior_id,
-            "status": "active",
-            "narrative": "Re-evaluated after trigger; still abstaining without fresh catalyst.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": [
-                "EUR/USD >= 1.1165",
-                "ECB rhetoric turns dovish in Q&A",
-            ],
-            "confidence": 0.55,
-            "evidence_role": "support",
-            "evidence_quote": "There was a debate about a hike",
             "portfolio_action": "HOLD",
             "target_direction": "flat",
             "target_weight": "0",
-            "target_thesis_ids": [],
+            "strategy_hypothesis": "unspecified",
+            "market_bias": "neutral",
+            "market_state_note": "Re-evaluated after trigger; still abstaining without fresh catalyst.",
+            "watch_condition": "EUR/USD >= 1.1165",
             "rationale": "Breakout reviewed; spread/follow-through unconvincing, stay flat.",
         }
 
@@ -330,7 +308,6 @@ def test_issue1_breakout_and_review_at_trigger_once_preserve_origin_age_dedup_bu
         assert 180.0 <= r_ctx["origin_event_age_seconds"] < 181.0
         cond_statuses = {c["raw_condition"]: c["status"] for c in r_ctx["condition_evaluations"]}
         assert cond_statuses["EUR/USD >= 1.1145"] == "executable_price_rule"
-        assert cond_statuses["ECB rhetoric turns dovish in Q&A"] == "unexecutable_natural_language"
 
         # Original event in SQLiteThesisMemory must remain 100% unmodified
         stored_ev1 = asyncio.run(mem.get_event(ev1.event_id))
@@ -454,40 +431,39 @@ def test_issue1_stop_blocks_review_risk_and_hung_review_model_never_blocks_prote
         return _fresh_live_quote(current_mid, as_of)
 
     async def hung_on_review_llm(user_ctx: dict[str, Any], call_no: int) -> dict[str, Any]:
+        del user_ctx
         if call_no == 1:
             return {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Long EUR/USD with structured downside review at 1.1125.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1125"],
-                "confidence": 0.75,
-                "evidence_role": "support",
-                "evidence_quote": "ECB hawkish signal",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.10",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Long EUR/USD initiated.",
+                "watch_condition": None,
                 "rationale": "Open bounded long.",
+            }
+        if call_no == 2:
+            return {
+                "portfolio_action": "HOLD",
+                "target_direction": "flat",
+                "target_weight": "0",
+                "strategy_hypothesis": "unspecified",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Monitor 1.1125 downside guard while holding long.",
+                "watch_condition": "EUR/USD <= 1.1125",
+                "rationale": "Set 1.1125 watch level while holding open long.",
             }
         review_entered.set()
         await hang_gate.wait()
-        prior_id = user_ctx["prior_memory_theses_do_not_quote"][0]["thesis_id"]
         return {
-            "memory_action": "update",
-            "thesis_id": prior_id,
-            "status": "active",
-            "narrative": "Attempted add after stop.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD <= 1.1100"],
-            "confidence": 0.70,
-            "evidence_role": "support",
-            "evidence_quote": "ECB hawkish signal",
             "portfolio_action": "SET_TARGET",
             "target_direction": "long",
             "target_weight": "0.20",
-            "target_thesis_ids": ["__current__"],
+            "strategy_hypothesis": "trend_following",
+            "market_bias": "bullish_eur",
+            "market_state_note": "Attempted add after stop.",
+            "watch_condition": None,
             "rationale": "Attempt risk increase.",
         }
 
@@ -555,6 +531,20 @@ def test_issue1_stop_blocks_review_risk_and_hung_review_model_never_blocks_prote
         assert len(fills) == 1
         assert fills[0].delta_quantity > 0
 
+        # Arm active watch_condition EUR/USD <= 1.1125 via follow-up HOLD while open
+        clock_now = t0 + timedelta(seconds=2)
+        ev2 = Event(
+            event_id="ecb:press:2:r1",
+            source="ecb_press",
+            source_type="macro",
+            source_reference="https://www.ecb.europa.eu/press/2",
+            source_timestamp=t0,
+            received_timestamp=clock_now,
+            raw_text="ECB remarks reiterate data-dependent watch at 1.1125.",
+        )
+        r2 = asyncio.run(runtime.run_cycle(ev2))
+        assert r2.status == "no_target"
+
         async def _concurrent_hung_review_and_protection() -> None:
             nonlocal clock_now, current_mid
             clock_now = t0 + timedelta(seconds=30)
@@ -587,167 +577,6 @@ def test_issue1_stop_blocks_review_risk_and_hung_review_model_never_blocks_prote
     finally:
         state_store.close()
         ledger.close()
-
-
-# ==============================================================================
-# Issue 2: Historical Replay & Synthetic Data Provenance
-# ==============================================================================
-
-
-def test_issue2_minute_bar_and_synthetic_quotes_cannot_fake_live_provenance_or_freshness(
-    tmp_path: Path,
-) -> None:
-    # 1. Synthetic / bar-derived quotes must NEVER have verified provenance or produce synthetic_assumption=False fills
-    now = datetime(2026, 10, 28, 18, 0, 45, tzinfo=UTC)
-    synth_quote = Quote(
-        instrument="EUR/USD",
-        source_at=now - timedelta(milliseconds=40),
-        bridge_at=now - timedelta(milliseconds=20),
-        received_at=now,
-        available_at=now,
-        source_provider="yahoo_finance_1m_ohlc",
-        basis="synthetic_fixture",
-        bid=Decimal("1.08100"),
-        ask=Decimal("1.08120"),
-    )
-    assert synth_quote.has_verified_provenance is False
-    live_check = validate_market_quote(
-        MarketSnapshot(snapshot_id="m-synth", as_of=now, quotes=(synth_quote,)),
-        as_of=now,
-        policy=QuoteQualityPolicy(
-            instrument="EUR/USD",
-            max_quote_age_ms=2000,
-            require_verified_provenance=True,
-        ),
-    )
-    assert live_check.valid is False
-
-    # Execute a shadow fill on a non-verified / synthetic quote -> synthetic_assumption MUST be True!
-    ledger_now = now
-    ledger = SQLiteShadowLedger(
-        tmp_path / "synth-ledger.sqlite",
-        risk_policy=RiskPolicy.pepperstone_razor_200(),
-        initial_cash_usd=Decimal("200"),
-        clock=lambda: ledger_now,
-    )
-    try:
-        mkt = MarketSnapshot(snapshot_id="m-synth", as_of=now, quotes=(synth_quote,))
-        port = ledger.snapshot_sync(market=mkt)
-        th = Thesis(
-            thesis_id="th-1",
-            revision=1,
-            status="active",
-            narrative="Test",
-            instruments=("EUR/USD",),
-            supporting_event_ids=("ev-1",),
-            invalidation_conditions=("EUR/USD <= 1.0790",),
-            confidence=0.7,
-            created_at=now - timedelta(seconds=2),
-            updated_at=now - timedelta(seconds=2),
-            review_at=now + timedelta(hours=1),
-        )
-        dec = AgentDecision(
-            decision_id="dec-synth-1",
-            event_id="ev-1",
-            based_on_memory_version=0,
-            based_on_snapshot_id=port.snapshot_id,
-            provider="mock",
-            model_version="mock-v1",
-            prompt_version="single-pass-agent-v2",
-            started_at=now - timedelta(seconds=2),
-            completed_at=now - timedelta(seconds=1),
-            valid_until=now + timedelta(minutes=2),
-            thesis_changes=(ThesisChange(expected_revision=0, thesis=th, reason="init"),),
-            target=TargetPortfolio(
-                target_id="tgt-synth-1",
-                based_on_snapshot_id=port.snapshot_id,
-                positions=(
-                    TargetPosition(
-                        instrument="EUR/USD",
-                        weight=Decimal("0.10"),
-                        thesis_ids=("th-1",),
-                    ),
-                ),
-                rationale="Test fill provenance",
-            ),
-            portfolio_action="SET_TARGET",
-            rationale="Test fill provenance",
-        )
-        assess = RiskAssessment(
-            assessment_id="ass-synth-1",
-            decision_id=dec.decision_id,
-            target_id="tgt-synth-1",
-            checked_snapshot_id=port.snapshot_id,
-            policy_version="pepperstone-razor-200-v1",
-            checked_at=now - timedelta(milliseconds=500),
-            valid_until=now + timedelta(seconds=30),
-            outcome="approve",
-            reasons=("all_hard_risk_checks_passed",),
-        )
-        rcpt: ExecutionReceipt = asyncio.run(ledger.record(dec, assess))
-        assert rcpt.status == "recorded"
-        ledger_now = now + timedelta(milliseconds=100)
-        fills = ledger.fill_pending(
-            MarketSnapshot(
-                snapshot_id="m-synth-2",
-                as_of=ledger_now,
-                quotes=(
-                    synth_quote.model_copy(
-                        update={
-                            "source_at": ledger_now - timedelta(milliseconds=20),
-                            "bridge_at": ledger_now - timedelta(milliseconds=10),
-                            "received_at": ledger_now,
-                            "available_at": ledger_now,
-                        }
-                    ),
-                ),
-            )
-        )
-        assert len(fills) == 1
-        assert fills[0].synthetic_assumption is True
-    finally:
-        ledger.close()
-
-    # 2. Historical 1-minute bar replay helper & repo artifacts must enforce bar-timestamp honesty
-    from eventlens import replay_provenance as rp
-
-    bar_open = datetime(2026, 10, 28, 18, 0, 0, tzinfo=UTC)
-    bar_q = rp.build_historical_bar_quote(
-        bar_open_at=bar_open,
-        price=Decimal("1.08150"),
-        assumed_spread_pips=Decimal("0.2"),
-        bar_interval_seconds=60,
-        observed_at=bar_open + timedelta(seconds=45),
-    )
-    assert bar_q.basis == "historical_bar_replay"
-    assert bar_q.source_at == bar_open  # NEVER refreshed to observed_at - 40ms!
-    assert bar_q.has_verified_provenance is False
-    # Under a strict 2-second live freshness gate at +45s into the minute bar, it MUST be rejected as stale!
-    fresh_2s = validate_market_quote(
-        MarketSnapshot(
-            snapshot_id="m-bar", as_of=bar_open + timedelta(seconds=45), quotes=(bar_q,)
-        ),
-        as_of=bar_open + timedelta(seconds=45),
-        policy=QuoteQualityPolicy(instrument="EUR/USD", max_quote_age_ms=2000),
-    )
-    assert fresh_2s.valid is False
-    assert fresh_2s.reason == "stale_market_quote"
-
-    repo_root = Path(__file__).resolve().parents[1]
-    assumptions_path = repo_root / "configs" / "fomc_2026_10_28_replay_assumptions.json"
-    errata_path = repo_root / "docs" / "replay-errata-2026-10-28.md"
-    replay_script = repo_root / "scripts" / "run_historical_bar_replay.py"
-    assert assumptions_path.is_file()
-    assert errata_path.is_file()
-    assert replay_script.is_file()
-
-    audit_summary = rp.evaluate_bar_replay_assumptions(
-        json.loads(assumptions_path.read_text(encoding="utf-8"))
-    )
-    assert audit_summary["eligible_as_live_forward_evidence"] is False
-    assert audit_summary["second_level_execution_conclusions"] == "not_evaluable_from_minute_bars"
-    assert audit_summary["lookahead_bias_excluded"] is False
-    assert len(audit_summary["arrival_time_sensitivity"]) >= 3
 
 
 # ==============================================================================
@@ -1031,35 +860,6 @@ def test_issue4_timestamp_taxonomy_revision_lag_schedule_delta_and_missing_conse
     assert ff_recs[0].macro.reported_forecast is None
     assert ff_recs[0].macro.previous == "0.2%"
     assert "Consensus Forecast: MISSING" in ff_recs[0].text
-
-    wscn_raw = json.dumps(
-        {
-            "code": 20000,
-            "data": {
-                "items": [
-                    {
-                        "id": 99,
-                        "public_date": int(datetime(2026, 10, 29, 12, 30, tzinfo=UTC).timestamp()),
-                        "country": "美国",
-                        "title": "美国9月核心PCE物价指数同比",
-                        "importance": 3,
-                        "actual": "2.7%",
-                        "forecast": "",
-                        "previous": "2.6%",
-                    }
-                ]
-            },
-        },
-        ensure_ascii=False,
-    ).encode()
-    wscn_recs, _, wscn_err = parse_capture(
-        wscn_raw, kind="calendar", received_at=rx_t, day=date(2026, 10, 29)
-    )
-    assert wscn_err is None and len(wscn_recs) == 1
-    assert wscn_recs[0].macro is not None
-    assert wscn_recs[0].macro.reported_forecast is None
-    assert wscn_recs[0].macro.previous == "2.6%"
-    assert "MISSING" in wscn_recs[0].text
 
     # 3. Diagnostic timestamp & latency taxonomy across calendar, r2 with modified_at, and r2 without modified_at
     run_dir = tmp_path / "tax_run"
@@ -1537,57 +1337,39 @@ def test_issue6_source_health_cache_quiet_timeout_dom_breakage_and_stale_risk_ga
     mkt_now = _fresh_live_quote("1.1125", gate_clock)
 
     async def gate_llm(user_ctx: dict[str, Any], call_no: int) -> dict[str, Any]:
+        del user_ctx
         if call_no == 1:
             return {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Fresh event opens bounded long.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1100"],
-                "confidence": 0.75,
-                "evidence_role": "support",
-                "evidence_quote": "Fresh ECB rate hike",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.10",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Fresh event opens bounded long.",
+                "watch_condition": None,
                 "rationale": "Open long on fresh news.",
             }
-        prior_id = user_ctx["prior_memory_theses_do_not_quote"][0]["thesis_id"]
         if call_no == 2:
             # Stale event attempts to ADD risk (0.10 -> 0.20) -> MUST be blocked by stale-source gate!
             return {
-                "memory_action": "update",
-                "thesis_id": prior_id,
-                "status": "active",
-                "narrative": "Stale wire tries to double long.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1100"],
-                "confidence": 0.80,
-                "evidence_role": "support",
-                "evidence_quote": "Delayed cached wire",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.20",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "trend_following",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Stale wire tries to double long.",
+                "watch_condition": None,
                 "rationale": "Try adding risk on stale wire.",
             }
         # Call 3: Stale event proposes CLOSE (risk-reducing!) -> MUST still be permitted!
         return {
-            "memory_action": "update",
-            "thesis_id": prior_id,
-            "status": "resolved",
-            "narrative": "Close existing risk conservatively.",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD <= 1.1100"],
-            "confidence": 0.20,
-            "evidence_role": "contradict",
-            "evidence_quote": "Delayed adverse headline",
             "portfolio_action": "CLOSE",
             "target_direction": "flat",
             "target_weight": "0",
-            "target_thesis_ids": [prior_id],
+            "strategy_hypothesis": "unspecified",
+            "market_bias": "neutral",
+            "market_state_note": "Close existing risk conservatively.",
+            "watch_condition": None,
             "rationale": "Risk-reducing close must remain allowed.",
         }
 

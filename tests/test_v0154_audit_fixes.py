@@ -110,31 +110,14 @@ class _RecordingBundleModelClient:
     async def complete_json(self, *, system: str, user: str) -> ModelResponse:
         self.calls += 1
         self.user_prompts.append(user)
-        ctx = json.loads(user)
-        raw_text: str = ctx["current_event_verbatim_text"]
-        if self._quote_chooser is not None:
-            ev_quote = self._quote_chooser(raw_text)
-        else:
-            first_non_empty = [
-                line.strip()
-                for line in raw_text.splitlines()
-                if line.strip() and not line.strip().startswith(("[", "---", "Structured Values"))
-            ][0]
-            ev_quote = first_non_empty[:120]
         payload = {
-            "memory_action": "create",
-            "thesis_id": None,
-            "status": "active",
-            "narrative": f"USD macro impulse #{self.calls} weighs on EUR/USD",
-            "instruments": ["EUR/USD"],
-            "invalidation_conditions": ["EUR/USD breaks above 1.1180"],
-            "confidence": 0.74,
-            "evidence_quote": ev_quote,
-            "evidence_role": "support",
             "portfolio_action": "SET_TARGET",
             "target_direction": "short",
             "target_weight": "-0.20",
-            "target_thesis_ids": ["__current__"],
+            "strategy_hypothesis": "fundamental_breakout",
+            "market_bias": "bearish_eur",
+            "market_state_note": f"USD macro impulse #{self.calls} weighs on EUR/USD",
+            "watch_condition": None,
             "rationale": "Macro release beat supports tactical short EUR/USD",
         }
         return ModelResponse(

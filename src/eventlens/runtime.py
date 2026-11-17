@@ -34,10 +34,14 @@ from .contracts import (
     Thesis,
 )
 from .memory import ThesisMemory
-from .observer import Basis, ObserverStore, evaluate_observer_stream_health
-from .quotes import QuoteStore, build_market_snapshot, validate_market_quote
+from .observer import Basis, CaptureError, ObserverStore, evaluate_observer_stream_health
+from .quotes import (
+    QuoteStore,
+    build_market_snapshot,
+    is_fx_weekend_closed,
+    validate_market_quote,
+)
 from .sources.events import EventFilter
-from .sources.wallstreetcn import CaptureError, WallStreetCNFilter, WallStreetCNSource
 from .trading.agent import (
     QuoteUnavailableForDecisionError,
     SinglePassTradingAgent,
@@ -2552,12 +2556,9 @@ class ShadowRunner:
         observer_store: ObserverStore | None = None,
         quote_store: QuoteStore | None = None,
         quote_bridge_dir: Path | None = None,
-        ctrader_openapi_streamer: Any = None,
-        ctrader_demo_mirror: bool = False,
         ctrader_cli_demo_adapter: Any = None,
         enforce_fx_weekend_pause: bool = False,
         news_source: Any = None,
-        supplemental_calendar_source: WallStreetCNSource | None = None,
         basis: Basis = "live_poll",
         poll_news: bool = False,
         allow_baseline_revisions: bool = True,
@@ -2581,29 +2582,14 @@ class ShadowRunner:
         review_policy: ReviewPolicy = ReviewPolicy(),
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        if ctrader_demo_mirror:
-            from .ctrader_openapi import (
-                DEMO_EXECUTION_UNAVAILABLE,
-                CTraderDemoExecutionUnavailableError,
-            )
-
-            raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
         self.runtime = runtime
         self.ledger = ledger
         self.observer_store = observer_store
         self.quote_store = quote_store
         self.quote_bridge_dir = quote_bridge_dir
-        self.ctrader_openapi_streamer = ctrader_openapi_streamer
-        self.ctrader_demo_mirror = ctrader_demo_mirror
         self.ctrader_cli_demo_adapter = ctrader_cli_demo_adapter
         self.enforce_fx_weekend_pause = enforce_fx_weekend_pause
-        if (
-            self.ctrader_openapi_streamer is not None
-            and getattr(self.ctrader_openapi_streamer, "on_quote_published", None) is None
-        ):
-            self.ctrader_openapi_streamer.on_quote_published = self._event_wakeup_safe
         self.news_source = news_source
-        self.supplemental_calendar_source = supplemental_calendar_source
         self.basis: Basis = basis
         self.poll_news = poll_news
         self.allow_baseline_revisions = allow_baseline_revisions
@@ -2630,7 +2616,6 @@ class ShadowRunner:
             else (
                 quote_store is not None
                 or quote_bridge_dir is not None
-                or ctrader_openapi_streamer is not None
                 or ctrader_cli_demo_adapter is not None
             )
         )
@@ -2664,11 +2649,18 @@ class ShadowRunner:
             "stop": 0,
             "rejected": 0,
         }
+        self._last_bridge_prune_at: datetime | None = None
         if self.quote_bridge_dir is not None and self.quote_store is not None:
             from .quotes import BridgeQuote, BridgeStart
-            from .sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
+            from .sources.ctrader_demo import (
+                DemoQuoteCollector,
+                DirectoryTail,
+                prune_old_bridge_quote_files,
+            )
 
             now_init = _utc(self.clock())
+            prune_old_bridge_quote_files(self.quote_bridge_dir, now_utc=now_init)
+            self._last_bridge_prune_at = now_init
             self._quote_tail = DirectoryTail(self.quote_bridge_dir)
             self._quote_collector = DemoQuoteCollector(
                 self.quote_store,
@@ -2697,6 +2689,28 @@ class ShadowRunner:
             self.runtime.portfolio_state = self.demo_execution_engine
             self.runtime.shadow_executor = self.demo_execution_engine
 
+    @staticmethod
+    def _read_bridge_head_and_tail(
+        path: Path, size: int
+    ) -> tuple[bytes, bytes, int, list[bytes], bytes] | None:
+        with path.open("rb") as fh:
+            head = fh.read(8192)
+            first_nl = head.find(b"\n")
+            if first_nl < 0:
+                return None
+            first_line = head[:first_nl]
+            tail_offset = max(0, size - 65536)
+            fh.seek(tail_offset)
+            tail_bytes = fh.read(65536)
+        last_nl = tail_bytes.rfind(b"\n")
+        complete_tail = tail_bytes[:last_nl] if last_nl >= 0 else b""
+        remainder = tail_bytes[last_nl + 1 :] if last_nl >= 0 else tail_bytes
+        tail_lines = complete_tail.split(b"\n") if complete_tail else []
+        if tail_offset > 0 and tail_lines:
+            tail_lines = tail_lines[1:]
+        consumed_offset = tail_offset + last_nl + 1 if last_nl >= 0 else tail_offset
+        return first_line, remainder, consumed_offset, tail_lines, complete_tail
+
     def _attach_active_bridge_session(
         self, now: datetime, start_cls: Any, quote_cls: Any = None
     ) -> None:
@@ -2715,51 +2729,48 @@ class ShadowRunner:
         if not candidates:
             return
         newest: Path | None = None
+        newest_stat: Any = None
+        newest_info: tuple[bytes, bytes, int, list[bytes], bytes] | None = None
         for cand in candidates:
             try:
-                cand_lines = cand.read_bytes().split(b"\n")
-                cand_lines.pop()
-                if not cand_lines:
+                st = cand.stat()
+                info = self._read_bridge_head_and_tail(cand, st.st_size)
+                if info is None:
                     continue
-                if json.loads(cand_lines[0].decode("utf-8")).get("kind") != "start":
+                first_line, _, _, tail_lines, _ = info
+                if json.loads(first_line.decode("utf-8")).get("kind") != "start":
                     continue
                 if any(
-                    json.loads(ln.decode("utf-8")).get("kind") == "stop" for ln in cand_lines if ln
+                    b'"stop"' in ln and json.loads(ln.decode("utf-8")).get("kind") == "stop"
+                    for ln in tail_lines
+                    if ln
                 ):
                     continue
                 newest = cand
+                newest_stat = st
+                newest_info = info
                 break
             except Exception:
                 continue
-        if newest is None:
+        if newest is None or newest_stat is None or newest_info is None:
             return
         try:
-            stat = newest.stat()
-            raw_bytes = newest.read_bytes()
-            lines = raw_bytes.split(b"\n")
-            remainder = lines.pop()
-            if not lines:
-                return
-            first_obj = json.loads(lines[0].decode("utf-8"))
-            if first_obj.get("kind") != "start":
-                return
-            if any(json.loads(ln.decode("utf-8")).get("kind") == "stop" for ln in lines if ln):
-                return
+            first_line, remainder, consumed_offset, tail_lines, _ = newest_info
+            first_obj = json.loads(first_line.decode("utf-8"))
             start_item = start_cls.model_validate(first_obj)
             if now > start_item.started_at + timedelta(seconds=start_item.duration_seconds):
                 return
             self._quote_tail.ignored.discard(newest)
-            consumed_offset = len(raw_bytes) - len(remainder)
-            self._quote_tail.files[newest] = (stat.st_ino, consumed_offset, remainder)
+            self._quote_tail.files[newest] = (newest_stat.st_ino, consumed_offset, remainder)
             already_exists = self.quote_store.has_session(str(start_item.session_id))
             if not already_exists:
                 self.quote_store.start(start_item, now, basis="live_poll")
                 self._quote_bridge_counts["start"] += 1
             self._quote_collector.session = start_item
             self._quote_collector.stopped = False
-            if quote_cls is not None and len(lines) > 1:
+            if quote_cls is not None and tail_lines:
                 last_seq = self.quote_store.last_sequence(str(start_item.session_id))
-                for raw_ln_b in lines[1:]:
+                for raw_ln_b in tail_lines:
                     if not raw_ln_b:
                         continue
                     raw_ln = raw_ln_b.decode("utf-8")
@@ -2777,24 +2788,6 @@ class ShadowRunner:
         except Exception as exc:
             logger.warning("attach_active_bridge_session_skipped: %s", exc)
 
-    def _event_wakeup_safe(self) -> None:
-        try:
-            self._event_wakeup.set()
-        except Exception:
-            pass
-
-    async def _mirror_demo_fills(self, fills: Sequence[ShadowFill]) -> None:
-        # Defense in depth if a caller mutates the disabled flag after startup.
-        # Never record an accepted request as a fill or infer broker flatness
-        # from the local Shadow ledger.
-        if self.ctrader_demo_mirror:
-            from .ctrader_openapi import (
-                DEMO_EXECUTION_UNAVAILABLE,
-                CTraderDemoExecutionUnavailableError,
-            )
-
-            raise CTraderDemoExecutionUnavailableError(DEMO_EXECUTION_UNAVAILABLE)
-
     def _active_stop_reason(self, now: datetime | None = None) -> str | None:
         check_now = _utc(now or self.clock())
         if self._stop_reason is not None:
@@ -2807,11 +2800,8 @@ class ShadowRunner:
                 return f"demo_broker_reconcile_halted:{halted}"
             if bool(getattr(self.ctrader_cli_demo_adapter, "manual_unlock_required", False)):
                 return "demo_broker_manual_unlock_required"
-        if self.enforce_fx_weekend_pause:
-            from .ctrader_openapi import is_fx_weekend_closed
-
-            if is_fx_weekend_closed(check_now):
-                return "fx_weekend_market_closed"
+        if self.enforce_fx_weekend_pause and is_fx_weekend_closed(check_now):
+            return "fx_weekend_market_closed"
         required_window = float(self.ledger.exit_policy.max_holding_seconds) + float(
             self.exit_buffer_seconds
         )
@@ -2888,13 +2878,27 @@ class ShadowRunner:
         if self._quote_tail is None or self._quote_collector is None:
             return
         with self._quote_bridge_lock:
+            now_poll = _utc(self.clock())
             for raw in self._quote_tail.poll():
                 outcome = self._quote_collector.accept(raw, _utc(self.clock()))
                 self._quote_bridge_counts[outcome] = self._quote_bridge_counts.get(outcome, 0) + 1
             if self._quote_collector.session is None or self._quote_collector.stopped:
                 from .quotes import BridgeQuote, BridgeStart
 
-                self._attach_active_bridge_session(_utc(self.clock()), BridgeStart, BridgeQuote)
+                self._attach_active_bridge_session(now_poll, BridgeStart, BridgeQuote)
+            if (
+                self.quote_bridge_dir is not None
+                and self._last_bridge_prune_at is not None
+                and (now_poll - self._last_bridge_prune_at) >= timedelta(seconds=3600)
+            ):
+                from .sources.ctrader_demo import prune_old_bridge_quote_files
+
+                prune_old_bridge_quote_files(
+                    self.quote_bridge_dir,
+                    now_utc=now_poll,
+                    ignored=self._quote_tail.ignored,
+                )
+                self._last_bridge_prune_at = now_poll
 
     def _current_market(self) -> MarketSnapshot:
         self._poll_quote_bridge_sync()
@@ -2950,7 +2954,6 @@ class ShadowRunner:
                 )
                 self.runtime.state_store.append_audit(rec)
                 await self.runtime.audit_sink.append(rec)
-        await self._mirror_demo_fills((*exit_fills, *target_fills))
         return exit_fills, target_fills
 
     def _record_protection_check(
@@ -3112,7 +3115,6 @@ class ShadowRunner:
                 )
                 self.runtime.state_store.append_audit(rec)
                 await self.runtime.audit_sink.append(rec)
-        await self._mirror_demo_fills(exit_fills)
         if self.ctrader_cli_demo_adapter is not None:
             await asyncio.to_thread(self.ctrader_cli_demo_adapter.reconcile)
         return expired, exit_fills
@@ -3122,13 +3124,13 @@ class ShadowRunner:
         if self.observer_store is None:
             return ()
         ostore = self.observer_store
+        from .observer import revision_event_id
         from .sources.english_tier1 import (
             EURUSDEventFilter,
             EventBundle,
             bundle_simultaneous_events,
             format_revision_marginal_delta,
         )
-        from .sources.wallstreetcn import revision_event_id
 
         now = _utc(self.clock())
 
@@ -3164,7 +3166,7 @@ class ShadowRunner:
         )
         active_filter = (
             self.runtime.event_filter
-            if isinstance(self.runtime.event_filter, WallStreetCNFilter)
+            if isinstance(self.runtime.event_filter, EURUSDEventFilter)
             else EURUSDEventFilter(clock=self.clock)
         )
         eligible_pairs: list[tuple[Any, Event]] = []
@@ -3793,7 +3795,6 @@ class ShadowRunner:
 
             obs_store = self.observer_store
             active_poll_tasks: set[asyncio.Task[Any]] = set()
-            supplemental_in_flight = False
 
             async def _poll_primary() -> None:
                 if hasattr(self.news_source, "poll_due_streams"):
@@ -3830,27 +3831,6 @@ class ShadowRunner:
                                 str(exc),
                             )
 
-            async def _poll_supplemental() -> None:
-                nonlocal supplemental_in_flight
-                if self.supplemental_calendar_source is None or supplemental_in_flight:
-                    return
-                supplemental_in_flight = True
-                try:
-                    cal_batch = await self.supplemental_calendar_source.fetch("calendar", limit=25)
-                    await asyncio.to_thread(obs_store.record, cal_batch)
-                    self._event_wakeup.set()
-                except asyncio.CancelledError:
-                    raise
-                except (CaptureError, Exception) as exc:
-                    await asyncio.to_thread(
-                        obs_store.failure,
-                        self.supplemental_calendar_source.provider,
-                        "calendar/supplemental",
-                        str(exc),
-                    )
-                finally:
-                    supplemental_in_flight = False
-
             try:
                 while not self._stop_event.is_set():
                     if (
@@ -3862,10 +3842,6 @@ class ShadowRunner:
                     t_primary = asyncio.create_task(_poll_primary())
                     active_poll_tasks.add(t_primary)
                     t_primary.add_done_callback(active_poll_tasks.discard)
-                    if self.supplemental_calendar_source is not None and not supplemental_in_flight:
-                        t_supp = asyncio.create_task(_poll_supplemental())
-                        active_poll_tasks.add(t_supp)
-                        t_supp.add_done_callback(active_poll_tasks.discard)
                     try:
                         await asyncio.wait_for(
                             self._stop_event.wait(), timeout=self.news_poll_interval_seconds
@@ -3933,11 +3909,6 @@ class ShadowRunner:
                 return Decimal("0"), None
             return Decimal(row["quantity_eur"]), row["pending_exit_reason"]
 
-        streamer_task = (
-            asyncio.create_task(self.ctrader_openapi_streamer.run(), name="shadow-ctrader-openapi")
-            if self.ctrader_openapi_streamer is not None
-            else None
-        )
         protection_task = asyncio.create_task(_protection_worker(), name="shadow-protection")
         quote_task = asyncio.create_task(_quote_worker(), name="shadow-quotes")
         poll_task = asyncio.create_task(_news_poll_worker(), name="shadow-news-polls")
@@ -4090,11 +4061,6 @@ class ShadowRunner:
             for t in (protection_task, quote_task):
                 t.cancel()
             await asyncio.gather(protection_task, quote_task, return_exceptions=True)
-            if self.ctrader_openapi_streamer is not None and streamer_task is not None:
-                await self.ctrader_openapi_streamer.stop()
-                if not streamer_task.done():
-                    streamer_task.cancel()
-                await asyncio.gather(streamer_task, return_exceptions=True)
 
         open_qty, pending_exit = await asyncio.to_thread(_open_position_state)
         if open_qty == Decimal("0"):

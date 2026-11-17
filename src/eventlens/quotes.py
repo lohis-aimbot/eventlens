@@ -11,6 +11,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any, Callable, Literal, Self
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
 
@@ -25,6 +26,21 @@ from .contracts import (
     Timestamp,
 )
 from .observer import Basis, ObserverStore
+
+_NY_TZ = ZoneInfo("America/New_York")
+
+
+def is_fx_weekend_closed(ts: datetime) -> bool:
+    """Return True when global OTC FX spot is closed (Fri 17:00 NY -> Sun 17:00 NY, DST-aware)."""
+    ny = utc(ts).astimezone(_NY_TZ)
+    wd = ny.weekday()
+    if wd == 4 and ny.hour >= 17:
+        return True
+    if wd == 5:
+        return True
+    if wd == 6 and ny.hour < 17:
+        return True
+    return False
 
 
 class BridgeStart(Contract):
@@ -127,8 +143,9 @@ class QuoteStore:
         readonly: bool = False,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self.path, self.clock = path.resolve(), clock
+        self.path, self.clock, self.readonly = path.resolve(), clock, readonly
         self._lock = threading.RLock()
+        self._failure_writes = 0
         if readonly and not self.path.exists():
             raise FileNotFoundError(self.path)
         if not readonly:
@@ -173,6 +190,8 @@ class QuoteStore:
                 self.db.execute(f"PRAGMA application_id={self.APPLICATION_ID}")
                 self.db.execute("PRAGMA user_version=1")
                 self.db.commit()
+                if self.db.execute("SELECT 1 FROM quote_failures LIMIT 1").fetchone() is not None:
+                    self.prune_old_failures(before=utc(self.clock()) - timedelta(hours=48))
         except BaseException:
             self.db.close()
             raise
@@ -345,12 +364,30 @@ class QuoteStore:
                     (item.model_dump_json(), str(item.session_id)),
                 )
 
+    def prune_old_failures(self, *, before: datetime) -> int:
+        if self.readonly:
+            return 0
+        cutoff_iso = utc(before).isoformat()
+        with self._lock, self.db:
+            cur = self.db.execute(
+                "DELETE FROM quote_failures WHERE received_at < ?",
+                (cutoff_iso,),
+            )
+            return int(cur.rowcount or 0)
+
     def failure(self, received: datetime, reason: str, raw_line: str) -> None:
         with self._lock, self.db:
+            rx = utc(received)
             self.db.execute(
                 "INSERT INTO quote_failures VALUES (?, ?, ?)",
-                (utc(received).isoformat(), reason[:200], raw_line[:16384]),
+                (rx.isoformat(), reason[:200], raw_line[:16384]),
             )
+            self._failure_writes += 1
+            if self._failure_writes % 500 == 0:
+                self.db.execute(
+                    "DELETE FROM quote_failures WHERE received_at < ?",
+                    ((rx - timedelta(hours=48)).isoformat(),),
+                )
 
     def latest(
         self, symbol: str, cutoff: datetime, *, basis: Basis = "live_poll"
@@ -774,10 +811,7 @@ class QuoteQualityPolicy(Contract):
     max_spread_pips: Decimal = Field(default=Decimal("2.0"), gt=0)
     allow_zero_spread: bool = False
     allow_commission_bearing_zero_spread: bool = False
-    trusted_commission_providers: tuple[Identifier, ...] = (
-        "ctrader_algo",
-        "ctrader_openapi",
-    )
+    trusted_commission_providers: tuple[Identifier, ...] = ("ctrader_algo",)
     trusted_commission_types: tuple[Identifier, ...] = (
         "UsdPerMillionUsdVolume",
         "UsdPerOneLot",

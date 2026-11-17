@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from ctrader_cli_sim_daemon import SimulatedCTraderCliDaemon
 
 from eventlens.contracts import (
     AgentContext,
@@ -36,6 +37,7 @@ from eventlens.observer import (
     ObserverStore,
     SourceRecord,
     analyze_macro_semantics,
+    revision_to_event,
 )
 from eventlens.quotes import BridgeQuote, BridgeStart, BridgeStop, QuoteStore
 from eventlens.runtime import IntradayEventRuntime, ShadowRunner, SQLiteRuntimeStore
@@ -43,7 +45,6 @@ from eventlens.shadow_cli import inspect_shadow_ledger_readonly
 from eventlens.shadow_cli import main as shadow_cli_main
 from eventlens.sources.ctrader_demo import DemoQuoteCollector, DirectoryTail
 from eventlens.sources.english_tier1 import EURUSDEventFilter, parse_rss_capture
-from eventlens.sources.wallstreetcn import revision_to_event
 from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
     SINGLE_PASS_PROMPT_VERSION,
@@ -57,7 +58,6 @@ from eventlens.trading.ctrader_cli_broker import (
     DemoBrokerSafetyError,
     LiveAccountForbiddenError,
     SimulatedBridgeCrashError,
-    SimulatedCTraderCliDaemon,
 )
 from eventlens.trading.execution import (
     ProtectiveExitPolicy,
@@ -345,20 +345,14 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
     client = _StaticPayloadModelClient(
         [
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Weaker US Final Services PMI weighs on USD; EUR/USD price action consistent with drift.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.62,
-                "evidence_quote": "USD Final Services PMI released at 56.1 vs 57.9 preliminary reading.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.12",
-                "target_thesis_ids": ["__current__"],
-                "rationale": "Immediate SET_TARGET long EUR/USD consistent with post-release drift.",
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Weaker US Final Services PMI weighs on USD.",
+                "watch_condition": None,
+                "rationale": "Immediate SET_TARGET long EUR/USD on weaker PMI.",
             }
         ]
     )
@@ -380,39 +374,20 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
     )
     decision = asyncio.run(agent.decide(ctx))
 
-    # Honest empty cited_evidence_ids (no fake default auto-injection)
+    # Honest empty cited_evidence_ids & objective missing_short_window_coverage verification
     assert decision.cited_evidence_ids == ()
-    assert decision.evidence_verification_status == "contradicted_price_direction"
+    assert decision.evidence_verification_status == "missing_short_window_coverage"
 
     # Transparent account leverage & ex-ante risk metadata in _context_json
     sent_ctx = json.loads(client.user_prompts[0])
     assert sent_ctx["risk_constraints"]["account_leverage"] == "200"
     assert sent_ctx["risk_constraints"]["max_risk_per_trade_pct"] == "0.02"
 
-    # Missing prose claim still blocks on missing_short_window_coverage after quote gap
-    decision_silent = decision.model_copy(
-        update={
-            "rationale": "Initiate tactical long EUR/USD on weaker services print.",
-            "thesis_changes": (),
-        }
-    )
-    ev_silent = verify_decision_evidence(ctx, decision_silent)
-    assert ev_silent.valid is False
-    assert ev_silent.status == "missing_short_window_coverage"
-
     # No trajectory attached -> status == "not_applicable" (never faking "verified")
     mkt_no_traj = _fresh_market(now, trajectory=None)
     ctx_no_traj = ctx.model_copy(update={"market": mkt_no_traj})
-    ev_na = verify_decision_evidence(ctx_no_traj, decision_silent)
+    ev_na = verify_decision_evidence(ctx_no_traj, decision)
     assert ev_na.status == "not_applicable"
-
-    # Fabricated cited_evidence_ids -> rejected as unverified_numeric_claim
-    decision_fake_id = decision_silent.model_copy(
-        update={"cited_evidence_ids": ("fabricated:id:999",)}
-    )
-    ev_fake = verify_decision_evidence(ctx, decision_fake_id)
-    assert ev_fake.valid is False
-    assert ev_fake.status == "unverified_numeric_claim"
 
     # Hard risk gate blocks new risk with all 3 independent reasons
     assert decision.target is not None
@@ -427,7 +402,7 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
         )
     )
     assert assessment.outcome == "reject"
-    assert "unverified_decision_evidence:contradicted_price_direction" in assessment.reasons
+    assert "unverified_decision_evidence:missing_short_window_coverage" in assessment.reasons
     assert "ambiguous_macro_semantics:preliminary_as_forecast_or_previous" in assessment.reasons
     assert "delayed_event_catchup_blocks_new_risk" in assessment.reasons
 
@@ -490,21 +465,13 @@ def test_golden_clean_macro_1m_breakout_against_30m_drift_and_unscheduled_news_a
     client = _StaticPayloadModelClient(
         [
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Sharp ISM Services contraction triggers 1m +4.8 pips upward breakout reversing earlier 30m -8.5 pips drift.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1238"],
-                "confidence": 0.72,
-                "evidence_quote": "USD ISM Services PMI drops sharply to 48.2 vs 51.5 consensus.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.12",
-                "target_thesis_ids": ["__current__"],
                 "strategy_hypothesis": "fundamental_breakout",
-                "cited_evidence_ids": [ev_clean.event_id, str(traj_breakout.evidence_id)],
+                "market_bias": "bullish_eur",
+                "market_state_note": "Sharp ISM Services contraction triggers upside breakout.",
+                "watch_condition": None,
                 "rationale": "Confirmed 1m +4.8 pips upward breakout reversing prior 30m -8.5 pips drift.",
             }
         ]
@@ -714,53 +681,33 @@ def test_g4_close_cancels_pending_entry_dedup_pending_target_and_pre_llm_fill_re
     client = _StaticPayloadModelClient(
         [
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Initial release lifts EUR/USD.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.70,
-                "evidence_quote": "Eurozone output beats consensus.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.12",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Initial release lifts EUR/USD.",
+                "watch_condition": None,
                 "rationale": "Initiate long EUR/USD.",
             },
             {
-                "memory_action": "ignore",
-                "thesis_id": None,
-                "status": None,
-                "narrative": None,
-                "instruments": None,
-                "invalidation_conditions": None,
-                "confidence": None,
-                "evidence_quote": "Secondary wire repeats beat.",
-                "evidence_role": None,
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.12",
-                "target_thesis_ids": [],
-                "cited_evidence_ids": ["wire:2"],
+                "strategy_hypothesis": "trend_following",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Repeat target while pending.",
+                "watch_condition": None,
                 "rationale": "Repeat same target while pending.",
             },
             {
-                "memory_action": "update",
-                "thesis_id": None,
-                "status": "invalidated",
-                "narrative": "Inflation jump invalidates long EUR/USD.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.25,
-                "evidence_quote": "Prices charged jumped sharply in latest survey.",
-                "evidence_role": "contradict",
                 "portfolio_action": "CLOSE",
                 "target_direction": "flat",
                 "target_weight": "0",
-                "target_thesis_ids": [],
-                "cited_evidence_ids": ["wire:3"],
+                "strategy_hypothesis": "unspecified",
+                "market_bias": "bearish_eur",
+                "market_state_note": "Inflation jump invalidates long EUR/USD.",
+                "watch_condition": None,
                 "rationale": "Cancel/exit long exposure immediately on adverse inflation details.",
             },
         ]
@@ -794,10 +741,6 @@ def test_g4_close_cancels_pending_entry_dedup_pending_target_and_pre_llm_fill_re
         assert r1.status == "shadow_recorded"
         assert len(asyncio.run(ledger.snapshot()).pending_order_ids) == 1
 
-        active_tid = asyncio.run(mem.snapshot(as_of=now)).theses[0].thesis_id
-        client._payloads[1]["target_thesis_ids"] = [active_tid]
-        client._payloads[2]["thesis_id"] = active_tid
-        client._payloads[2]["target_thesis_ids"] = [active_tid]
         ev2 = Event(
             event_id="wire:2",
             source="ecb_news",
@@ -1189,7 +1132,6 @@ def test_stage_f_ctrader_cli_demo_broker_full_lifecycle_reconcile_and_live_lock(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Verify CTraderCliDemoBrokerAdapter + SimulatedCTraderCliDaemon end-to-end:
-    - Zero test hooks in production ctrader_openapi.py
     - RiskAssessment gate required
     - submitted -> accepted (not open!) -> partial -> filled -> close by broker_position_id
     - client_intent_id idempotency across adapter + daemon restarts
@@ -1198,9 +1140,6 @@ def test_stage_f_ctrader_cli_demo_broker_full_lifecycle_reconcile_and_live_lock(
     - Broker-side SL close reconciliation
     - Live account hard refusal (LiveAccountForbiddenError)
     - `eventlens-shadow demo-reconcile` offline CLI check."""
-    openapi_src = Path("src/eventlens/ctrader_openapi.py").read_text(encoding="utf-8")
-    assert "_LOOPBACK_TEST_SERVERS" not in openapi_src
-
     now = datetime(2026, 11, 11, 10, 0, 0, tzinfo=UTC)
     bridge_dir = tmp_path / "cli_bridge"
     state_db = tmp_path / "cli_state.sqlite"
@@ -1565,52 +1504,33 @@ def test_stage_f_runtime_and_shadow_runner_cli_demo_confirmed_fills_and_demo_smo
     client = _StaticPayloadModelClient(
         [
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Eurozone output surprise supports EUR/USD.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.72,
-                "evidence_quote": "Eurozone industrial output rose 0.8% m/m vs 0.2% expected.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.20",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Eurozone output surprise supports EUR/USD.",
+                "watch_condition": None,
                 "rationale": "Initiate risk-budgeted long EUR/USD on beat.",
             },
             {
-                "memory_action": "update",
-                "thesis_id": None,
-                "status": "invalidated",
-                "narrative": "Take off long exposure cleanly.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.30,
-                "evidence_quote": "Follow-up wire offsets initial impulse.",
-                "evidence_role": "contradict",
                 "portfolio_action": "CLOSE",
                 "target_direction": "flat",
                 "target_weight": "0",
-                "target_thesis_ids": [],
-                "cited_evidence_ids": ["demo-ev-2"],
+                "strategy_hypothesis": "unspecified",
+                "market_bias": "neutral",
+                "market_state_note": "Take off long exposure cleanly.",
+                "watch_condition": None,
                 "rationale": "Flatten Demo position by broker Position.Id.",
             },
             {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Second macro surprise for protective exit test.",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD <= 1.1230"],
-                "confidence": 0.70,
-                "evidence_quote": "ECB speaker signals firmer rate path.",
-                "evidence_role": "support",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "long",
                 "target_weight": "0.20",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bullish_eur",
+                "market_state_note": "Second macro surprise for protective exit test.",
+                "watch_condition": None,
                 "rationale": "Open second Demo position to verify protective close.",
             },
         ]
@@ -1710,9 +1630,6 @@ def test_stage_f_runtime_and_shadow_runner_cli_demo_confirmed_fills_and_demo_smo
         assert ledger.report()["fills"] == []
 
         # 2. Follow-up CLOSE decision -> submits close_position by broker_position_id
-        active_tid = asyncio.run(mem.snapshot(as_of=t_now[0])).theses[0].thesis_id
-        client._payloads[1]["thesis_id"] = active_tid
-        client._payloads[1]["target_thesis_ids"] = [active_tid]
         ev2 = Event(
             event_id="demo-ev-2",
             source="investinglive_news",

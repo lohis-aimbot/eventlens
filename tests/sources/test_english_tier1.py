@@ -9,7 +9,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from eventlens.cli import main as cli_main
 from eventlens.contracts import MarketSnapshot, Quote
 from eventlens.deepseek import ModelResponse
 from eventlens.observer import CaptureBatch, MacroValues, ObserverStore, SourceRecord
@@ -491,19 +490,13 @@ def test_simultaneous_release_bundling_invokes_agent_once_and_marks_constituents
             seen_user_prompts.append(user)
             assert "Consensus Forecast: MISSING (no consensus forecast reported)" in user
             payload = {
-                "memory_action": "create",
-                "thesis_id": None,
-                "status": "active",
-                "narrative": "Hot US GDP (3.5%) and Core PCE (0.4%) reinforce hawkish Fed pricing",
-                "instruments": ["EUR/USD"],
-                "invalidation_conditions": ["EUR/USD reclaims 1.1160"],
-                "confidence": 0.72,
-                "evidence_role": "support",
-                "evidence_quote": "USD Core PCE Price Index m/m released at 0.4%",
                 "portfolio_action": "SET_TARGET",
                 "target_direction": "short",
                 "target_weight": "-0.10",
-                "target_thesis_ids": ["__current__"],
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bearish_eur",
+                "market_state_note": "Hot US GDP and Core PCE reinforce hawkish Fed pricing",
+                "watch_condition": None,
                 "rationale": "Simultaneous hot US GDP and Core PCE beat consensus",
             }
             return ModelResponse(
@@ -565,7 +558,6 @@ def test_simultaneous_release_bundling_invokes_agent_once_and_marks_constituents
 def test_observe_schedule_cli_groups_windows_and_marks_missing_consensus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from eventlens import observer_cli
 
     ref_now = datetime(2026, 10, 29, 0, 0, 0, tzinfo=UTC)
 
@@ -597,26 +589,3 @@ def test_observe_schedule_cli_groups_windows_and_marks_missing_consensus(
     table_str = format_macro_schedule_table(sched)
     assert "BUNDLED HIGH WINDOW (3 simultaneous releases)" in table_str
     assert "MISSING" in table_str
-
-    # Verify CLI entrypoint stays read-only and does not create a SQLite file when missing
-    non_existent_db = tmp_path / "should_not_be_created.sqlite"
-    monkeypatch.setattr(
-        observer_cli,
-        "build_macro_schedule",
-        lambda **kwargs: asyncio.sleep(0, result=sched),
-    )
-    cli_main(
-        [
-            "observe",
-            "--database",
-            str(non_existent_db),
-            "schedule",
-            "--date",
-            "2026-10-29",
-            "--format",
-            "json",
-        ]
-    )
-    out = json.loads(capsys.readouterr().out)
-    assert out["window_count"] == 2
-    assert not non_existent_db.exists()
