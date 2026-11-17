@@ -90,12 +90,17 @@ else
 fi
 
 echo "[6/6] Installing systemd units..."
+chmod 0755 "${APP_DIR}/deploy/gcp/check_bridge_health.sh"
 install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-shadow.service" \
   /etc/systemd/system/eventlens-shadow.service
 install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-ctrader-cli.service" \
   /etc/systemd/system/eventlens-ctrader-cli.service
 install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-shadow-cli.service" \
   /etc/systemd/system/eventlens-shadow-cli.service
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-bridge-watchdog.service" \
+  /etc/systemd/system/eventlens-bridge-watchdog.service
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-bridge-watchdog.timer" \
+  /etc/systemd/system/eventlens-bridge-watchdog.timer
 systemctl daemon-reload
 
 cat <<EOF

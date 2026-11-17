@@ -1,0 +1,9 @@
+[Unit]
+Description=EventLens cTrader CLI Bridge Liveness Watchdog
+After=eventlens-ctrader-cli.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/eventlens
+ExecStart=/bin/bash /opt/eventlens/deploy/gcp/check_bridge_health.sh
+TimeoutStartSec=30

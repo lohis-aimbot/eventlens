@@ -44,7 +44,7 @@ PortfolioAction = Literal["IGNORE_EVENT", "HOLD", "SET_TARGET", "CLOSE"]
 _COMPACT_OUTPUT_SCHEMA: dict[str, Any] = {
     "portfolio_action": "IGNORE_EVENT | HOLD | SET_TARGET | CLOSE",
     "target_direction": "flat | long | short",
-    "target_weight": "decimal string in [-max_abs_target_weight, +max_abs_target_weight] ('0' unless SET_TARGET)",
+    "target_weight": "decimal string in [-max_abs_target_weight, +max_abs_target_weight] (positive for long, negative for short, '0' unless SET_TARGET)",
     "strategy_hypothesis": "fundamental_breakout | trend_following | countertrend | unspecified",
     "market_bias": "bullish_eur | bearish_eur | neutral | mixed",
     "market_state_note": "string | null (简体中文，200字以内，更新当前宏观底色与持仓备忘；无关噪音填 null)",
@@ -199,6 +199,29 @@ class SinglePassProposal(Contract):
                 copied["portfolio_action"] = "IGNORE_EVENT"
             else:
                 copied["portfolio_action"] = "HOLD"
+
+        raw_action = copied.get("portfolio_action")
+        raw_dir = copied.get("target_direction")
+        raw_weight = copied.get("target_weight")
+        if (
+            raw_action == "SET_TARGET"
+            and raw_dir in ("short", "long")
+            and raw_weight is not None
+            and not isinstance(raw_weight, bool)
+        ):
+            try:
+                dec_w = (
+                    raw_weight
+                    if isinstance(raw_weight, Decimal)
+                    else Decimal(str(raw_weight).strip())
+                )
+            except Exception:
+                dec_w = None
+            if dec_w is not None and dec_w.is_finite() and dec_w != Decimal("0"):
+                if raw_dir == "short" and dec_w > Decimal("0"):
+                    copied["target_weight"] = str(-dec_w) if isinstance(raw_weight, str) else -dec_w
+                elif raw_dir == "long" and dec_w < Decimal("0"):
+                    copied["target_weight"] = str(-dec_w) if isinstance(raw_weight, str) else -dec_w
 
         raw_tid = copied.get("thesis_id")
         raw_inv = list(copied.get("invalidate_thesis_ids") or ())

@@ -34,6 +34,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -4669,3 +4670,127 @@ class SimulatedCTraderCliDaemon:
             }
         )
         self._write_event(frame)
+
+
+@dataclass(frozen=True)
+class BridgeWatchdogVerdict:
+    should_restart: bool
+    reason: str
+    reconcile_age_seconds: float | None
+    quote_age_seconds: float | None
+
+
+def _parse_bridge_iso_utc(raw: Any) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def evaluate_bridge_watchdog(
+    bridge_dir: Path,
+    *,
+    now_utc: datetime,
+    service_active_since: datetime | None = None,
+    cbot_terminated_in_logs: bool = False,
+    startup_grace_seconds: float = 180.0,
+    max_reconcile_age_seconds: float = 180.0,
+    max_quote_age_seconds: float = 300.0,
+) -> BridgeWatchdogVerdict:
+    """Evaluate cTrader CLI bridge file liveness and fail safe on safety refusals."""
+    from ..ctrader_openapi import is_fx_weekend_closed
+
+    now_dt = now_utc.replace(tzinfo=UTC) if now_utc.tzinfo is None else now_utc.astimezone(UTC)
+    active_dt = (
+        None
+        if service_active_since is None
+        else (
+            service_active_since.replace(tzinfo=UTC)
+            if service_active_since.tzinfo is None
+            else service_active_since.astimezone(UTC)
+        )
+    )
+
+    exec_path = bridge_dir / "execution-events.jsonl"
+    exec_stat = exec_path.stat() if exec_path.exists() else None
+    if exec_stat is not None and exec_stat.st_size > 0:
+        tail_frames: list[dict[str, Any]] = []
+        with exec_path.open("rb") as fh:
+            offset = max(0, exec_stat.st_size - 32768)
+            fh.seek(offset)
+            raw_text = fh.read().decode("utf-8", errors="replace")
+        lines = raw_text.splitlines()
+        if offset > 0 and lines:
+            lines = lines[1:]
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                tail_frames.append(parsed)
+        if active_dt is not None:
+            for frame in tail_frames:
+                if frame.get("kind") == "safety_refusal":
+                    emitted_dt = _parse_bridge_iso_utc(frame.get("emitted_at"))
+                    if emitted_dt is not None and emitted_dt >= active_dt:
+                        return BridgeWatchdogVerdict(False, "safety_refusal_halt", None, None)
+        elif tail_frames and tail_frames[-1].get("kind") == "safety_refusal":
+            return BridgeWatchdogVerdict(False, "safety_refusal_halt", None, None)
+
+        exec_mtime_dt = datetime.fromtimestamp(exec_stat.st_mtime, tz=UTC)
+        if active_dt is not None and exec_mtime_dt < active_dt:
+            reconcile_age_seconds: float | None = None
+        else:
+            reconcile_age_seconds = max(0.0, now_dt.timestamp() - exec_stat.st_mtime)
+    else:
+        reconcile_age_seconds = None
+
+    quote_mtimes: list[float] = []
+    if bridge_dir.exists():
+        for qpath in bridge_dir.glob("quotes-*.jsonl"):
+            try:
+                qstat = qpath.stat()
+            except OSError:
+                continue
+            if qstat.st_size <= 0:
+                continue
+            qmtime_dt = datetime.fromtimestamp(qstat.st_mtime, tz=UTC)
+            if active_dt is not None and qmtime_dt < active_dt:
+                continue
+            quote_mtimes.append(qstat.st_mtime)
+    quote_age_seconds: float | None = (
+        max(0.0, now_dt.timestamp() - max(quote_mtimes)) if quote_mtimes else None
+    )
+
+    if cbot_terminated_in_logs:
+        return BridgeWatchdogVerdict(
+            True, "cbot_child_process_terminated", reconcile_age_seconds, quote_age_seconds
+        )
+
+    if is_fx_weekend_closed(now_dt) or is_fx_weekend_closed(now_dt - timedelta(minutes=10)):
+        return BridgeWatchdogVerdict(
+            False, "fx_weekend_or_reopen_grace", reconcile_age_seconds, quote_age_seconds
+        )
+
+    if active_dt is not None and (now_dt - active_dt).total_seconds() < startup_grace_seconds:
+        return BridgeWatchdogVerdict(
+            False, "startup_grace_period", reconcile_age_seconds, quote_age_seconds
+        )
+
+    if reconcile_age_seconds is None or reconcile_age_seconds > max_reconcile_age_seconds:
+        return BridgeWatchdogVerdict(
+            True, "stale_reconcile_heartbeat", reconcile_age_seconds, quote_age_seconds
+        )
+
+    if quote_age_seconds is None or quote_age_seconds > max_quote_age_seconds:
+        return BridgeWatchdogVerdict(
+            True, "stale_open_market_quotes", reconcile_age_seconds, quote_age_seconds
+        )
+
+    return BridgeWatchdogVerdict(False, "healthy", reconcile_age_seconds, quote_age_seconds)

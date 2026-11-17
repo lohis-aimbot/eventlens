@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import threading
 import time
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
+from pydantic import ValidationError
 
 from eventlens.contracts import (
     Event,
@@ -45,7 +48,12 @@ from eventlens.sqlite_memory import SQLiteThesisMemory
 from eventlens.trading.agent import (
     MARKET_STATE_WATCH_THESIS_ID,
     SINGLE_PASS_PROMPT_VERSION,
+    SinglePassProposal,
     SinglePassTradingAgent,
+)
+from eventlens.trading.ctrader_cli_broker import (
+    BridgeWatchdogVerdict,
+    evaluate_bridge_watchdog,
 )
 from eventlens.trading.execution import ProtectiveExitPolicy, ShadowCostModel, SQLiteShadowLedger
 from eventlens.trading.risk import DeterministicHardRiskEngine, RiskPolicy
@@ -440,3 +448,179 @@ def test_dashboard_sanitizer_strips_sensitive_identifiers(monkeypatch: Any) -> N
     assert "project-abc123-xyz" not in rendered
     assert "owner@test.com" not in rendered
     assert "99887766" not in rendered
+
+
+def test_single_pass_proposal_normalizes_short_and_long_target_weight_sign() -> None:
+    short_unsigned = SinglePassProposal(
+        portfolio_action="SET_TARGET",
+        target_direction="short",
+        target_weight="0.15",
+        strategy_hypothesis="fundamental_breakout",
+        market_bias="bearish_eur",
+        market_state_note="跌破关键支撑位，短线偏空。",
+        watch_condition=None,
+        rationale="下破后顺势做空。",
+    )
+    assert short_unsigned.target_weight == Decimal("-0.15")
+
+    short_signed = SinglePassProposal(
+        portfolio_action="SET_TARGET",
+        target_direction="short",
+        target_weight="-0.25",
+        strategy_hypothesis="trend_following",
+        market_bias="bearish_eur",
+        rationale="维持负数做空权重。",
+    )
+    assert short_signed.target_weight == Decimal("-0.25")
+
+    long_negative = SinglePassProposal(
+        portfolio_action="SET_TARGET",
+        target_direction="long",
+        target_weight="-0.12",
+        strategy_hypothesis="trend_following",
+        market_bias="bullish_eur",
+        rationale="误填负号应自动归一为正数做多权重。",
+    )
+    assert long_negative.target_weight == Decimal("0.12")
+
+    legacy_inferred = SinglePassProposal.model_validate(
+        {
+            "memory_action": "ignore",
+            "evidence_quote": "Fed signals further tightening",
+            "portfolio_action": None,
+            "target_direction": "short",
+            "target_weight": "0.20",
+            "target_thesis_ids": ["t-1"],
+            "rationale": "Legacy inferred short weight.",
+        }
+    )
+    assert legacy_inferred.portfolio_action == "SET_TARGET"
+    assert legacy_inferred.target_weight == Decimal("-0.20")
+
+    with pytest.raises(ValidationError):
+        SinglePassProposal(
+            portfolio_action="SET_TARGET",
+            target_direction="short",
+            target_weight="1.5",
+            rationale="超出 [-1, 0) 上下限必须仍报错。",
+        )
+
+    with pytest.raises(ValidationError):
+        SinglePassProposal(
+            portfolio_action="SET_TARGET",
+            target_direction="short",
+            target_weight="0",
+            rationale="SET_TARGET 零权重必须仍报错。",
+        )
+
+    with pytest.raises(ValidationError):
+        SinglePassProposal(
+            portfolio_action="HOLD",
+            target_direction="flat",
+            target_weight="0.15",
+            rationale="HOLD 非零权重必须仍报错。",
+        )
+
+
+def test_evaluate_bridge_watchdog_handles_zombie_cbot_stalls_weekend_and_safety_refusal(
+    tmp_path: Path,
+) -> None:
+    t_open = datetime(2026, 11, 17, 14, 0, 0, tzinfo=UTC)  # Tuesday 09:00 NY (open market)
+    t_active = t_open - timedelta(minutes=10)
+
+    def _set_age(p: Path, age_s: float) -> None:
+        ts = (t_open - timedelta(seconds=age_s)).timestamp()
+        os.utime(p, (ts, ts))
+
+    def _make_healthy_dir(sub: str) -> Path:
+        bdir = tmp_path / sub
+        bdir.mkdir(parents=True, exist_ok=True)
+        exec_p = bdir / "execution-events.jsonl"
+        exec_p.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "kind": "reconcile_snapshot",
+                    "emitted_at": (t_open - timedelta(seconds=10)).isoformat(),
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        _set_age(exec_p, 10)
+        q_p = bdir / "quotes-1111.jsonl"
+        q_p.write_text(json.dumps({"kind": "quote", "bid": "1.1000"}) + "\n", encoding="utf-8")
+        _set_age(q_p, 5)
+        return bdir
+
+    # 1. Healthy active run
+    b_healthy = _make_healthy_dir("healthy")
+    verdict = evaluate_bridge_watchdog(
+        b_healthy, now_utc=t_open, service_active_since=t_active, cbot_terminated_in_logs=False
+    )
+    assert isinstance(verdict, BridgeWatchdogVerdict)
+    assert verdict.should_restart is False
+    assert verdict.reason == "healthy"
+
+    # 2. Zombie cBot child termination detected in journalctl logs
+    verdict_zombie = evaluate_bridge_watchdog(
+        b_healthy, now_utc=t_open, service_active_since=t_active, cbot_terminated_in_logs=True
+    )
+    assert verdict_zombie.should_restart is True
+    assert verdict_zombie.reason == "cbot_child_process_terminated"
+
+    # 3. Stale reconcile heartbeat (> 180s) after startup grace during open market
+    b_stale_rec = _make_healthy_dir("stale_rec")
+    _set_age(b_stale_rec / "execution-events.jsonl", 200)
+    verdict_rec = evaluate_bridge_watchdog(
+        b_stale_rec, now_utc=t_open, service_active_since=t_active
+    )
+    assert verdict_rec.should_restart is True
+    assert verdict_rec.reason == "stale_reconcile_heartbeat"
+
+    # 4. Fresh reconcile heartbeat but stale quotes (> 300s) during open market
+    b_stale_q = _make_healthy_dir("stale_quote")
+    _set_age(b_stale_q / "quotes-1111.jsonl", 350)
+    verdict_q = evaluate_bridge_watchdog(b_stale_q, now_utc=t_open, service_active_since=t_active)
+    assert verdict_q.should_restart is True
+    assert verdict_q.reason == "stale_open_market_quotes"
+
+    # 5. Saturday FX weekend suppresses stale restart
+    t_sat = datetime(2026, 11, 14, 15, 0, 0, tzinfo=UTC)
+    verdict_wknd = evaluate_bridge_watchdog(
+        b_stale_q, now_utc=t_sat, service_active_since=t_sat - timedelta(hours=10)
+    )
+    assert verdict_wknd.should_restart is False
+    assert verdict_wknd.reason == "fx_weekend_or_reopen_grace"
+
+    # 6. Startup grace suppresses restart before 180s elapsed
+    verdict_grace = evaluate_bridge_watchdog(
+        b_stale_q,
+        now_utc=t_open,
+        service_active_since=t_open - timedelta(seconds=60),
+    )
+    assert verdict_grace.should_restart is False
+    assert verdict_grace.reason == "startup_grace_period"
+
+    # 7. Safety refusal in current service run halts restarts unconditionally
+    b_refusal = _make_healthy_dir("safety_refusal")
+    (b_refusal / "execution-events.jsonl").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "kind": "safety_refusal",
+                "emitted_at": (t_active + timedelta(seconds=5)).isoformat(),
+                "reason": "unexpected_demo_account_number",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    verdict_refusal = evaluate_bridge_watchdog(
+        b_refusal,
+        now_utc=t_open,
+        service_active_since=t_active,
+        cbot_terminated_in_logs=True,
+    )
+    assert verdict_refusal.should_restart is False
+    assert verdict_refusal.reason == "safety_refusal_halt"
