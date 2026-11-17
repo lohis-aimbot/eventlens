@@ -88,6 +88,7 @@ class BridgeStop(Contract):
     raw_zero_spread_ticks: int | None = Field(default=None, strict=True, ge=0)
     symbol_mismatch_ticks: int | None = Field(default=None, strict=True, ge=0)
     throttled_ticks: int | None = Field(default=None, strict=True, ge=0)
+    superseded_reason: str | None = None
 
     @model_validator(mode="after")
     def valid_diagnostics(self) -> Self:

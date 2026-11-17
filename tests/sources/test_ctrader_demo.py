@@ -517,3 +517,12 @@ def test_subsecond_sample_interval_and_multi_session_collector(tmp_path):
     assert aligned["spread"] == "0.00000"
     events.close()
     store.close()
+
+
+def test_superseded_session_stop_validates_in_report(tmp_path):
+    store = make_store(tmp_path)
+    store.mark_session_superseded(UUID(SESSION), NOW + timedelta(seconds=5))
+    rep = store.report()
+    assert rep["sessions"] == 1
+    assert rep["session_details"][0]["closed"] is True
+    store.close()
