@@ -27,6 +27,7 @@ from .risk import (
     HardRiskEngine,
     RiskPolicy,
     is_in_daily_close_window,
+    is_in_pre_close_entry_cutoff,
     trading_day_window,
 )
 
@@ -50,6 +51,7 @@ __all__ = [
     "TradingAgent",
     "classify_exposure_change",
     "is_in_daily_close_window",
+    "is_in_pre_close_entry_cutoff",
     "quantize_target_quantity_eur",
     "trading_day_window",
 ]

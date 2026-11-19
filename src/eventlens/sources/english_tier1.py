@@ -66,7 +66,7 @@ MAX_BYTES = 1_000_000
 MAX_LIVE_HTML_BYTES = 2_500_000
 MAX_ARTICLE_CHARS = 3_800
 MAX_BUNDLE_RAW_CHARS = 14_000
-TIER1_FILTER_VERSION = "tier1-eurusd-filter-v1"
+TIER1_FILTER_VERSION = "tier1-eurusd-filter-v2"
 USER_AGENT = "EventLensResearch/0.2 (+https://github.com/lohis-aimbot/eventlens; shadow-only)"
 
 INVESTINGLIVE_LIVE_FEED_URL = "https://investinglive.com/live-feed/"
@@ -149,6 +149,57 @@ _EURUSD_EN_PATTERN = re.compile(
     r"rate\s+decision|interest\s+rate|rate\s+cut|rate\s+hike|basis\s+points|monetary\s+policy|bank\s+lending\s+survey|"
     r"tariff|tariffs|white\s+house|fiscal|debt\s+ceiling|bea"
     r")\b",
+    re.IGNORECASE,
+)
+
+# Roundups, option expiries, session wraps, and calendar previews carry zero marginal trade edge
+_ROUNDUP_OR_PREVIEW_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"(?:americas|european|asia|asian|tokyo|london|ny|new\s+york|fx|market|daily|weekly)?\s*(?:fx\s+)?(?:news|market)\s+wrap|"
+    r"fx\s+wrap|"
+    r"morning\s+briefing|"
+    r"asia[- ]pacific\s+market\s+news|"
+    r"fx\s+option\s+expiries|"
+    r"option\s+expiries\s+for|"
+    r"order\s+board|"
+    r"orders\s+and\s+expiries|"
+    r"economic\s+(?:and\s+event\s+)?calendar|"
+    r"what\s+is\s+on\s+the\s+(?:economic|data|event)\s+calendar|"
+    r"what\s+are\s+the\s+main\s+events\s+for\s+today|"
+    r"economic\s+data\s+due\s+from|"
+    r"kickstart\s+the\s+(?:fx|forex|trading)\s+day|"
+    r"technical\s+analysis|"
+    r"(?:economic|macro|fx|market|trading)\s+(?:week|day)\s+ahead"
+    r")\b|^(?:the\s+)?(?:week|day)\s+ahead\b",
+    re.IGNORECASE,
+)
+
+# Non-EUR/USD regional wires, single-stock equities, IPOs, and crypto noise
+_NON_G2_OR_SINGLE_STOCK_TITLE_RE = re.compile(
+    r"\b(?:"
+    r"pboc|usd/cny|usd/cnh|usdcny|usdcnh|yuan\s+(?:fixing|midpoint|reference)|reverse\s+repo|mlf|lpr|"
+    r"rba|rbnz|australia|australian|new\s+zealand|aud/usd|audusd|nzd/usd|nzdusd|"
+    r"boj|bank\s+of\s+japan|tokyo\s+cpi|japan|japanese|usd/jpy|usdjpy|"
+    r"boe|bank\s+of\s+england|gbp/usd|gbpusd|uk\s+(?:cpi|gdp|jobs|pmi|retail|wages|inflation|unemployment)|"
+    r"boc|bank\s+of\s+canada|usd/cad|usdcad|canada\s+(?:cpi|gdp|jobs|employment|retail|inflation)|"
+    r"snb|swiss\s+national\s+bank|usd/chf|usdchf|"
+    r"ipo|bitcoin|btc|ethereum|eth|zcash|crypto|cryptocurrency|"
+    r"nvidia|nvda|tesla|tsla|anthropic|openai|apple|aapl|microsoft|msft|amazon|amzn|meta|alphabet|googl|netflix|nflx|coinbase|earnings|"
+    r"shares\s+(?:up|down|rise|fall|jump|drop|surge|plunge|tumble)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Genuine G2 / EUR/USD macro anchors in headline so cross-market headlines are preserved
+_G2_TITLE_ANCHOR_RE = re.compile(
+    r"(?:\bu\.s\.(?!\w)|\b(?:"
+    r"fed|fomc|federal\s+reserve|powell|warsh|waller|bowman|williams|jefferson|kugler|goolsbee|kashkari|bostic|daly|barkin|musalem|hammack|"
+    r"ecb|european\s+central\s+bank|lagarde|guindos|lane|schnabel|cipollone|elderson|bundesbank|nagel|villeroy|knot|rehn|holzmann|panetta|"
+    r"eurusd|eur/usd|euro|eurozone|euro\s+area|germany|german|france|french|ifo|zew|"
+    r"dxy|us\s+dollar|greenback|u\.s\s+dollar|"
+    r"us\s+(?:cpi|pce|ppi|gdp|nfp|payroll|payrolls|jobless|unemployment|retail|ism|pmi|treasury|treasuries|yield|yields|tariff|tariffs|economy)|"
+    r"white\s+house|trump|crude\s+oil|brent|wti|opec|hormuz"
+    r")\b)",
     re.IGNORECASE,
 )
 
@@ -1535,6 +1586,30 @@ class EURUSDEventFilter:
                     None,
                 )
             if revision.provider not in {"ecb", "fed", "us_bea"}:
+                if _ROUNDUP_OR_PREVIEW_TITLE_RE.search(record.title):
+                    return (
+                        FilterResult(
+                            event_id=event_id,
+                            outcome="ignore",
+                            reason="roundup_or_schedule_preview_noise",
+                            checked_at=now,
+                            filter_version=TIER1_FILTER_VERSION,
+                        ),
+                        None,
+                    )
+                if _NON_G2_OR_SINGLE_STOCK_TITLE_RE.search(
+                    record.title
+                ) and not _G2_TITLE_ANCHOR_RE.search(record.title):
+                    return (
+                        FilterResult(
+                            event_id=event_id,
+                            outcome="ignore",
+                            reason="non_g2_or_single_stock_noise",
+                            checked_at=now,
+                            filter_version=TIER1_FILTER_VERSION,
+                        ),
+                        None,
+                    )
                 combined = f"{record.title}\n{record.text}"
                 if not _EURUSD_EN_PATTERN.search(combined):
                     return (
@@ -1604,16 +1679,36 @@ class EURUSDEventFilter:
             event.source_type == "news"
             and not is_authoritative
             and not event.event_id.startswith("bundle:")
-            and not _EURUSD_EN_PATTERN.search(event.raw_text)
-            and not any(k in event.raw_text.lower() for k in self.news_keywords)
         ):
-            return FilterResult(
-                event_id=event.event_id,
-                outcome="ignore",
-                reason="no_eurusd_macro_relevance",
-                checked_at=now,
-                filter_version=TIER1_FILTER_VERSION,
-            )
+            headline = (event.raw_text.splitlines()[0] if event.raw_text else "").strip()
+            if _ROUNDUP_OR_PREVIEW_TITLE_RE.search(headline):
+                return FilterResult(
+                    event_id=event.event_id,
+                    outcome="ignore",
+                    reason="roundup_or_schedule_preview_noise",
+                    checked_at=now,
+                    filter_version=TIER1_FILTER_VERSION,
+                )
+            if _NON_G2_OR_SINGLE_STOCK_TITLE_RE.search(headline) and not _G2_TITLE_ANCHOR_RE.search(
+                headline
+            ):
+                return FilterResult(
+                    event_id=event.event_id,
+                    outcome="ignore",
+                    reason="non_g2_or_single_stock_noise",
+                    checked_at=now,
+                    filter_version=TIER1_FILTER_VERSION,
+                )
+            if not _EURUSD_EN_PATTERN.search(event.raw_text) and not any(
+                k in event.raw_text.lower() for k in self.news_keywords
+            ):
+                return FilterResult(
+                    event_id=event.event_id,
+                    outcome="ignore",
+                    reason="no_eurusd_macro_relevance",
+                    checked_at=now,
+                    filter_version=TIER1_FILTER_VERSION,
+                )
         self._seen.add(event.event_id)
         return FilterResult(
             event_id=event.event_id,

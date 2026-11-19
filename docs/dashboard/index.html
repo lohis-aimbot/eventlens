@@ -454,6 +454,84 @@
       border: 1px dashed var(--border-strong); border-radius: var(--r-xl); background: var(--surface);
     }
 
+    /* Main-Screen Trade & Entry Logic Cards */
+    .hero-card.interactive { cursor: pointer; transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease; }
+    .hero-card.interactive:hover { border-color: var(--accent-border); box-shadow: var(--shadow-pop); transform: translateY(-1px); }
+    .hero-jump-hint { font-size: 11px; color: var(--accent); font-weight: 600; }
+
+    .section-block { display: flex; flex-direction: column; gap: 11px; margin-top: 2px; }
+    .section-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; flex-wrap: wrap;
+    }
+    .section-title-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .section-title { font-size: 15.5px; font-weight: 720; color: var(--ink-1); letter-spacing: -0.02em; }
+    .section-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .link-btn {
+      border: 1px solid var(--border); background: var(--surface); color: var(--accent);
+      font-family: inherit; font-size: 12px; font-weight: 650;
+      padding: 5px 11px; border-radius: 999px; cursor: pointer; transition: all 0.15s ease;
+    }
+    .link-btn:hover { background: var(--accent-soft); border-color: var(--accent-border); }
+
+    .trades-grid { display: flex; flex-direction: column; gap: 11px; }
+    .trade-card {
+      padding: 16px 18px; border-left: 3.5px solid var(--border-strong);
+      transition: border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+    .trade-card.long { border-left-color: var(--green); }
+    .trade-card.short { border-left-color: var(--red); }
+    .trade-card.open {
+      background: linear-gradient(180deg, var(--surface-2) 0%, var(--surface) 46%);
+      box-shadow: 0 0 0 1px var(--accent-border), var(--shadow-card);
+    }
+    .live-pulse {
+      display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); margin-right: 2px;
+    }
+
+    .trade-card-top {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; padding-bottom: 11px; border-bottom: 1px solid var(--border);
+    }
+    .trade-left { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .trade-meta-line { font-size: 12px; color: var(--ink-3); }
+    .trade-right {
+      display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-left: auto;
+    }
+    .trade-px { font-size: 12.5px; color: var(--ink-2); }
+    .trade-pips { font-size: 13px; font-weight: 700; }
+    .trade-pnl { font-size: 18px; font-weight: 760; letter-spacing: -0.025em; }
+
+    .trade-guardrails {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      margin-top: 10px; font-size: 11.5px;
+    }
+
+    .trade-logic-box {
+      margin-top: 11px; padding: 12px 14px; border-radius: var(--r-md);
+      background: var(--surface-2); border: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 7px;
+    }
+    .trade-logic-box.close-box {
+      background: var(--amber-soft); border-color: var(--amber-border);
+    }
+    .logic-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-3);
+    }
+    .logic-head-left { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .logic-headline { font-size: 14.5px; font-weight: 660; color: var(--ink-1); line-height: 1.45; }
+    .logic-rationale {
+      font-size: 13.5px; color: var(--ink-2); line-height: 1.62;
+      padding-left: 10px; border-left: 2.5px solid var(--accent-border);
+    }
+    .trade-card.long .logic-rationale { border-left-color: var(--green-border); }
+    .trade-card.short .logic-rationale { border-left-color: var(--red-border); }
+    .trade-logic-box.close-box .logic-rationale { border-left-color: var(--amber); }
+
+    .trades-more-wrap { display: flex; justify-content: center; margin-top: 2px; }
+
     .footer-note {
       font-size: 11.5px; color: var(--ink-4); text-align: center; padding: 6px 12px 0;
     }
@@ -553,12 +631,15 @@
         </div>
       </div>
 
-      <div class="card hero-card">
+      <div class="card hero-card" id="heroPosCard">
         <div class="hero-top">
           <span data-i18n="heroPosTitle">当前持仓与保护栏</span>
           <span class="pill" id="posChip">—</span>
         </div>
-        <div class="hero-val md tnum" id="heroPos">—</div>
+        <div class="hero-main-row">
+          <div class="hero-val md tnum" id="heroPos">—</div>
+          <span class="hero-jump-hint" id="heroPosJumpHint" data-i18n="jumpToEntryLogic" hidden>查看开仓逻辑 ↓</span>
+        </div>
         <div class="rr-ruler" id="posRuler">
           <div class="rr-bar"><div class="rr-sl"></div><div class="rr-tp"></div></div>
           <div class="rr-labels mono" id="posRulerLabels"><span>SL -14p</span><span>1 : 3 R:R</span><span>TP +42p</span></div>
@@ -586,7 +667,7 @@
     </section>
 
     <!-- TAB 1: Live Intelligence -->
-    <section id="viewDecisions">
+    <section id="viewDecisions" style="display:flex;flex-direction:column;gap:16px;">
       <div class="card regime-card">
         <div class="regime-main">
           <div class="regime-head">
@@ -600,22 +681,57 @@
         <div class="regime-params tnum" id="riskProfileChips"></div>
       </div>
 
-      <div class="toolbar" style="margin-top: 14px; margin-bottom: 12px;">
-        <div class="filter-group" id="decFilters">
-          <button class="filter-pill active" data-filter="all" type="button" data-i18n="fltAll">全部精评决策</button>
-          <button class="filter-pill" data-filter="trade" type="button" data-i18n="fltTrade">开 / 平仓信号</button>
-          <button class="filter-pill" data-filter="hold" type="button" data-i18n="fltHold">观望 HOLD</button>
-          <button class="filter-pill" data-filter="rejected" type="button" data-i18n="fltRej">风控拦截</button>
+      <!-- Executed & Open Trades with Embedded Entry Logic (Main Screen Front-and-Center) -->
+      <section class="section-block" id="mainTradesSection">
+        <div class="section-bar">
+          <div class="section-title-group">
+            <span class="section-title" data-i18n="mainTradesTitle">开仓记录与核心逻辑</span>
+            <span class="pill tnum" id="tradesCountBadge">0</span>
+            <span class="pill green tnum" id="openCountBadge" hidden>0</span>
+          </div>
+          <div class="section-actions">
+            <div class="filter-group" id="tradeFilters">
+              <button class="filter-pill active" data-trade-filter="all" type="button" data-i18n="trFltAll">全部成交</button>
+              <button class="filter-pill" data-trade-filter="open" type="button" data-i18n="trFltOpen">持仓中</button>
+              <button class="filter-pill" data-trade-filter="closed" type="button" data-i18n="trFltClosed">已平仓</button>
+            </div>
+            <button class="link-btn" id="jumpReportsBtn" type="button" data-i18n="viewReportsBtn">每日报表 →</button>
+          </div>
         </div>
-        <div class="search-wrap">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-          <input class="search-input" id="decSearch" type="search" />
+        <div class="trades-grid" id="mainTradesList">
+          <div class="empty-state" data-i18n="loadingText">正在加载成交与开仓逻辑…</div>
         </div>
-      </div>
+        <div class="trades-more-wrap" id="tradesMoreWrap" hidden>
+          <button class="link-btn" id="tradesShowAllBtn" type="button">—</button>
+        </div>
+      </section>
 
-      <div class="decision-list" id="decisionList">
-        <div class="empty-state" data-i18n="loadingText">正在加载实时推理日志…</div>
-      </div>
+      <!-- Live AI Decision Stream -->
+      <section class="section-block" id="decisionStreamSection">
+        <div class="section-bar">
+          <div class="section-title-group">
+            <span class="section-title" data-i18n="streamTitle">实时 AI 决策流</span>
+            <span class="pill tnum" id="streamCountBadge">0</span>
+          </div>
+        </div>
+        <div class="toolbar">
+          <div class="filter-group" id="decFilters">
+            <button class="filter-pill active" data-filter="signal" type="button" data-i18n="fltSignal">重点决策 (含 HOLD)</button>
+            <button class="filter-pill" data-filter="trade" type="button" data-i18n="fltTrade">开 / 平仓信号</button>
+            <button class="filter-pill" data-filter="hold" type="button" data-i18n="fltHold">观望 HOLD</button>
+            <button class="filter-pill" data-filter="rejected" type="button" data-i18n="fltRej">风控拦截</button>
+            <button class="filter-pill" data-filter="all" type="button" data-i18n="fltAll">全部精评 (含忽略)</button>
+          </div>
+          <div class="search-wrap">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            <input class="search-input" id="decSearch" type="search" />
+          </div>
+        </div>
+
+        <div class="decision-list" id="decisionList">
+          <div class="empty-state" data-i18n="loadingText">正在加载实时推理日志…</div>
+        </div>
+      </section>
     </section>
 
     <!-- TAB 2: Performance & Daily Ledger -->
@@ -702,13 +818,36 @@
           heroQuoteTitle: "EUR/USD 实时盘口",
           heroBudgetTitle: "日内亏损预算余量",
           regimeTitle: "市场状态卡",
-          fltAll: "全部精评决策",
+          jumpToEntryLogic: "查看开仓逻辑 ↓",
+          mainTradesTitle: "开仓记录与核心逻辑",
+          trFltAll: "全部成交",
+          trFltOpen: "持仓中",
+          trFltClosed: "已平仓",
+          viewReportsBtn: "每日报表 →",
+          streamTitle: "实时 AI 决策流",
+          fltSignal: "重点决策 (含 HOLD)",
+          fltAll: "全部精评 (含忽略)",
           fltTrade: "开 / 平仓信号",
           fltHold: "观望 HOLD",
           fltRej: "风控拦截",
           searchPlaceholder: "搜索新闻标题、思考链或决策理由…",
           loadingText: "正在同步云端最新决策日志…",
-          emptyDecs: "当前筛选条件下暂无 AI 精评记录（已自动折叠前置过滤的无关新闻）。",
+          emptyDecs: "当前筛选条件下暂无 AI 精评记录。",
+          showIgnoredBtn: "显示全部决策（含忽略项）",
+          noMainTrades: "暂无已执行开仓记录 — 系统正监控 Tier-1 新闻与触价条件，成交后将第一时间在此展示完整开仓逻辑。",
+          noMainTradesFilter: "当前筛选下暂无成交记录。",
+          entryLogicTag: "开仓核心逻辑",
+          closeLogicTag: "AI 主动平仓逻辑",
+          missingDecLogic: "该笔成交为券商对账/手工测试或早于决策日志留存窗口，无绑定 AI 推理卡片。",
+          openLiveBadge: "持仓中",
+          closedBadge: "已平仓",
+          holdElapsedPrefix: "已持仓",
+          feeLbl: "佣金",
+          locateInStream: "定位到决策流 ↗",
+          showAllTradesBtn: "展开全部",
+          collapseTradesBtn: "仅显示最近 6 笔",
+          trailChipPrefix: "追踪保护",
+          preCloseLabel: "收盘前禁开",
           eqChartTitle: "账户净值与累计盈亏曲线",
           eqChartHint: "悬停或手指滑动曲线查看每个节点净值",
           barChartTitle: "每日净盈亏与 AI 活跃度",
@@ -776,13 +915,36 @@
           heroQuoteTitle: "EUR/USD Live Desk",
           heroBudgetTitle: "Daily Risk Budget Remaining",
           regimeTitle: "Market State Card",
-          fltAll: "All Evaluated",
+          jumpToEntryLogic: "Entry logic ↓",
+          mainTradesTitle: "Executed Trades & Entry Logic",
+          trFltAll: "All Trades",
+          trFltOpen: "Open",
+          trFltClosed: "Closed",
+          viewReportsBtn: "Daily Reports →",
+          streamTitle: "Live AI Decision Stream",
+          fltSignal: "Key Decisions (incl. HOLD)",
+          fltAll: "All (incl. IGNORE)",
           fltTrade: "Trade Signals",
           fltHold: "HOLD",
           fltRej: "Risk Rejected",
           searchPlaceholder: "Search headlines, Chain of Thought, or rationale…",
           loadingText: "Syncing cloud intelligence snapshot…",
-          emptyDecs: "No AI-evaluated records match the current filter (pre-filtered wire noise hidden).",
+          emptyDecs: "No AI-evaluated records match the current filter.",
+          showIgnoredBtn: "Show All Decisions (incl. IGNORE)",
+          noMainTrades: "No executed trades yet — new Demo/Shadow entries and their full news + AI rationale will appear here immediately.",
+          noMainTradesFilter: "No trades match this filter.",
+          entryLogicTag: "Entry Logic",
+          closeLogicTag: "AI Close Logic",
+          missingDecLogic: "Broker-synced or pre-retention fill without an attached AI decision card.",
+          openLiveBadge: "OPEN",
+          closedBadge: "CLOSED",
+          holdElapsedPrefix: "Open",
+          feeLbl: "Fee",
+          locateInStream: "Locate in Stream ↗",
+          showAllTradesBtn: "Show All",
+          collapseTradesBtn: "Show Recent 6",
+          trailChipPrefix: "Trail",
+          preCloseLabel: "Pre-Close Cutoff",
           eqChartTitle: "Account Equity & Cumulative PnL Curve",
           eqChartHint: "Hover or scrub along curve to inspect timestamps & equity",
           barChartTitle: "Daily Net PnL & AI Evaluation Volume",
@@ -857,7 +1019,9 @@
         lang: savedLang === "en" ? "en" : "zh",
         theme: savedTheme === "dark" ? "dark" : "light",
         activeTab: "decisions",
-        filter: "all",
+        tradeFilter: "all",
+        showAllMainTrades: false,
+        filter: "signal",
         search: "",
         selectedDay: null,
         expandedIds: new Set(),
@@ -1011,6 +1175,40 @@
         if (state.snapshot) renderDecisions(state.snapshot);
       });
 
+      el("tradeFilters").addEventListener("click", (e) => {
+        const btn = e.target.closest(".filter-pill");
+        if (!btn) return;
+        state.tradeFilter = btn.dataset.tradeFilter;
+        state.showAllMainTrades = false;
+        el("tradeFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b === btn));
+        if (state.snapshot) renderMainTrades(state.snapshot);
+      });
+
+      el("tradesShowAllBtn").addEventListener("click", () => {
+        state.showAllMainTrades = !state.showAllMainTrades;
+        if (state.snapshot) renderMainTrades(state.snapshot);
+      });
+
+      el("jumpReportsBtn").addEventListener("click", () => switchTab("reports"));
+
+      el("heroPosCard").addEventListener("click", () => {
+        const s = state.snapshot;
+        if (!s || !s.account || !s.account.open_position) return;
+        switchTab("decisions");
+        state.tradeFilter = "all";
+        el("tradeFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b.dataset.tradeFilter === "all"));
+        const openTrade = (s.trades || []).find((tr) => tr.status === "open");
+        if (openTrade) {
+          state.expandedIds.add(`trade:${openTrade.trade_id}`);
+          state.drawerTab[`trade:${openTrade.trade_id}`] = "cot";
+        }
+        renderMainTrades(s);
+        requestAnimationFrame(() => {
+          const target = openTrade ? el(`main-trade-${openTrade.trade_id}`) : el("mainTradesSection");
+          if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+
       el("decSearch").addEventListener("input", (e) => {
         state.search = e.target.value.trim().toLowerCase();
         if (state.snapshot) renderDecisions(state.snapshot);
@@ -1113,7 +1311,10 @@
         el("msFloor").textContent = eq > minFloor ? `+$${(eq - minFloor).toFixed(1)} ($${minFloor})` : `$${minFloor}`;
 
         const pos = acc.open_position;
+        const posCard = el("heroPosCard");
         if (pos) {
+          posCard.classList.add("interactive");
+          el("heroPosJumpHint").hidden = false;
           const isLong = pos.side === "long";
           const sideTxt = state.lang === "en" ? (pos.side_en || pos.side.toUpperCase()) : pos.side_zh;
           el("posChip").className = `pill ${isLong ? "green" : "red"}`;
@@ -1123,6 +1324,8 @@
           el("heroPos").textContent = `${fmtSigned(uPnl, 2, " USD")}`;
           el("posRulerLabels").innerHTML = `<span>SL ${pos.stop_loss ? Number(pos.stop_loss).toFixed(5) : "-14p"}</span><span>@ ${Number(pos.entry_price || 0).toFixed(5)}</span><span>TP ${pos.take_profit ? Number(pos.take_profit).toFixed(5) : "+42p"}</span>`;
         } else {
+          posCard.classList.remove("interactive");
+          el("heroPosJumpHint").hidden = true;
           el("posChip").className = "pill";
           el("posChip").textContent = t("flatStatus");
           el("heroPos").className = "hero-val md tnum";
@@ -1169,11 +1372,16 @@
         }
         el("stateNoteText").textContent = noteTxt;
 
+        const trailAct = rp.trailing_activation_pips ?? 8;
+        const trailDist = rp.trailing_distance_pips ?? 6;
+        const cutoffMin = rp.entry_cutoff_minutes_before_close ?? 120;
+        const cutoffH = cutoffMin >= 60 ? `${(cutoffMin / 60).toFixed(cutoffMin % 60 === 0 ? 0 : 1)}h` : `${cutoffMin}m`;
         const rpLabels = state.lang === "en"
-          ? [`SL ${rp.stop_loss_pips || 14}p`, `TP ${rp.take_profit_pips || 42}p`, `Trail ${rp.trailing_activation_pips || 22}/${rp.trailing_distance_pips || 10}p`, `Max ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `Risk ≤ ${rp.max_risk_per_trade_pct || 2}%`]
-          : [`止损 ${rp.stop_loss_pips || 14}p`, `止盈 ${rp.take_profit_pips || 42}p`, `移动 ${rp.trailing_activation_pips || 22}/${rp.trailing_distance_pips || 10}p`, `持仓 ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `单笔 ≤ ${rp.max_risk_per_trade_pct || 2}%`];
+          ? [`SL ${rp.stop_loss_pips || 14}p`, `TP ${rp.take_profit_pips || 42}p`, `Trail ${trailAct}/${trailDist}p`, `Max ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `Cutoff ${cutoffH}`, `Risk ≤ ${rp.max_risk_per_trade_pct || 2}%`]
+          : [`止损 ${rp.stop_loss_pips || 14}p`, `止盈 ${rp.take_profit_pips || 42}p`, `移动 ${trailAct}/${trailDist}p`, `持仓 ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `${t("preCloseLabel")} ${cutoffH}`, `单笔 ≤ ${rp.max_risk_per_trade_pct || 2}%`];
         el("riskProfileChips").innerHTML = rpLabels.map((x) => `<span class="pill tnum">${esc(x)}</span>`).join("");
 
+        renderMainTrades(s);
         renderDecisions(s);
         renderReports(s);
       }
@@ -1207,8 +1415,275 @@
         return [t("riskNoTrade"), "pill"];
       }
 
+      function renderTrajectoryHtml(traj) {
+        if (!traj) return "";
+        let rangeHtml = "";
+        if (traj.mid && traj.h15m && traj.l15m) {
+          const hi = Number(traj.h15m), lo = Number(traj.l15m), cur = Number(traj.mid);
+          const pct = hi > lo ? Math.max(4, Math.min(96, ((cur - lo) / (hi - lo)) * 100)) : 50;
+          rangeHtml = `
+            <div class="range-15m mono" title="15m Range">
+              <span>${lo.toFixed(4)}</span>
+              <div class="range-track"><div class="range-dot" style="left:${pct.toFixed(0)}%"></div></div>
+              <span>${hi.toFixed(4)}</span>
+            </div>
+          `;
+        }
+        return `
+          <div class="traj-row">
+            <div class="traj-pills mono">
+              <span class="pill">@ ${esc(traj.mid || "—")}${traj.spread_pips ? ` · ${esc(traj.spread_pips)}p` : ""}</span>
+              ${["c1m", "c5m", "c15m", "c30m"].map((k, idx) => {
+                const lbl = ["1m", "5m", "15m", "30m"][idx];
+                const val = traj[k];
+                if (val === null || val === undefined) return `<span class="pill">${lbl} N/A</span>`;
+                const n = Number(val);
+                const cls = n > 0 ? "green" : n < 0 ? "red" : "";
+                return `<span class="pill ${cls}">${lbl} ${n > 0 ? "+" : ""}${n.toFixed(1)}p</span>`;
+              }).join("")}
+            </div>
+            ${rangeHtml}
+          </div>
+        `;
+      }
+
+      function renderDrawerHtml(s, d, drawerKey) {
+        if (!d || !state.expandedIds.has(drawerKey)) return "";
+        const activeSub = state.drawerTab[drawerKey] || "cot";
+        const reasons = state.lang === "en"
+          ? ((d.risk && d.risk.reasons_en && d.risk.reasons_en.length) ? d.risk.reasons_en : (d.risk && d.risk.reasons) || [])
+          : ((d.risk && d.risk.reasons_zh && d.risk.reasons_zh.length) ? d.risk.reasons_zh : (d.risk && d.risk.reasons) || []);
+
+        const riskBody = reasons.length
+          ? reasons.map((rz, idx) => `<div style="margin-bottom:4px">• ${esc(rz)} <span class="mono" style="color:var(--ink-4);font-size:11px">(${esc((d.risk.reasons || [])[idx] || "")})</span></div>`).join("")
+          : `<div style="color:var(--ink-3)">${esc(t("riskNoExposure"))}</div>`;
+
+        const promptBody = (s.system_prompts && s.system_prompts[d.prompt_version]) || "";
+        let paneHtml = "";
+        if (activeSub === "cot") {
+          paneHtml = d.reasoning_content
+            ? `<div class="cot-pre">${esc(d.reasoning_content)}</div>`
+            : `<div class="cot-pre" style="color:var(--ink-3)">${esc(t("cotFallback"))}</div>`;
+        } else if (activeSub === "wire") {
+          paneHtml = `<div class="cot-pre mono" style="font-size:12px;color:var(--ink-2)">${esc(d.raw_text || d.headline)}</div>`;
+        } else {
+          paneHtml = `
+            <div style="font-size:12.5px;margin-bottom:10px;">${riskBody}</div>
+            ${promptBody ? `<div style="font-size:11px;font-weight:650;color:var(--ink-3);margin-bottom:5px;">System Prompt (${esc(d.prompt_version)})</div><div class="cot-pre mono" style="font-size:11.5px;color:var(--ink-3);max-height:240px;">${esc(promptBody)}</div>` : ""}
+          `;
+        }
+        return `
+          <div class="drawer">
+            <div class="drawer-tabs">
+              <button class="drawer-tab ${activeSub === "cot" ? "active" : ""}" data-sub="${esc(drawerKey)}:cot" type="button">${esc(t("cotLabel"))} ${d.reasoning_tokens ? `(${d.reasoning_tokens})` : ""}</button>
+              <button class="drawer-tab ${activeSub === "wire" ? "active" : ""}" data-sub="${esc(drawerKey)}:wire" type="button">${esc(t("wireLabel"))}</button>
+              <button class="drawer-tab ${activeSub === "risk" ? "active" : ""}" data-sub="${esc(drawerKey)}:risk" type="button">${esc(t("riskPromptLabel"))}</button>
+            </div>
+            <div class="drawer-pane">${paneHtml}</div>
+          </div>
+        `;
+      }
+
+      function jumpToDecision(decId) {
+        if (!decId || !state.snapshot) return;
+        state.filter = "all";
+        state.search = "";
+        el("decSearch").value = "";
+        el("decFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
+        state.expandedIds.add(decId);
+        state.drawerTab[decId] = "cot";
+        state.highlightDecisionId = decId;
+        switchTab("decisions");
+        renderDecisions(state.snapshot);
+        requestAnimationFrame(() => {
+          const card = el(`dec-${decId}`);
+          if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
+
+      function handleDrawerInteraction(e, reRender) {
+        const jumpBtn = e.target.closest("[data-jump-dec]");
+        if (jumpBtn) {
+          jumpToDecision(jumpBtn.dataset.jumpDec);
+          return;
+        }
+        const tBtn = e.target.closest("[data-toggle]");
+        if (tBtn) {
+          const id = tBtn.dataset.toggle;
+          if (state.expandedIds.has(id)) state.expandedIds.delete(id);
+          else state.expandedIds.add(id);
+          reRender(state.snapshot);
+          return;
+        }
+        const sBtn = e.target.closest("[data-sub]");
+        if (sBtn) {
+          const [id, tabName] = sBtn.dataset.sub.split(":");
+          state.drawerTab[id] = tabName;
+          reRender(state.snapshot);
+          return;
+        }
+        const rBtn = e.target.closest("[data-reset-filter]");
+        if (rBtn) {
+          state.filter = rBtn.dataset.resetFilter;
+          el("decFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b.dataset.filter === state.filter));
+          reRender(state.snapshot);
+        }
+      }
+
+      function renderMainTrades(s) {
+        const allTrades = (s.trades || []).slice().sort((a, b) => {
+          if (a.status === "open" && b.status !== "open") return -1;
+          if (a.status !== "open" && b.status === "open") return 1;
+          return String(b.closed_at || b.opened_at || "").localeCompare(String(a.closed_at || a.opened_at || ""));
+        });
+        const openCount = allTrades.filter((tr) => tr.status === "open").length;
+        el("tradesCountBadge").textContent = `${allTrades.length}`;
+        if (openCount > 0) {
+          el("openCountBadge").hidden = false;
+          el("openCountBadge").textContent = `${openCount} ${t("openLiveBadge")}`;
+        } else {
+          el("openCountBadge").hidden = true;
+        }
+
+        const filtered = allTrades.filter((tr) => {
+          if (state.tradeFilter === "open") return tr.status === "open";
+          if (state.tradeFilter === "closed") return tr.status !== "open";
+          return true;
+        });
+
+        const container = el("mainTradesList");
+        const moreWrap = el("tradesMoreWrap");
+        if (!filtered.length) {
+          moreWrap.hidden = true;
+          container.innerHTML = `<div class="empty-state">${esc(allTrades.length ? t("noMainTradesFilter") : t("noMainTrades"))}</div>`;
+          return;
+        }
+
+        const decMap = new Map();
+        for (const d of (s.decisions || [])) {
+          if (d.decision_id) decMap.set(d.decision_id, d);
+        }
+        const rp = (s.model_config && s.model_config.risk_profile) || {};
+        const refNowMs = s.generated_at ? Date.parse(s.generated_at) : Date.now();
+        const limit = state.showAllMainTrades ? filtered.length : 6;
+        const shown = filtered.slice(0, limit);
+
+        if (filtered.length > 6) {
+          moreWrap.hidden = false;
+          el("tradesShowAllBtn").textContent = state.showAllMainTrades
+            ? t("collapseTradesBtn")
+            : `${t("showAllTradesBtn")} (${filtered.length})`;
+        } else {
+          moreWrap.hidden = true;
+        }
+
+        container.innerHTML = shown.map((tr) => {
+          const isOpenPos = tr.status === "open";
+          const sideTxt = state.lang === "en" ? (tr.side_en || tr.side.toUpperCase()) : tr.side_zh;
+          const reasonTxt = state.lang === "en" ? (tr.exit_reason_en || tr.exit_reason_code) : tr.exit_reason_zh;
+          const pnl = Number(tr.net_pnl_usd || 0);
+          const pnlCls = pnl > 0 ? "pos" : pnl < 0 ? "neg" : "";
+
+          let holdSec = tr.holding_seconds;
+          if ((holdSec === null || holdSec === undefined) && tr.opened_at) {
+            const openMs = Date.parse(tr.opened_at);
+            if (!Number.isNaN(openMs) && !Number.isNaN(refNowMs)) {
+              holdSec = Math.max(0, Math.floor((refNowMs - openMs) / 1000));
+            }
+          }
+
+          const entryDec = tr.decision_id ? decMap.get(tr.decision_id) : null;
+          const closeDec = tr.close_decision_id ? decMap.get(tr.close_decision_id) : null;
+          const drawerKey = `trade:${tr.trade_id}`;
+          const isDrawerOpen = state.expandedIds.has(drawerKey);
+
+          const slStr = tr.stop_loss ? Number(tr.stop_loss).toFixed(5) : `-${rp.stop_loss_pips || 14}p`;
+          const tpStr = tr.take_profit ? Number(tr.take_profit).toFixed(5) : `+${rp.take_profit_pips || 42}p`;
+          const trailStr = `${rp.trailing_activation_pips ?? 8}/${rp.trailing_distance_pips ?? 6}p`;
+
+          const guardrailsHtml = isOpenPos
+            ? `<div class="trade-guardrails mono">
+                <span class="pill red">SL ${esc(slStr)}</span>
+                <span class="pill blue">${esc(t("trailChipPrefix"))} +${esc(trailStr)}</span>
+                <span class="pill green">TP ${esc(tpStr)}</span>
+                <span class="pill">Max ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h</span>
+              </div>`
+            : "";
+
+          const logicHtml = entryDec
+            ? `<div class="trade-logic-box">
+                <div class="logic-head tnum">
+                  <div class="logic-head-left">
+                    <span class="pill blue">${esc(t("entryLogicTag"))}</span>
+                    <span class="pill">${esc(sourceLabel(entryDec.source || entryDec.source_type))}</span>
+                    ${entryDec.review_meta ? `<span class="pill blue mono">⚡ ${esc(entryDec.review_meta.trigger_rule)}</span>` : ""}
+                  </div>
+                  <span>${esc(fmtTime(entryDec.timestamp, true))}${entryDec.reasoning_tokens ? ` · ${entryDec.reasoning_tokens} CoT tok` : ""}</span>
+                </div>
+                <div class="logic-headline">${esc(entryDec.headline)}</div>
+                <div class="logic-rationale">${esc(entryDec.rationale || "—")}</div>
+                ${renderTrajectoryHtml(entryDec.trajectory)}
+              </div>`
+            : `<div class="trade-logic-box">
+                <div class="logic-head"><span class="pill">${esc(t("entryLogicTag"))}</span></div>
+                <div style="font-size:12.5px;color:var(--ink-3)">${esc(t("missingDecLogic"))}</div>
+              </div>`;
+
+          const closeLogicHtml = closeDec
+            ? `<div class="trade-logic-box close-box">
+                <div class="logic-head tnum">
+                  <div class="logic-head-left">
+                    <span class="pill amber">${esc(t("closeLogicTag"))}</span>
+                    <span class="pill">${esc(sourceLabel(closeDec.source || closeDec.source_type))}</span>
+                  </div>
+                  <span>${esc(fmtTime(closeDec.timestamp, true))}</span>
+                </div>
+                <div class="logic-headline">${esc(closeDec.headline)}</div>
+                <div class="logic-rationale">${esc(closeDec.rationale || "—")}</div>
+              </div>`
+            : "";
+
+          return `
+            <article class="card trade-card ${esc(tr.side)} ${isOpenPos ? "open" : ""}" id="main-trade-${esc(tr.trade_id)}">
+              <div class="trade-card-top">
+                <div class="trade-left">
+                  <span class="pill ${isOpenPos ? "green" : ""}">${isOpenPos ? `<span class="live-pulse"></span>` : ""}${esc(isOpenPos ? t("openLiveBadge") : t("closedBadge"))}</span>
+                  <span class="pill ${tr.side === "long" ? "green" : "red"}">${esc(sideTxt)} ${Number(tr.lots || 0).toFixed(2)} ${esc(t("lotUnit"))}</span>
+                  <span class="pill">${esc(reasonTxt)}</span>
+                  <span class="trade-meta-line tnum">${esc(fmtTime(tr.opened_at, false))} · ${isOpenPos ? `${esc(t("holdElapsedPrefix"))} ` : ""}${esc(fmtDur(holdSec))}</span>
+                </div>
+                <div class="trade-right">
+                  <span class="trade-px mono">${tr.entry_price ? Number(tr.entry_price).toFixed(5) : "—"} → ${tr.exit_price ? Number(tr.exit_price).toFixed(5) : "—"}</span>
+                  <span class="trade-pips mono ${pnlCls}">${tr.pips !== null && tr.pips !== undefined ? fmtSigned(tr.pips, 1, "p") : "—"}</span>
+                  <span class="trade-pnl tnum ${pnlCls}">${fmtSigned(pnl, 2, " USD")}</span>
+                  ${tr.commissions_usd !== null && tr.commissions_usd !== undefined ? `<span class="trade-meta-line tnum">${esc(t("feeLbl"))} $${Number(tr.commissions_usd).toFixed(2)}</span>` : ""}
+                </div>
+              </div>
+              ${guardrailsHtml}
+              ${logicHtml}
+              ${closeLogicHtml}
+              ${entryDec ? `
+                <div class="dec-footer">
+                  <button class="drawer-btn" data-toggle="${esc(drawerKey)}" type="button">
+                    ${isDrawerOpen ? `${esc(t("collapseBtn"))} ▲` : `${esc(t("expandBtn"))} ▼`}
+                  </button>
+                  <button class="jump-btn" data-jump-dec="${esc(entryDec.decision_id)}" type="button">${esc(t("locateInStream"))}</button>
+                </div>
+                ${renderDrawerHtml(s, entryDec, drawerKey)}
+              ` : ""}
+            </article>
+          `;
+        }).join("");
+      }
+
       function renderDecisions(s) {
-        const list = (s.decisions || []).filter((d) => {
+        const allDecs = s.decisions || [];
+        const list = allDecs.filter((d) => {
+          if (state.filter === "signal") {
+            const isSigAction = ["SET_TARGET", "CLOSE", "HOLD"].includes(d.portfolio_action);
+            const isFailOrRej = (d.risk && d.risk.outcome === "reject") || ["risk_rejected", "target_rejected", "reasoning_failed"].includes(d.state);
+            if (!isSigAction && !isFailOrRej) return false;
+          }
           if (state.filter === "trade" && !["SET_TARGET", "CLOSE"].includes(d.portfolio_action)) return false;
           if (state.filter === "hold" && !["HOLD", "IGNORE_EVENT"].includes(d.portfolio_action)) return false;
           if (state.filter === "rejected") {
@@ -1222,74 +1697,23 @@
           return true;
         });
 
+        el("streamCountBadge").textContent = list.length === allDecs.length ? `${allDecs.length}` : `${list.length} / ${allDecs.length}`;
+
         const container = el("decisionList");
         if (!list.length) {
-          container.innerHTML = `<div class="empty-state">${esc(t("emptyDecs"))}</div>`;
+          const resetBtn = (state.filter === "signal" && allDecs.length > 0)
+            ? `<div style="margin-top:10px"><button class="link-btn" data-reset-filter="all" type="button">${esc(t("showIgnoredBtn"))} (${allDecs.length})</button></div>`
+            : "";
+          container.innerHTML = `<div class="empty-state"><div>${esc(t("emptyDecs"))}</div>${resetBtn}</div>`;
           return;
         }
 
         container.innerHTML = list.map((d) => {
           const idKey = d.decision_id || d.event_id;
           const isOpen = state.expandedIds.has(idKey);
-          const activeSub = state.drawerTab[idKey] || "cot";
           const isHl = state.highlightDecisionId && state.highlightDecisionId === d.decision_id;
           const [aTxt, aCls] = actionBadge(d);
           const [rTxt, rCls] = riskBadge(d);
-          const traj = d.trajectory;
-          let rangeHtml = "";
-          if (traj && traj.mid && traj.h15m && traj.l15m) {
-            const hi = Number(traj.h15m), lo = Number(traj.l15m), cur = Number(traj.mid);
-            const pct = hi > lo ? Math.max(4, Math.min(96, ((cur - lo) / (hi - lo)) * 100)) : 50;
-            rangeHtml = `
-              <div class="range-15m mono" title="15m Range">
-                <span>${lo.toFixed(4)}</span>
-                <div class="range-track"><div class="range-dot" style="left:${pct.toFixed(0)}%"></div></div>
-                <span>${hi.toFixed(4)}</span>
-              </div>
-            `;
-          }
-
-          const trajHtml = traj
-            ? `<div class="traj-row">
-                <div class="traj-pills mono">
-                  <span class="pill">@ ${esc(traj.mid || "—")}${traj.spread_pips ? ` · ${esc(traj.spread_pips)}p` : ""}</span>
-                  ${["c1m", "c5m", "c15m", "c30m"].map((k, idx) => {
-                    const lbl = ["1m", "5m", "15m", "30m"][idx];
-                    const val = traj[k];
-                    if (val === null || val === undefined) return `<span class="pill">${lbl} N/A</span>`;
-                    const n = Number(val);
-                    const cls = n > 0 ? "green" : n < 0 ? "red" : "";
-                    return `<span class="pill ${cls}">${lbl} ${n > 0 ? "+" : ""}${n.toFixed(1)}p</span>`;
-                  }).join("")}
-                </div>
-                ${rangeHtml}
-              </div>`
-            : "";
-
-          const reasons = state.lang === "en"
-            ? ((d.risk && d.risk.reasons_en && d.risk.reasons_en.length) ? d.risk.reasons_en : (d.risk && d.risk.reasons) || [])
-            : ((d.risk && d.risk.reasons_zh && d.risk.reasons_zh.length) ? d.risk.reasons_zh : (d.risk && d.risk.reasons) || []);
-
-          const riskBody = reasons.length
-            ? reasons.map((rz, idx) => `<div style="margin-bottom:4px">• ${esc(rz)} <span class="mono" style="color:var(--ink-4);font-size:11px">(${esc((d.risk.reasons || [])[idx] || "")})</span></div>`).join("")
-            : `<div style="color:var(--ink-3)">${esc(t("riskNoExposure"))}</div>`;
-
-          const promptBody = (s.system_prompts && s.system_prompts[d.prompt_version]) || "";
-          let paneHtml = "";
-          if (isOpen) {
-            if (activeSub === "cot") {
-              paneHtml = d.reasoning_content
-                ? `<div class="cot-pre">${esc(d.reasoning_content)}</div>`
-                : `<div class="cot-pre" style="color:var(--ink-3)">${esc(t("cotFallback"))}</div>`;
-            } else if (activeSub === "wire") {
-              paneHtml = `<div class="cot-pre mono" style="font-size:12px;color:var(--ink-2)">${esc(d.raw_text || d.headline)}</div>`;
-            } else {
-              paneHtml = `
-                <div style="font-size:12.5px;margin-bottom:10px;">${riskBody}</div>
-                ${promptBody ? `<div style="font-size:11px;font-weight:650;color:var(--ink-3);margin-bottom:5px;">System Prompt (${esc(d.prompt_version)})</div><div class="cot-pre mono" style="font-size:11.5px;color:var(--ink-3);max-height:240px;">${esc(promptBody)}</div>` : ""}
-              `;
-            }
-          }
 
           return `
             <article class="card dec-card ${isHl ? "highlight" : ""}" id="dec-${esc(idKey)}">
@@ -1308,44 +1732,21 @@
               </div>
               <div class="dec-headline">${esc(d.headline)}</div>
               <div class="dec-rationale">${esc(d.rationale || "—")}</div>
-              ${trajHtml}
+              ${renderTrajectoryHtml(d.trajectory)}
               <div class="dec-footer">
                 <button class="drawer-btn" data-toggle="${esc(idKey)}" type="button">
                   ${isOpen ? `${esc(t("collapseBtn"))} ▲` : `${esc(t("expandBtn"))} ▼`}
                 </button>
                 <span class="mono" style="font-size:11px;color:var(--ink-4)">${esc(d.model_version || "deepseek-reasoner")}</span>
               </div>
-              ${isOpen ? `
-                <div class="drawer">
-                  <div class="drawer-tabs">
-                    <button class="drawer-tab ${activeSub === "cot" ? "active" : ""}" data-sub="${esc(idKey)}:cot" type="button">${esc(t("cotLabel"))} ${d.reasoning_tokens ? `(${d.reasoning_tokens})` : ""}</button>
-                    <button class="drawer-tab ${activeSub === "wire" ? "active" : ""}" data-sub="${esc(idKey)}:wire" type="button">${esc(t("wireLabel"))}</button>
-                    <button class="drawer-tab ${activeSub === "risk" ? "active" : ""}" data-sub="${esc(idKey)}:risk" type="button">${esc(t("riskPromptLabel"))}</button>
-                  </div>
-                  <div class="drawer-pane">${paneHtml}</div>
-                </div>
-              ` : ""}
+              ${renderDrawerHtml(s, d, idKey)}
             </article>
           `;
         }).join("");
       }
 
-      el("decisionList").addEventListener("click", (e) => {
-        const tBtn = e.target.closest("[data-toggle]");
-        if (tBtn) {
-          const id = tBtn.dataset.toggle;
-          if (state.expandedIds.has(id)) state.expandedIds.delete(id);
-          else state.expandedIds.add(id);
-          renderDecisions(state.snapshot);
-          return;
-        }
-        const sBtn = e.target.closest("[data-sub]");
-        if (sBtn) {
-          const [id, tabName] = sBtn.dataset.sub.split(":");
-          state.drawerTab[id] = tabName;
-          renderDecisions(state.snapshot);
-        }
-      });
+      el("mainTradesList").addEventListener("click", (e) => handleDrawerInteraction(e, renderMainTrades));
+      el("decisionList").addEventListener("click", (e) => handleDrawerInteraction(e, renderDecisions));
 
       function renderReports(s) {
         const k = s.kpis || {};
@@ -1468,20 +1869,7 @@
       el("tradeTableBody").addEventListener("click", (e) => {
         const btn = e.target.closest("[data-jump-dec]");
         if (!btn) return;
-        const decId = btn.dataset.jumpDec;
-        state.filter = "all";
-        state.search = "";
-        el("decSearch").value = "";
-        el("decFilters").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b.dataset.filter === "all"));
-        state.expandedIds.add(decId);
-        state.drawerTab[decId] = "cot";
-        state.highlightDecisionId = decId;
-        switchTab("decisions");
-        renderDecisions(state.snapshot);
-        requestAnimationFrame(() => {
-          const card = el(`dec-${decId}`);
-          if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
-        });
+        jumpToDecision(btn.dataset.jumpDec);
       });
 
       function renderCharts(s) {

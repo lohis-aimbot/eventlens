@@ -589,3 +589,395 @@ def test_observe_schedule_cli_groups_windows_and_marks_missing_consensus(
     table_str = format_macro_schedule_table(sched)
     assert "BUNDLED HIGH WINDOW (3 simultaneous releases)" in table_str
     assert "MISSING" in table_str
+
+
+def test_eurusd_filter_v2_blocks_wraps_non_g2_and_preserves_g2_anchors(tmp_path: Path) -> None:
+    """EURUSDEventFilter v2 rejects roundups/expiries and non-G2/single-stock noise unless a G2 macro anchor is present."""
+    store = ObserverStore(tmp_path / "filter_v2.sqlite", clock=lambda: NOW)
+    samples = [
+        (
+            "wrap-1",
+            "investingLive Americas FX news wrap 18 Nov: USD mixed in quiet trade",
+            "US dollar hovered near weekly highs while stocks consolidated.",
+            3,
+        ),
+        (
+            "exp-1",
+            "FX option expiries for 19 November NY cut",
+            "EUR/USD 1.0950 (1.2B), USD/JPY 155.00 (800M).",
+            2,
+        ),
+        (
+            "pboc-1",
+            "PBOC sets USD/CNY reference rate for today at 7.1932",
+            "China central bank injects 100B yuan via 7-day reverse repos (USD benchmark).",
+            2,
+        ),
+        (
+            "aud-1",
+            "Australia Q3 wage price index +0.8% vs +0.8% q/q expected",
+            "RBA remains patient on rates while USD trades steady.",
+            2,
+        ),
+        (
+            "ipo-1",
+            "Anthropic eyes $60B IPO as Nvidia and Bitcoin rally",
+            "Tech shares surge with US Treasury yields flat.",
+            2,
+        ),
+        (
+            "fed-1",
+            "Fed's Waller: inflation sticky, no rush to cut rates",
+            "US Treasury yields climb as market trims December Fed cut odds.",
+            3,
+        ),
+        (
+            "cross-1",
+            "BOJ caution and Fed's Waller lift US dollar against EUR/USD",
+            "Transatlantic yield divergence pushes EUR/USD lower.",
+            3,
+        ),
+    ]
+    store.record(
+        CaptureBatch(
+            provider="investinglive",
+            stream="news/live_feed",
+            kind="news",
+            request_url="https://investinglive.com/live-feed/",
+            request_started_at=NOW,
+            received_at=NOW,
+            elapsed_ms=5.0,
+            attempts=1,
+            payload=b"<html/>",
+            records=tuple(
+                SourceRecord(
+                    source_id=sid,
+                    kind="news",
+                    source_url=f"https://investinglive.com/news/{sid}/",
+                    title=title,
+                    text=body,
+                    publisher_display_at=NOW - timedelta(seconds=10),
+                    importance=imp,
+                )
+                for sid, title, body, imp in samples
+            ),
+        )
+    )
+    flt = EURUSDEventFilter(clock=lambda: NOW)
+    by_id: dict[str, str] = {}
+    for rev in store.revisions(as_of=NOW, limit=50):
+        res, _ = flt.evaluate_revision(rev, checked_at=NOW)
+        by_id[rev.record.source_id] = f"{res.outcome}:{res.reason}"
+
+    assert by_id["wrap-1"] == "ignore:roundup_or_schedule_preview_noise"
+    assert by_id["exp-1"] == "ignore:roundup_or_schedule_preview_noise"
+    assert by_id["pboc-1"] == "ignore:non_g2_or_single_stock_noise"
+    assert by_id["aud-1"] == "ignore:non_g2_or_single_stock_noise"
+    assert by_id["ipo-1"] == "ignore:non_g2_or_single_stock_noise"
+    assert by_id["fed-1"] == "accept:eligible_investinglive_news"
+    assert by_id["cross-1"] == "accept:eligible_investinglive_news"
+    store.close()
+
+
+def test_shadow_runner_news_revision_cooldown_and_empty_delta_suppression(tmp_path: Path) -> None:
+    """Rapid investinglive r2+ edits within 300s and zero-text-delta edits are filtered; calendar r2 and >300s cumulative r3 pass."""
+    t_now = [datetime(2026, 11, 18, 12, 0, 0, tzinfo=UTC)]
+    store = ObserverStore(tmp_path / "cd_obs.sqlite", clock=lambda: t_now[0])
+    shadow_db = tmp_path / "cd_shadow.sqlite"
+    mem_db = tmp_path / "cd_mem.sqlite"
+
+    # Baseline poll so subsequent events are live arrivals
+    store.record(
+        CaptureBatch(
+            provider="investinglive",
+            stream="news/live_feed",
+            kind="news",
+            request_url=INVESTINGLIVE_RSS_URL,
+            request_started_at=t_now[0],
+            received_at=t_now[0],
+            elapsed_ms=2.0,
+            attempts=1,
+            payload=b"<html/>",
+            records=(),
+        )
+    )
+    store.record(
+        CaptureBatch(
+            provider="forexfactory",
+            stream="calendar/thisweek",
+            kind="calendar",
+            request_url=FOREXFACTORY_CALENDAR_URL,
+            request_started_at=t_now[0],
+            received_at=t_now[0],
+            elapsed_ms=2.0,
+            attempts=1,
+            payload=b"[]",
+            records=(),
+        )
+    )
+
+    seen_prompts: list[str] = []
+
+    class _RecordingClient:
+        provider = "deepseek"
+        model = "deepseek-chat"
+
+        async def complete_json(self, *, system: str, user: str) -> ModelResponse:
+            seen_prompts.append(user)
+            return ModelResponse(
+                content=json.dumps(
+                    {
+                        "portfolio_action": "HOLD",
+                        "target_direction": "flat",
+                        "target_weight": "0",
+                        "strategy_hypothesis": "unspecified",
+                        "market_bias": "neutral",
+                        "market_state_note": "Holding steady.",
+                        "watch_condition": None,
+                        "rationale": "Acknowledge release.",
+                    }
+                ),
+                input_tokens=100,
+                output_tokens=40,
+                model_id="deepseek-chat",
+            )
+
+    def _rec_news(text: str, ts: datetime) -> SourceRecord:
+        return SourceRecord(
+            source_id="waller-qa",
+            kind="news",
+            source_url="https://investinglive.com/centralbank/waller-qa/",
+            title="Fed's Waller speaks on policy path",
+            text=text,
+            publisher_display_at=t_now[0],
+            modified_at=ts,
+            importance=3,
+        )
+
+    memory = SQLiteThesisMemory(mem_db, clock=lambda: t_now[0], allow_targets=True)
+    state_store = SQLiteRuntimeStore(shadow_db)
+    ledger = SQLiteShadowLedger(shadow_db, clock=lambda: t_now[0])
+    runtime = IntradayEventRuntime(
+        memory=memory,
+        portfolio_state=ledger,
+        market_provider=lambda ts: _fresh_market(ts),
+        agent=SinglePassTradingAgent(_RecordingClient(), clock=lambda: t_now[0]),
+        target_validator=DeterministicTargetValidator(),
+        risk_engine=DeterministicHardRiskEngine(clock=lambda: t_now[0]),
+        shadow_executor=ledger,
+        state_store=state_store,
+        event_filter=EURUSDEventFilter(clock=lambda: t_now[0]),
+        clock=lambda: t_now[0],
+    )
+    runner = ShadowRunner(
+        runtime=runtime,
+        ledger=ledger,
+        observer_store=store,
+        allow_baseline_revisions=False,
+        bundle_simultaneous=False,
+        news_revision_cooldown_seconds=300.0,
+        clock=lambda: t_now[0],
+    )
+    runner._run_started_at = t_now[0] + timedelta(seconds=1)
+
+    try:
+        # 1. Live r1 news arrives -> evaluated
+        t_now[0] += timedelta(seconds=10)
+        store.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                request_url=INVESTINGLIVE_RSS_URL,
+                request_started_at=t_now[0],
+                received_at=t_now[0],
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"r1",
+                records=(_rec_news("Inflation progress has stalled.", t_now[0]),),
+            )
+        )
+        assert len(asyncio.run(runner.step_events())) == 1
+        assert len(seen_prompts) == 1
+
+        # 2. r2 with identical text (modified_at changed, no new text lines) -> revision_no_substantive_text_delta
+        t_now[0] += timedelta(minutes=7)
+        store.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                request_url=INVESTINGLIVE_RSS_URL,
+                request_started_at=t_now[0],
+                received_at=t_now[0],
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"r2",
+                records=(_rec_news("Inflation progress has stalled.\n", t_now[0]),),
+            )
+        )
+        assert asyncio.run(runner.step_events()) == ()
+        row_r2 = state_store.get_event_state("investinglive:news:waller-qa:r2")
+        assert row_r2 is not None
+        assert row_r2["state"] == "filtered_out"
+        assert row_r2["reason"] == "revision_no_substantive_text_delta"
+
+        # 3. r3 adds new Q&A bullet only 60s later (remember r2 was empty-delta so baseline is r1 at t+10s,
+        # wait -> let's test <300s explicitly with a fresh rapid article waller-qa-2!)
+        t_rapid = t_now[0]
+        store.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                request_url=INVESTINGLIVE_RSS_URL,
+                request_started_at=t_rapid,
+                received_at=t_rapid,
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"q2-r1",
+                records=(
+                    SourceRecord(
+                        source_id="waller-qa-2",
+                        kind="news",
+                        source_url="https://investinglive.com/centralbank/waller-qa-2/",
+                        title="Fed's Waller Q&A opening",
+                        text="Rates may hold steady.",
+                        publisher_display_at=t_rapid,
+                        modified_at=t_rapid,
+                        importance=3,
+                    ),
+                ),
+            )
+        )
+        assert len(asyncio.run(runner.step_events())) == 1
+        assert len(seen_prompts) == 2
+
+        t_now[0] = t_rapid + timedelta(seconds=60)
+        store.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                request_url=INVESTINGLIVE_RSS_URL,
+                request_started_at=t_now[0],
+                received_at=t_now[0],
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"q2-r2",
+                records=(
+                    SourceRecord(
+                        source_id="waller-qa-2",
+                        kind="news",
+                        source_url="https://investinglive.com/centralbank/waller-qa-2/",
+                        title="Fed's Waller Q&A opening",
+                        text="Rates may hold steady.\nCore PCE risk stays elevated.",
+                        publisher_display_at=t_rapid,
+                        modified_at=t_now[0],
+                        importance=3,
+                    ),
+                ),
+            )
+        )
+        assert asyncio.run(runner.step_events()) == ()
+        row_q2_r2 = state_store.get_event_state("investinglive:news:waller-qa-2:r2")
+        assert row_q2_r2 is not None
+        assert row_q2_r2["state"] == "filtered_out"
+        assert row_q2_r2["reason"] == "rapid_revision_cooldown"
+
+        # 4. q2-r3 arrives 360s after r1 with another line -> passes cooldown and gets cumulative delta vs r1!
+        t_now[0] = t_rapid + timedelta(seconds=360)
+        store.record(
+            CaptureBatch(
+                provider="investinglive",
+                stream="news/live_feed",
+                kind="news",
+                request_url=INVESTINGLIVE_RSS_URL,
+                request_started_at=t_now[0],
+                received_at=t_now[0],
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"q2-r3",
+                records=(
+                    SourceRecord(
+                        source_id="waller-qa-2",
+                        kind="news",
+                        source_url="https://investinglive.com/centralbank/waller-qa-2/",
+                        title="Fed's Waller Q&A opening",
+                        text="Rates may hold steady.\nCore PCE risk stays elevated.\nPayroll growth remains resilient.",
+                        publisher_display_at=t_rapid,
+                        modified_at=t_now[0],
+                        importance=3,
+                    ),
+                ),
+            )
+        )
+        res_r3 = asyncio.run(runner.step_events())
+        assert len(res_r3) == 1
+        assert "Core PCE risk stays elevated." in seen_prompts[-1]
+        assert "Payroll growth remains resilient." in seen_prompts[-1]
+
+        # 5. Calendar r1 -> r2 only 30s later MUST NOT be suppressed by news cooldown
+        t_cal = t_now[0]
+        cal_sched = t_cal - timedelta(seconds=10)
+        store.record(
+            CaptureBatch(
+                provider="forexfactory",
+                stream="calendar/thisweek",
+                kind="calendar",
+                request_url=FOREXFACTORY_CALENDAR_URL,
+                request_started_at=t_cal,
+                received_at=t_cal,
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"cal1",
+                records=(
+                    SourceRecord(
+                        source_id="ff-us-cpi",
+                        kind="calendar",
+                        source_url=FOREXFACTORY_CALENDAR_URL,
+                        title="US Core CPI m/m",
+                        text="Actual 0.4% vs 0.3%",
+                        scheduled_at=cal_sched,
+                        importance=3,
+                        macro=MacroValues(
+                            country="USD", actual="0.4%", reported_forecast="0.3%", previous="0.3%"
+                        ),
+                    ),
+                ),
+            )
+        )
+        assert len(asyncio.run(runner.step_events())) == 1
+        t_now[0] = t_cal + timedelta(seconds=30)
+        store.record(
+            CaptureBatch(
+                provider="forexfactory",
+                stream="calendar/thisweek",
+                kind="calendar",
+                request_url=FOREXFACTORY_CALENDAR_URL,
+                request_started_at=t_now[0],
+                received_at=t_now[0],
+                elapsed_ms=2.0,
+                attempts=1,
+                payload=b"cal2",
+                records=(
+                    SourceRecord(
+                        source_id="ff-us-cpi",
+                        kind="calendar",
+                        source_url=FOREXFACTORY_CALENDAR_URL,
+                        title="US Core CPI m/m",
+                        text="Actual 0.5% vs 0.3% (corrected)",
+                        scheduled_at=cal_sched,
+                        importance=3,
+                        macro=MacroValues(
+                            country="USD", actual="0.5%", reported_forecast="0.3%", previous="0.3%"
+                        ),
+                    ),
+                ),
+            )
+        )
+        assert len(asyncio.run(runner.step_events())) == 1
+    finally:
+        store.close()
+        ledger.close()
+        state_store.close()

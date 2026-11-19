@@ -3,11 +3,14 @@
 </p>
 
 <p align="center">
-  <strong>English</strong> · <a href="README_CN.md">简体中文</a>
+  <strong>English</strong> · <a href="README_CN.md">简体中文</a> &nbsp;|&nbsp;
+  <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><strong>Live Web Dashboard ↗</strong></a> &nbsp;·&nbsp;
+  <a href="https://lohis-aimbot.github.io/eventlens/">Project Overview ↗</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
+  <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/Web_Dashboard-Live_Sync-2563eb?style=flat-square" alt="Live Web Dashboard" /></a>
 </p>
 
 <p align="center">
@@ -28,6 +31,9 @@
 ---
 
 ## Overview
+
+> [!TIP]
+> **Live Bilingual Web Dashboard:** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)** — Inspect open & historical Demo trades with their triggering news & entry logic, full DeepSeek reasoning chains (`CoT`), daily FX PnL curves, and bilingual (`中文 / EN`) + mobile PWA support (reads sanitized snapshots synced from `dashboard-live`).
 
 > [!IMPORTANT]
 > **Operational checkpoint · November 11, 2026.** Automated Python verification passes **377 tests**, Ruff, and mypy, including `HistoricalTrade` `ClosingDealId` close-deal accounting, conservative cross-day `demo_daily_state` risk guards, and `UsdPerOneLot` / `UsdPerMillionUsdVolume` Razor commission metadata. On the Ubuntu 24.04 GCP VM, the final `EventLensCliBridge.algo` (`TargetFramework=net6.0`, locked `cTrader.Automate 1.0.21`, `BUILD_UID_GID=0:0`) compiled cleanly (`0 errors / 0 warnings`), passed disconnected `--network none --user 1654:1654` metadata inspection, completed read-only `demo-reconcile` (`clean: true`) and a bounded `1,000 EUR` Pepperstone Demo `demo-smoke` cycle (`passed: true`, SL attached, `ClosingDealId` verified, `flat_after_close: true`), and entered continuous `24×5` Demo evaluation. See the historical [cloud preflight audit](docs/research/2026-11-11-cloud-preflight-audit.md) and [cloud deployment runbook](docs/cloud-24x5-deployment.md) for exact boundaries.

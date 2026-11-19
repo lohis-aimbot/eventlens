@@ -90,6 +90,32 @@ def is_in_daily_close_window(
     return close_utc <= ts_utc < rollover_utc
 
 
+def is_in_pre_close_entry_cutoff(
+    ts: datetime,
+    *,
+    tz_name: str = "America/New_York",
+    close_hour: int = 16,
+    close_minute: int = 55,
+    rollover_hour: int = 17,
+    rollover_minute: int = 0,
+    entry_cutoff_minutes_before_close: int = 0,
+) -> bool:
+    """True during the pre-close buffer before NY daily close where new risk-increasing entries are paused."""
+    if entry_cutoff_minutes_before_close <= 0:
+        return False
+    _, _, close_utc, rollover_utc = trading_day_window(
+        ts,
+        tz_name=tz_name,
+        close_hour=close_hour,
+        close_minute=close_minute,
+        rollover_hour=rollover_hour,
+        rollover_minute=rollover_minute,
+    )
+    cutoff_start_utc = close_utc - timedelta(minutes=entry_cutoff_minutes_before_close)
+    ts_utc = ts.astimezone(UTC)
+    return cutoff_start_utc <= ts_utc < rollover_utc
+
+
 class HardRiskEngine(Protocol):
     async def assess(
         self, decision: AgentDecision, current: PortfolioSnapshot, market: MarketSnapshot
@@ -127,6 +153,7 @@ class RiskPolicy(Contract):
     daily_close_minute: int = Field(default=55, ge=0, le=59)
     rollover_hour: int = Field(default=17, ge=0, le=23)
     rollover_minute: int = Field(default=0, ge=0, le=59)
+    entry_cutoff_minutes_before_close: int = Field(default=0, ge=0, le=360)
     kill_switch_active: bool = False
     block_unverified_decision_evidence: bool = True
     require_verified_decision_evidence: bool = False
@@ -152,6 +179,7 @@ class RiskPolicy(Contract):
         ex_ante_stop_loss_pips: Decimal | None = None,
         max_margin_utilization_pct: Decimal | None = None,
         cap_quantity_by_risk_budget: bool = False,
+        entry_cutoff_minutes_before_close: int = 120,
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo account standard: 200x leverage, 0.01..100 lots, controlled risk."""
         return cls(
@@ -172,6 +200,7 @@ class RiskPolicy(Contract):
             ex_ante_stop_loss_pips=ex_ante_stop_loss_pips,
             max_margin_utilization_pct=max_margin_utilization_pct,
             cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
+            entry_cutoff_minutes_before_close=entry_cutoff_minutes_before_close,
         )
 
     @classmethod
@@ -184,6 +213,7 @@ class RiskPolicy(Contract):
         ex_ante_stop_loss_pips: Decimal = Decimal("14.0"),
         max_margin_utilization_pct: Decimal = Decimal("0.25"),
         cap_quantity_by_risk_budget: bool = True,
+        entry_cutoff_minutes_before_close: int = 120,
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo profile with explicit q-dependent ex-ante risk-budget sizing."""
         return cls.pepperstone_razor_200(
@@ -193,6 +223,7 @@ class RiskPolicy(Contract):
             ex_ante_stop_loss_pips=ex_ante_stop_loss_pips,
             max_margin_utilization_pct=max_margin_utilization_pct,
             cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
+            entry_cutoff_minutes_before_close=entry_cutoff_minutes_before_close,
         )
 
     def ex_ante_trade_risk(
@@ -549,6 +580,16 @@ class DeterministicHardRiskEngine:
                 rollover_minute=self.policy.rollover_minute,
             ):
                 reasons.append("daily_close_cutoff_active")
+            elif is_in_pre_close_entry_cutoff(
+                checked_at,
+                tz_name=self.policy.trading_timezone,
+                close_hour=self.policy.daily_close_hour,
+                close_minute=self.policy.daily_close_minute,
+                rollover_hour=self.policy.rollover_hour,
+                rollover_minute=self.policy.rollover_minute,
+                entry_cutoff_minutes_before_close=self.policy.entry_cutoff_minutes_before_close,
+            ):
+                reasons.append("pre_close_entry_cutoff_active")
 
         if gross_weight > self.policy.max_gross_weight:
             reasons.append("gross_weight_limit_exceeded")

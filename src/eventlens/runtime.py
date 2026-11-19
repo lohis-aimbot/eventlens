@@ -2575,6 +2575,7 @@ class ShadowRunner:
         allow_baseline_revisions: bool = True,
         bundle_simultaneous: bool = True,
         news_bundle_window_seconds: float = 60.0,
+        news_revision_cooldown_seconds: float = 300.0,
         news_poll_interval_seconds: float = 15.0,
         event_scan_interval_seconds: float = 1.0,
         quote_interval_seconds: float = 0.5,
@@ -2606,6 +2607,7 @@ class ShadowRunner:
         self.allow_baseline_revisions = allow_baseline_revisions
         self.bundle_simultaneous = bundle_simultaneous
         self.news_bundle_window_seconds = news_bundle_window_seconds
+        self.news_revision_cooldown_seconds = float(news_revision_cooldown_seconds)
         self.news_poll_interval_seconds = news_poll_interval_seconds
         self.event_scan_interval_seconds = event_scan_interval_seconds
         self.quote_interval_seconds = quote_interval_seconds
@@ -3160,11 +3162,11 @@ class ShadowRunner:
             if not obs_change[3] and self._idle_event_scan_marker == cur_marker:
                 return ()
 
-        async def _enrich_revision_delta(rev_item: Any, ev_item: Event) -> Event:
+        async def _find_revision_baseline_and_delta(
+            rev_item: Any,
+        ) -> tuple[Any | None, str | None]:
             if rev_item.revision < 2 or rev_item.record.kind != "news":
-                return ev_item
-            if "[REVISION r" in ev_item.raw_text:
-                return ev_item
+                return None, None
             hist = await asyncio.to_thread(
                 ostore.history,
                 rev_item.record.kind,
@@ -3174,15 +3176,41 @@ class ShadowRunner:
                 as_of=now,
             )
             prior_revs = [h for h in hist if h.revision < rev_item.revision]
-            prior_rev = prior_revs[-1] if prior_revs else None
-            delta_block = format_revision_marginal_delta(rev_item, prior_rev)
-            if not delta_block:
+            if not prior_revs:
+                return None, None
+            baseline_rev = prior_revs[-1]
+            if state_store is not None:
+                for cand in reversed(prior_revs):
+                    cand_row = state_store.get_event_state(revision_event_id(cand))
+                    if cand_row is None or (
+                        str(cand_row["state"]) != "filtered_out"
+                        or str(cand_row["reason"])
+                        not in {
+                            "rapid_revision_cooldown",
+                            "revision_no_substantive_text_delta",
+                        }
+                    ):
+                        baseline_rev = cand
+                        break
+            delta_block = format_revision_marginal_delta(rev_item, baseline_rev)
+            return baseline_rev, delta_block
+
+        def _apply_revision_delta(ev_item: Event, delta_block: str | None) -> Event:
+            if not delta_block or "[REVISION r" in ev_item.raw_text:
                 return ev_item
             return ev_item.model_copy(
                 update={
                     "raw_text": f"{delta_block}\n\n[FULL UPDATED ARTICLE TEXT]\n{ev_item.raw_text}"
                 }
             )
+
+        async def _enrich_revision_delta(rev_item: Any, ev_item: Event) -> Event:
+            if rev_item.revision < 2 or rev_item.record.kind != "news":
+                return ev_item
+            if "[REVISION r" in ev_item.raw_text:
+                return ev_item
+            _, delta_block = await _find_revision_baseline_and_delta(rev_item)
+            return _apply_revision_delta(ev_item, delta_block)
 
         revisions = await asyncio.to_thread(
             ostore.revisions,
@@ -3285,7 +3313,36 @@ class ShadowRunner:
                         reason=f_res.reason,
                     )
                 continue
-            ev = await _enrich_revision_delta(rev, ev)
+            if rev.revision >= 2 and rev.record.kind == "news":
+                baseline_rev, delta_block = await _find_revision_baseline_and_delta(rev)
+                if rev.provider not in {"ecb", "fed", "us_bea"} and baseline_rev is not None:
+                    if delta_block is None:
+                        if self.runtime.state_store is not None:
+                            self.runtime.state_store.upsert_event_state(
+                                event_id=ev_id,
+                                source_reference=rev.record.source_url,
+                                received_at=rev.received_at,
+                                now=_utc(self.clock()),
+                                state="filtered_out",
+                                reason="revision_no_substantive_text_delta",
+                            )
+                        continue
+                    gap_s = (rev.available_at - baseline_rev.available_at).total_seconds()
+                    if (
+                        self.news_revision_cooldown_seconds > 0
+                        and 0 <= gap_s < self.news_revision_cooldown_seconds
+                    ):
+                        if self.runtime.state_store is not None:
+                            self.runtime.state_store.upsert_event_state(
+                                event_id=ev_id,
+                                source_reference=rev.record.source_url,
+                                received_at=rev.received_at,
+                                now=_utc(self.clock()),
+                                state="filtered_out",
+                                reason="rapid_revision_cooldown",
+                            )
+                        continue
+                ev = _apply_revision_delta(ev, delta_block)
             eligible_pairs.append((rev, ev))
 
         results: list[RuntimeCycleResult] = []

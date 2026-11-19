@@ -183,17 +183,18 @@ def test_deepseek_reasoner_cot_extraction_fence_strip_and_400_fallback(monkeypat
 
 
 def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path) -> None:
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.0"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.1"
 
     risk_pol = RiskPolicy.pepperstone_razor_200_guarded()
     exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
     assert risk_pol.min_equity_usd == Decimal("140.00")
     assert risk_pol.ex_ante_stop_loss_pips == Decimal("14.0")
+    assert risk_pol.entry_cutoff_minutes_before_close == 120
     assert exit_pol.max_holding_seconds == 18000
     assert exit_pol.stop_loss_pips == Decimal("14.0")
     assert exit_pol.take_profit_pips == Decimal("42.0")
-    assert exit_pol.trailing_activation_pips == Decimal("22.0")
-    assert exit_pol.trailing_distance_pips == Decimal("10.0")
+    assert exit_pol.trailing_activation_pips == Decimal("8.0")
+    assert exit_pol.trailing_distance_pips == Decimal("6.0")
 
     t0 = datetime(2026, 11, 16, 13, 0, 0, tzinfo=UTC)
     now_box = [t0]
@@ -394,6 +395,9 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
         assert any(d["review_meta"] is not None for d in parsed["decisions"])
         assert all("[INTERNAL STATEFUL REVIEW]" not in d["headline"] for d in parsed["decisions"])
         assert parsed["market_state_card"]["market_bias"] == "neutral"
+        assert parsed["model_config"]["risk_profile"]["trailing_activation_pips"] == 8.0
+        assert parsed["model_config"]["risk_profile"]["trailing_distance_pips"] == 6.0
+        assert parsed["model_config"]["risk_profile"]["entry_cutoff_minutes_before_close"] == 120
         assert "deepseek-reasoner" in parsed["model_config"]["model"]
 
         # Verify local read-only HTTP server serves index.html and /api/snapshot cleanly
@@ -428,6 +432,9 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
                     assert "每日量化报表" in html_txt
                     assert "Live Intelligence" in html_txt
                     assert "Performance & Ledger" in html_txt
+                    assert 'id="mainTradesSection"' in html_txt
+                    assert "function renderMainTrades" in html_txt
+                    assert "function jumpToDecision" in html_txt
                     assert 'data-theme="light"' in html_txt
                 break
             except OSError:
@@ -765,3 +772,282 @@ def test_is_fx_weekend_closed_and_48h_bridge_and_quote_failure_pruning(tmp_path:
     finally:
         ledger.close()
         qstore.close()
+
+
+def test_v41_ignore_event_preserves_watch_and_pre_close_cutoff_blocks_entries_not_close(
+    tmp_path: Path,
+) -> None:
+    """1) IGNORE_EVENT (even with market_state_note) must keep active watch_condition intact for step_reviews();
+    2) Pepperstone 120m pre-close entry cutoff blocks SET_TARGET in [close-120m, rollover) while allowing CLOSE & earlier entries."""
+    from eventlens.contracts import AgentDecision, TargetPortfolio, TargetPosition
+
+    t0 = datetime(2026, 11, 18, 15, 0, 0, tzinfo=UTC)  # 10:00 EST
+    now_box = [t0]
+    mid_box = [Decimal("1.09500")]
+    tick = [0]
+
+    def clock() -> datetime:
+        tick[0] += 1
+        return now_box[0] + timedelta(milliseconds=tick[0])
+
+    def handle(payload: dict[str, Any], call_no: int) -> tuple[dict[str, Any], str]:
+        if call_no == 1:
+            return (
+                {
+                    "portfolio_action": "HOLD",
+                    "target_direction": "flat",
+                    "target_weight": "0",
+                    "strategy_hypothesis": "fundamental_breakout",
+                    "market_bias": "bearish_eur",
+                    "market_state_note": "15m 跌至低点，等待反抽 1.09560 做空。",
+                    "watch_condition": "EUR/USD >= 1.09560",
+                    "rationale": "不追地板，挂 1.09560 回踩空单观察位。",
+                },
+                "思考1：设置 1.09560 回踩观察线。",
+            )
+        if call_no == 2:
+            # Even if LLM populates market_state_note on IGNORE_EVENT, watch_condition MUST NOT be erased!
+            assert payload["current_market_state_card"]["watch_condition"] == "EUR/USD >= 1.09560"
+            return (
+                {
+                    "portfolio_action": "IGNORE_EVENT",
+                    "target_direction": "flat",
+                    "target_weight": "0",
+                    "strategy_hypothesis": "unspecified",
+                    "market_bias": "neutral",
+                    "market_state_note": "噪音事件不影响主线。",
+                    "watch_condition": None,
+                    "rationale": "无关事件直接忽略。",
+                },
+                "思考2：无关新闻，跳过。",
+            )
+        assert payload["current_market_state_card"]["watch_condition"] == "EUR/USD >= 1.09560"
+        return (
+            {
+                "portfolio_action": "SET_TARGET",
+                "target_direction": "short",
+                "target_weight": "-0.15",
+                "strategy_hypothesis": "fundamental_breakout",
+                "market_bias": "bearish_eur",
+                "market_state_note": "反抽触发 1.09560，空单入场。",
+                "watch_condition": None,
+                "rationale": "回踩触发 EUR/USD >= 1.09560，顺大势入空。",
+            },
+            "思考3：触价唤醒做空。",
+        )
+
+    risk_pol = RiskPolicy.pepperstone_razor_200_guarded()
+    exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
+    shd_path = tmp_path / "watch_shd.sqlite"
+    mem = SQLiteThesisMemory(tmp_path / "watch_mem.sqlite", clock=clock, allow_targets=True)
+    store = SQLiteRuntimeStore(shd_path)
+    ledger = SQLiteShadowLedger(
+        shd_path,
+        initial_cash_usd=Decimal("200.00"),
+        risk_policy=risk_pol,
+        exit_policy=exit_pol,
+        cost_model=ShadowCostModel.pepperstone_razor(),
+        clock=clock,
+    )
+    try:
+        agent = SinglePassTradingAgent(
+            _V4ReasonerFakeClient(handle),
+            max_quote_age=timedelta(seconds=8),
+            allow_commission_bearing_zero_spread=True,
+            max_position_weight=risk_pol.max_position_weight,
+            leverage=risk_pol.leverage,
+            max_risk_per_trade_pct=risk_pol.max_risk_per_trade_pct,
+            ex_ante_stop_loss_pips=risk_pol.ex_ante_stop_loss_pips,
+            clock=clock,
+        )
+        rt = IntradayEventRuntime(
+            memory=mem,
+            portfolio_state=ledger,
+            market_provider=lambda ts: _live_market(ts, mid=mid_box[0]),
+            agent=agent,
+            target_validator=DeterministicTargetValidator(),
+            risk_engine=DeterministicHardRiskEngine(policy=risk_pol, clock=clock),
+            shadow_executor=ledger,
+            state_store=store,
+            clock=clock,
+        )
+        runner = ShadowRunner(
+            runtime=rt,
+            ledger=ledger,
+            poll_news=False,
+            strict_window_coverage=False,
+            exit_buffer_seconds=0.0,
+            review_policy=ReviewPolicy(enabled=True, cooldown_seconds=10.0),
+            clock=clock,
+        )
+
+        # Call 1 sets active watch_condition
+        ev1 = Event(
+            event_id="ev-w1",
+            source="investinglive_fx",
+            source_type="news",
+            source_reference="https://example.com/w1",
+            source_timestamp=t0 - timedelta(seconds=2),
+            received_timestamp=t0,
+            raw_text="Fed hawkish remarks push EUR/USD near intraday low.",
+        )
+        assert asyncio.run(rt.run_cycle(ev1)).status == "no_target"
+
+        # Call 2 is IGNORE_EVENT (with non-empty note) -> watch_thesis MUST stay active!
+        now_box[0] = t0 + timedelta(minutes=2)
+        ev2 = Event(
+            event_id="ev-w2",
+            source="investinglive_fx",
+            source_type="news",
+            source_reference="https://example.com/w2",
+            source_timestamp=now_box[0] - timedelta(seconds=2),
+            received_timestamp=now_box[0],
+            raw_text="Minor unrelated equity chatter.",
+        )
+        c2 = asyncio.run(rt.run_cycle(ev2))
+        assert c2.status == "no_target"
+        assert c2.decision is not None
+        assert c2.decision.market_state_card is not None
+        assert c2.decision.market_state_card.watch_condition == "EUR/USD >= 1.09560"
+        watch_row = next(
+            t
+            for t in asyncio.run(mem.snapshot(as_of=now_box[0])).theses
+            if t.thesis_id == MARKET_STATE_WATCH_THESIS_ID
+        )
+        assert watch_row.status == "active"
+        assert watch_row.invalidation_conditions == ("EUR/USD >= 1.09560",)
+
+        # Call 3: price bounces to 1.09570 -> step_reviews() fires and enters short!
+        now_box[0] = t0 + timedelta(minutes=5)
+        mid_box[0] = Decimal("1.09570")
+        revs = asyncio.run(runner.step_reviews())
+        assert len(revs) == 1
+        assert revs[0].status == "shadow_recorded"
+        now_box[0] += timedelta(seconds=1)
+        _, open_fills = asyncio.run(runner.step_quotes_and_fills())
+        assert len(open_fills) == 1
+
+        # 2. Verify pre-close entry cutoff (EST winter: 16:55 EST = 21:55 UTC; 120m cutoff starts 14:55 EST = 19:55 UTC)
+        # First close at 19:20 UTC, check new SET_TARGET approved at 19:30 UTC (14:30 EST, outside cutoff),
+        # fill it, then advance monotonically to 20:30 UTC (15:30 EST, inside 120m cutoff) and verify
+        # CLOSE is approved while subsequent SET_TARGET is rejected with pre_close_entry_cutoff_active.
+        ny_before = datetime(2026, 11, 18, 19, 30, 0, tzinfo=UTC)  # 14:30 EST (145m before 16:55)
+        ny_inside = datetime(2026, 11, 18, 20, 30, 0, tzinfo=UTC)  # 15:30 EST (85m before 16:55)
+
+        # Reset flat before ny_before
+        now_box[0] = datetime(2026, 11, 18, 19, 20, 0, tzinfo=UTC)
+        mkt_pre_flat = _live_market(now_box[0], mid=mid_box[0])
+        snap_pre_flat = ledger.snapshot_sync(market=mkt_pre_flat)
+        eng_pre_flat = DeterministicHardRiskEngine(policy=risk_pol, clock=clock)
+        dec_pre_close = AgentDecision(
+            decision_id="dec-pre-flat-close",
+            event_id="ev-pre-flat-close",
+            based_on_memory_version=0,
+            based_on_snapshot_id=snap_pre_flat.snapshot_id,
+            provider="deepseek",
+            model_version="deepseek-reasoner",
+            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            started_at=now_box[0],
+            completed_at=now_box[0],
+            valid_until=now_box[0] + timedelta(seconds=60),
+            portfolio_action="CLOSE",
+            target=TargetPortfolio(
+                target_id="tgt-pre-flat-close",
+                based_on_snapshot_id=snap_pre_flat.snapshot_id,
+                positions=(TargetPosition(instrument="EUR/USD", weight=Decimal("0")),),
+                rationale="Flatten before cutoff check",
+            ),
+            rationale="Flatten before cutoff check",
+        )
+        res_pre_flat = asyncio.run(eng_pre_flat.assess(dec_pre_close, snap_pre_flat, mkt_pre_flat))
+        assert res_pre_flat.outcome == "approve", res_pre_flat.reasons
+        ledger.record_sync(dec_pre_close, res_pre_flat)
+        now_box[0] += timedelta(seconds=1)
+        assert len(ledger.fill_pending(_live_market(now_box[0], mid=mid_box[0]))) == 1
+
+        # At 14:30 EST (before 14:55 cutoff), new SET_TARGET is approved & filled
+        now_box[0] = ny_before
+        mkt_before = _live_market(ny_before, mid=mid_box[0])
+        snap_before = ledger.snapshot_sync(market=mkt_before)
+        eng_before = DeterministicHardRiskEngine(policy=risk_pol, clock=clock)
+        dec_new = AgentDecision(
+            decision_id="dec-cutoff-new",
+            event_id="ev-cutoff-1",
+            based_on_memory_version=0,
+            based_on_snapshot_id=snap_before.snapshot_id,
+            provider="deepseek",
+            model_version="deepseek-reasoner",
+            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            started_at=ny_before,
+            completed_at=ny_before,
+            valid_until=ny_before + timedelta(seconds=60),
+            portfolio_action="SET_TARGET",
+            target=TargetPortfolio(
+                target_id="tgt-cutoff-1",
+                based_on_snapshot_id=snap_before.snapshot_id,
+                positions=(TargetPosition(instrument="EUR/USD", weight=Decimal("-0.15")),),
+                rationale="Test entry before cutoff",
+            ),
+            rationale="Test entry before cutoff",
+        )
+        res_before = asyncio.run(eng_before.assess(dec_new, snap_before, mkt_before))
+        assert res_before.outcome == "approve", res_before.reasons
+        ledger.record_sync(dec_new, res_before)
+        now_box[0] += timedelta(seconds=1)
+        assert len(ledger.fill_pending(_live_market(now_box[0], mid=mid_box[0]))) == 1
+
+        # Advance to 15:30 EST (inside 120m pre-close cutoff): risk-reducing CLOSE MUST be approved
+        now_box[0] = ny_inside
+        eng_inside = DeterministicHardRiskEngine(policy=risk_pol, clock=clock)
+        mkt_inside = _live_market(ny_inside, mid=mid_box[0])
+        snap_held = ledger.snapshot_sync(market=mkt_inside)
+        dec_close = AgentDecision(
+            decision_id="dec-cutoff-close",
+            event_id="ev-cutoff-close",
+            based_on_memory_version=0,
+            based_on_snapshot_id=snap_held.snapshot_id,
+            provider="deepseek",
+            model_version="deepseek-reasoner",
+            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            started_at=ny_inside,
+            completed_at=ny_inside,
+            valid_until=ny_inside + timedelta(seconds=60),
+            portfolio_action="CLOSE",
+            target=TargetPortfolio(
+                target_id="tgt-cutoff-close",
+                based_on_snapshot_id=snap_held.snapshot_id,
+                positions=(TargetPosition(instrument="EUR/USD", weight=Decimal("0")),),
+                rationale="Close during cutoff window",
+            ),
+            rationale="Close during cutoff window",
+        )
+        res_close = asyncio.run(eng_inside.assess(dec_close, snap_held, mkt_inside))
+        assert res_close.outcome == "approve", res_close.reasons
+        ledger.record_sync(dec_close, res_close)
+        now_box[0] += timedelta(seconds=1)
+        assert len(ledger.fill_pending(_live_market(now_box[0], mid=mid_box[0]))) == 1
+
+        # Still at 15:31 EST (inside 120m cutoff), new risk-increasing SET_TARGET MUST be rejected
+        mkt_flat_inside = _live_market(now_box[0], mid=mid_box[0])
+        snap_flat_inside = ledger.snapshot_sync(market=mkt_flat_inside)
+        dec_inside = dec_new.model_copy(
+            update={
+                "decision_id": "dec-cutoff-inside",
+                "based_on_snapshot_id": snap_flat_inside.snapshot_id,
+                "started_at": now_box[0],
+                "completed_at": now_box[0],
+                "valid_until": now_box[0] + timedelta(seconds=60),
+                "target": TargetPortfolio(
+                    target_id="tgt-cutoff-inside",
+                    based_on_snapshot_id=snap_flat_inside.snapshot_id,
+                    positions=(TargetPosition(instrument="EUR/USD", weight=Decimal("-0.15")),),
+                    rationale="Test entry inside cutoff",
+                ),
+            }
+        )
+        res_inside = asyncio.run(eng_inside.assess(dec_inside, snap_flat_inside, mkt_flat_inside))
+        assert res_inside.outcome == "reject"
+        assert "pre_close_entry_cutoff_active" in res_inside.reasons
+    finally:
+        ledger.close()
+        store.close()

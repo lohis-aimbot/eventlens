@@ -28,7 +28,12 @@ from ..contracts import (
 )
 from ..quotes import QuoteQualityPolicy, validate_market_quote
 from .portfolio import LOT_UNITS_EUR
-from .risk import RiskPolicy, is_in_daily_close_window, trading_day_window
+from .risk import (
+    RiskPolicy,
+    is_in_daily_close_window,
+    is_in_pre_close_entry_cutoff,
+    trading_day_window,
+)
 
 BPS = Decimal("10000")
 EURUSD_PIP = Decimal("0.0001")
@@ -211,14 +216,14 @@ class ProtectiveExitPolicy(Contract):
         take_profit_usd: Decimal | None = None,
         stop_loss_pips: Decimal | None = Decimal("14.0"),
         take_profit_pips: Decimal | None = Decimal("42.0"),
-        trailing_activation_pips: Decimal | None = Decimal("22.0"),
-        trailing_distance_pips: Decimal | None = Decimal("10.0"),
+        trailing_activation_pips: Decimal | None = Decimal("8.0"),
+        trailing_distance_pips: Decimal | None = Decimal("6.0"),
         max_daily_loss_usd: Decimal = Decimal("8.00"),
         allow_commission_bearing_zero_spread: bool = True,
     ) -> "ProtectiveExitPolicy":
         """Pepperstone Razor $200 USD Demo swing protection standard:
         5h horizon, position-scaled 14-pip SL ($7.00 hard USD cap), 42-pip TP (3:1 RR),
-        +22.0-pip trailing profit lock (10.0-pip pullback distance), and $8.00 daily loss cap."""
+        +8.0-pip trailing profit lock (6.0-pip pullback distance, locking >= +2.0p), and $8.00 daily loss cap."""
         return cls(
             max_holding_seconds=max_holding_seconds,
             max_position_loss_usd=max_position_loss_usd,
@@ -1262,6 +1267,16 @@ class SQLiteShadowLedger:
                         rollover_minute=active_risk.rollover_minute,
                     ):
                         reject_at_fill = "daily_close_cutoff_active_at_fill"
+                    elif is_in_pre_close_entry_cutoff(
+                        now,
+                        tz_name=active_risk.trading_timezone,
+                        close_hour=active_risk.daily_close_hour,
+                        close_minute=active_risk.daily_close_minute,
+                        rollover_hour=active_risk.rollover_hour,
+                        rollover_minute=active_risk.rollover_minute,
+                        entry_cutoff_minutes_before_close=active_risk.entry_cutoff_minutes_before_close,
+                    ):
+                        reject_at_fill = "pre_close_entry_cutoff_active_at_fill"
 
                 if reject_at_fill is not None:
                     self.db.execute(

@@ -3,11 +3,14 @@
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · <strong>简体中文</strong>
+  <a href="README.md">English</a> · <strong>简体中文</strong> &nbsp;|&nbsp;
+  <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><strong>实时 Web 看板 ↗</strong></a> &nbsp;·&nbsp;
+  <a href="https://lohis-aimbot.github.io/eventlens/">项目可视化概览 ↗</a>
 </p>
 
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
+  <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/实时看板-在线同步-2563eb?style=flat-square" alt="实时 Web 看板" /></a>
 </p>
 
 <p align="center">
@@ -28,6 +31,9 @@
 ---
 
 ## 项目简介
+
+> [!TIP]
+> **在线双语 Web 实时看板：** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)** — 主界面直达**当前持仓与历史开平仓记录、触发新闻、AI 入场逻辑与 DeepSeek 完整思考链（CoT）**，并附带每日量化净值报表；支持中英文一键切换、明暗主题与手机“添加到主屏幕”PWA 体验（仅读取脱敏后的 `dashboard-live` 快照）。
 
 > [!IMPORTANT]
 > **运行进度 · 2026 年 11 月 11 日。** Python 自动化验证已通过 **377 项测试**、Ruff 与 mypy，涵盖基于 `HistoricalTrade` `ClosingDealId` 的真实平仓回执记账、跨日断连/重启下的 `demo_daily_state` 保守基线风控，以及 `UsdPerOneLot` / `UsdPerMillionUsdVolume` 双格式 Razor 佣金元数据。在 Ubuntu 24.04 GCP 云主机上，最终版 `EventLensCliBridge.algo`（`TargetFramework=net6.0`，锁定 `cTrader.Automate 1.0.21`，`BUILD_UID_GID=0:0`）已零错误零警告编译通过，完成 `--network none --user 1654:1654` 断网元数据检查，通过只读 `demo-reconcile`（`clean: true`）与有界 `1,000 EUR` Pepperstone Demo `demo-smoke` 真单闭环（`passed: true`，止损挂单确认、`ClosingDealId` 核验、`flat_after_close: true`），并已启动 `24×5` 云端 Demo 连续观测。早期预检记录与边界说明参见[云端预检审计](docs/research/2026-11-11-cloud-preflight-audit.md)与[云端部署手册](docs/cloud-24x5-deployment.md)。

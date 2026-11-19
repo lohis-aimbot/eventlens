@@ -588,10 +588,10 @@ def test_position_scaled_pip_sl_tp_and_durable_trailing_profit_lock(tmp_path: Pa
         now = now + timedelta(seconds=30)
         assert ledger.evaluate_protective_exits(_razor_market("1.11458", now)) == ()
 
-        # Rally +23.7 pips above entry to 1.11750 (>= 22.0 activation_pips) -> updates peak_favorable_mark without exiting
+        # Rally +9.2 pips above entry to 1.11605 (>= 8.0 activation_pips) -> updates peak_favorable_mark without exiting
         now = now + timedelta(seconds=60)
-        assert ledger.evaluate_protective_exits(_razor_market("1.11750", now)) == ()
-        assert ledger.report()["peak_favorable_mark"] == "1.11750"
+        assert ledger.evaluate_protective_exits(_razor_market("1.11605", now)) == ()
+        assert ledger.report()["peak_favorable_mark"] == "1.11605"
 
         # Simulate process restart: close & reopen SQLiteShadowLedger and verify peak_favorable_mark survived
         ledger.close()
@@ -602,19 +602,19 @@ def test_position_scaled_pip_sl_tp_and_durable_trailing_profit_lock(tmp_path: Pa
             exit_policy=exit_pol,
             clock=lambda: now,
         )
-        assert ledger.report()["peak_favorable_mark"] == "1.11750"
+        assert ledger.report()["peak_favorable_mark"] == "1.11605"
 
-        # Minor 7.0-pip pullback to 1.11680 (< 10.0 trailing_distance_pips) keeps position open to run
+        # Minor 4.0-pip pullback to 1.11565 (< 6.0 trailing_distance_pips) keeps position open to run
         now = now + timedelta(seconds=20)
-        assert ledger.evaluate_protective_exits(_razor_market("1.11680", now)) == ()
+        assert ledger.evaluate_protective_exits(_razor_market("1.11565", now)) == ()
 
-        # 10.5-pip pullback from 1.11750 peak to 1.11645 (>= 10.0 trailing_distance_pips) fires protective_trailing_stop!
+        # 6.5-pip pullback from 1.11605 peak to 1.11540 (>= 6.0 trailing_distance_pips) fires protective_trailing_stop locking positive PnL!
         now = now + timedelta(seconds=20)
-        trail_fills = ledger.evaluate_protective_exits(_razor_market("1.11645", now))
+        trail_fills = ledger.evaluate_protective_exits(_razor_market("1.11540", now))
         assert len(trail_fills) == 1
         assert trail_fills[0].reason == "protective_trailing_stop"
         assert trail_fills[0].new_quantity == Decimal("0")
-        assert trail_fills[0].realized_pnl_usd > Decimal("9.50")
+        assert trail_fills[0].realized_pnl_usd > Decimal("1.00")
         assert ledger.report()["peak_favorable_mark"] is None
 
         # 2. Low-conviction -0.02 lot (-2,000 EUR, weight=-0.05) stops out at 14.0 pips (~-$2.90) instead of -$7.00
