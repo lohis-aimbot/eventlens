@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Export a strictly sanitized dashboard snapshot JSON and force-push it to
-# the orphan `dashboard-live` branch so the mobile/web PWA stays live 24x7
-# even when the GCP VM hibernates on weekends.
+# Export a strictly sanitized dashboard snapshot JSON (+ periodic Stage A Chart Lab JSON)
+# and force-push them to the orphan `dashboard-live` branch so both the live dashboard and
+# interactive Chart Lab / Colab notebook stay synced 24x7.
 set -euo pipefail
 
 VM_STATUS="${1:-running}"
@@ -14,10 +14,14 @@ fi
 STATE_DIR="/var/lib/eventlens"
 EXPORT_DIR="${STATE_DIR}/dashboard-export"
 EXPORT_JSON="${EXPORT_DIR}/snapshot.json"
+CHART_LAB_JSON="${EXPORT_DIR}/chart-lab.json"
 HASH_FILE="${EXPORT_DIR}/.last_hash"
+CHART_LAB_HASH_FILE="${EXPORT_DIR}/.last_chart_lab_hash"
 REPO_DIR="${EXPORT_DIR}/repo"
 SSH_KEY="${STATE_DIR}/.ssh/dashboard_deploy_ed25519"
 PYTHON_CLI="/opt/eventlens/.venv/bin/eventlens-shadow"
+FORCE_RESEARCH_EXPORT="${FORCE_RESEARCH_EXPORT:-0}"
+RESEARCH_REFRESH_SECONDS="${RESEARCH_REFRESH_SECONDS:-900}"
 
 if [[ ! -f "${SSH_KEY}" ]]; then
   echo "Deploy SSH key missing at ${SSH_KEY}; skipping dashboard push." >&2
@@ -38,17 +42,49 @@ if [[ ! -s "${EXPORT_JSON}" ]]; then
   exit 1
 fi
 
-NEW_HASH="$(python3 - "${EXPORT_JSON}" <<'PY'
-import hashlib, json, sys
+NEED_RESEARCH_REFRESH="false"
+if [[ "${FORCE_RESEARCH_EXPORT}" == "1" || ! -s "${CHART_LAB_JSON}" ]]; then
+  NEED_RESEARCH_REFRESH="true"
+else
+  CL_MTIME="$(stat -c %Y "${CHART_LAB_JSON}" 2>/dev/null || echo 0)"
+  NOW_CL_EPOCH="$(date +%s)"
+  if (( NOW_CL_EPOCH - CL_MTIME >= RESEARCH_REFRESH_SECONDS )); then
+    NEED_RESEARCH_REFRESH="true"
+  fi
+fi
+
+CHART_LAB_UPDATED="false"
+if [[ "${NEED_RESEARCH_REFRESH}" == "true" ]]; then
+  "${PYTHON_CLI}" export-research \
+    --shadow-db "${STATE_DIR}/data/shadow-ledger.sqlite" \
+    --memory-db "${STATE_DIR}/data/shadow-memory.sqlite" \
+    --observer-db "${STATE_DIR}/data/observer.sqlite" \
+    --quotes-db "${STATE_DIR}/data/live-quotes.sqlite" \
+    --chart-lab-output "${CHART_LAB_JSON}" >/dev/null
+  if [[ -s "${CHART_LAB_JSON}" ]]; then
+    CHART_LAB_UPDATED="true"
+  fi
+fi
+
+NEW_HASH="$(python3 - "${EXPORT_JSON}" "${CHART_LAB_JSON}" "${CHART_LAB_HASH_FILE}" <<'PY'
+import hashlib, json, os, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     data = json.load(fh)
 data.pop("generated_at", None)
-print(hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest())
+h = hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+cl_path = sys.argv[2]
+cl_hash = ""
+if os.path.isfile(cl_path):
+    with open(cl_path, "r", encoding="utf-8") as fh:
+        cl = json.load(fh)
+    cl.pop("generated_at", None)
+    cl_hash = hashlib.sha256(json.dumps(cl, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+print(h + ":" + cl_hash)
 PY
 )"
 
 SHOULD_PUSH="true"
-if [[ -f "${HASH_FILE}" && "${VM_STATUS}" == "running" ]]; then
+if [[ "${FORCE_RESEARCH_EXPORT}" != "1" && "${CHART_LAB_UPDATED}" != "true" && -f "${HASH_FILE}" && "${VM_STATUS}" == "running" ]]; then
   OLD_HASH="$(cat "${HASH_FILE}" || true)"
   LAST_MTIME="$(stat -c %Y "${HASH_FILE}" 2>/dev/null || echo 0)"
   NOW_EPOCH="$(date +%s)"
@@ -73,10 +109,15 @@ fi
 
 cp "${EXPORT_JSON}" "${REPO_DIR}/snapshot.json"
 git -C "${REPO_DIR}" add snapshot.json
+if [[ -s "${CHART_LAB_JSON}" ]]; then
+  cp "${CHART_LAB_JSON}" "${REPO_DIR}/chart-lab.json"
+  git -C "${REPO_DIR}" add chart-lab.json
+fi
+
 if git -C "${REPO_DIR}" rev-parse --verify HEAD >/dev/null 2>&1; then
-  git -C "${REPO_DIR}" commit --amend -m "Sync sanitized dashboard snapshot" --quiet
+  git -C "${REPO_DIR}" commit --amend -m "Sync sanitized dashboard snapshot & Chart Lab" --quiet
 else
-  git -C "${REPO_DIR}" commit -m "Sync sanitized dashboard snapshot" --quiet
+  git -C "${REPO_DIR}" commit -m "Sync sanitized dashboard snapshot & Chart Lab" --quiet
 fi
 
 GIT_SSH_COMMAND="ssh -i ${SSH_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \

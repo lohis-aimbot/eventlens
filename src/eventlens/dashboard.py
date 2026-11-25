@@ -256,7 +256,11 @@ def _sanitize_recursive(obj: Any, extra_secrets: tuple[str, ...]) -> Any:
     return obj
 
 
-def sanitize_and_verify_snapshot(payload: dict[str, Any]) -> str:
+def sanitize_and_verify_snapshot(
+    payload: dict[str, Any],
+    *,
+    indent: int | None = 2,
+) -> str:
     """Recursively strip host paths/identifiers and verify zero leaked credentials in JSON output."""
     env_secrets: list[str] = []
     for var in (
@@ -269,7 +273,10 @@ def sanitize_and_verify_snapshot(payload: dict[str, Any]) -> str:
         if len(val) >= 5 and val != "replace_with":
             env_secrets.append(val)
     sanitized = _sanitize_recursive(payload, tuple(env_secrets))
-    rendered = json.dumps(sanitized, ensure_ascii=False, indent=2)
+    if indent is None:
+        rendered = json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+    else:
+        rendered = json.dumps(sanitized, ensure_ascii=False, indent=indent)
     for sec in env_secrets:
         if sec in rendered:
             raise ValueError("Refused to export dashboard snapshot containing sensitive env value")
@@ -1418,11 +1425,13 @@ def serve_dashboard(
     shadow_db: Path,
     memory_db: Path | None = None,
     quotes_db: Path | None = None,
+    observer_db: Path | None = None,
     cli_demo_db: Path | None = None,
     static_dir: Path | None = None,
 ) -> None:
-    """Serve the local Chinese EventLens PWA + live read-only /api/snapshot JSON."""
+    """Serve the local Chinese EventLens PWA + live read-only /api/snapshot & /api/chart-lab."""
     doc_dir = (static_dir or _resolve_static_dir()).resolve()
+    chart_lab_cache: dict[str, Any] = {"ts": 0.0, "body": b""}
 
     class _DashboardHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -1438,6 +1447,35 @@ def serve_dashboard(
                     cli_demo_db=cli_demo_db,
                 )
                 body = sanitize_and_verify_snapshot(snapshot).encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if req_path == "/api/chart-lab":
+                import time
+
+                from .research_lab import build_chart_lab_payload
+
+                now_mono = time.monotonic()
+                if not chart_lab_cache["body"] or (now_mono - float(chart_lab_cache["ts"])) > 60.0:
+                    payload = build_chart_lab_payload(
+                        quotes_db=quotes_db,
+                        observer_db=observer_db,
+                        shadow_db=shadow_db,
+                        memory_db=memory_db,
+                        cli_demo_db=cli_demo_db,
+                    )
+                    for k in ("_bars_m1", "_bars_m5_full", "_bars_m15_full", "_bars_h1_full"):
+                        payload.pop(k, None)
+                    chart_lab_cache["body"] = sanitize_and_verify_snapshot(
+                        payload, indent=None
+                    ).encode("utf-8")
+                    chart_lab_cache["ts"] = now_mono
+                body = chart_lab_cache["body"]
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Cache-Control", "no-store")

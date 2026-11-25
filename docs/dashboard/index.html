@@ -11,6 +11,7 @@
   <link rel="icon" type="image/svg+xml" href="../assets/eventlens-logo.svg" />
   <link rel="apple-touch-icon" href="../assets/eventlens-logo.svg" />
   <link rel="manifest" href="manifest.webmanifest" />
+  <script src="https://unpkg.com/lightweight-charts@4.2.1/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     :root, [data-theme="light"] {
       --bg: #f4f6fa;
@@ -536,6 +537,100 @@
       font-size: 11.5px; color: var(--ink-4); text-align: center; padding: 6px 12px 0;
     }
 
+    /* Stage A Chart Lab (Desktop + Mobile Workbench) */
+    .cl-summary {
+      padding: 13px 16px;
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+    }
+    .cl-stat {
+      padding: 9px 12px; border-radius: var(--r-md);
+      background: var(--surface-2); border: 1px solid var(--border);
+    }
+    .cl-stat .cs-l { font-size: 11px; font-weight: 600; color: var(--ink-3); }
+    .cl-stat .cs-v { font-size: 17px; font-weight: 750; letter-spacing: -0.02em; margin-top: 2px; }
+    .cl-stat .cs-s { font-size: 11px; color: var(--ink-4); margin-top: 1px; }
+
+    .cl-controls {
+      padding: 12px 15px; display: flex; align-items: center;
+      justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    }
+    .cl-ctrl-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .cl-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      border: 1px solid var(--border); background: var(--surface-2); color: var(--ink-2);
+      font-family: inherit; font-size: 11.5px; font-weight: 600;
+      padding: 5px 10px; border-radius: 999px; cursor: pointer; transition: all 0.14s ease;
+    }
+    .cl-toggle.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+    .cl-jumps {
+      display: flex; align-items: center; gap: 6px; overflow-x: auto;
+      padding: 2px 2px 6px; -webkit-overflow-scrolling: touch;
+    }
+    .cl-jump-chip {
+      flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+      border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+      font-family: inherit; font-size: 11.5px; font-weight: 600;
+      padding: 5px 10px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+    }
+    .cl-jump-chip:hover { border-color: var(--accent-border); color: var(--accent); }
+    .cl-jump-chip.trade { border-left: 3px solid var(--red); }
+    .cl-jump-chip.trade.long { border-left-color: var(--green); }
+    .cl-jump-chip.boss { border-color: var(--amber-border); background: var(--amber-soft); color: var(--amber); }
+
+    .cl-grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 14px; align-items: start; }
+    .cl-chart-card { padding: 14px 16px; min-width: 0; }
+    .cl-hud {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap; padding-bottom: 10px; margin-bottom: 8px;
+      border-bottom: 1px solid var(--border); font-size: 11.5px; color: var(--ink-2);
+    }
+    .cl-canvas { width: 100%; height: 430px; position: relative; }
+    .cl-foot {
+      margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--ink-3);
+    }
+
+    .cl-inspector { padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .cl-bar-box {
+      padding: 10px 12px; border-radius: var(--r-md);
+      background: var(--surface-2); border: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 6px; font-size: 12px;
+    }
+    .cl-annotate-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+    .cl-lbl-btn {
+      min-height: 40px; border-radius: 9px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--ink-1);
+      font-family: inherit; font-size: 12px; font-weight: 700;
+      cursor: pointer; transition: all 0.14s ease; padding: 6px 4px;
+    }
+    .cl-lbl-btn:hover { border-color: var(--border-strong); }
+    .cl-lbl-btn.buy.active { background: var(--green-soft); color: var(--green); border-color: var(--green); }
+    .cl-lbl-btn.sell.active { background: var(--red-soft); color: var(--red); border-color: var(--red); }
+    .cl-lbl-btn.avoid.active { background: var(--amber-soft); color: var(--amber); border-color: var(--amber); }
+
+    .cl-note-input {
+      width: 100%; min-height: 36px; padding: 6px 10px;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--ink-1);
+      font-family: inherit; font-size: 12px; outline: none;
+    }
+    .cl-note-input:focus { border-color: var(--accent); }
+
+    .cl-news-feed {
+      display: flex; flex-direction: column; gap: 8px;
+      max-height: 380px; overflow-y: auto; padding-right: 2px;
+    }
+    .cl-ev-card {
+      padding: 9px 11px; border-radius: var(--r-md);
+      background: var(--surface-2); border: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .cl-ev-card.frontrun { border-left: 3px solid var(--amber); background: var(--amber-soft); }
+    .cl-ev-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; font-size: 11px; color: var(--ink-3); }
+    .cl-ev-title { font-size: 12.5px; font-weight: 650; color: var(--ink-1); line-height: 1.4; }
+    .cl-ev-pills { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 10.5px; }
+
     [hidden] { display: none !important; }
 
     @media (max-width: 1040px) {
@@ -544,13 +639,15 @@
       .regime-params { justify-content: flex-start; max-width: none; }
       .charts-grid { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .cl-grid { grid-template-columns: 1fr; }
+      .cl-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
 
     @media (max-width: 640px) {
       .topbar-inner { padding: 9px 14px; gap: 9px; }
       .mini-ticker { display: none; }
       .seg-control { order: 3; width: 100%; }
-      .seg-btn { flex: 1; justify-content: center; font-size: 12px; padding: 6px 8px; }
+      .seg-btn { flex: 1; justify-content: center; font-size: 11.5px; padding: 6px 6px; }
       .wrap { padding: 12px 12px 0; gap: 12px; }
       .hero-card { padding: 13px 14px; }
       .hero-val { font-size: 22px; }
@@ -558,6 +655,8 @@
       .funnel-pipeline { grid-template-columns: repeat(2, 1fr); padding: 13px 14px; gap: 9px; }
       .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
       .search-wrap { max-width: none; }
+      .cl-canvas { height: 320px; }
+      .cl-summary { padding: 11px 12px; gap: 8px; }
     }
   </style>
 </head>
@@ -581,6 +680,10 @@
         <button class="seg-btn" id="tabBtnReports" type="button">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
           <span data-i18n="tabReports">每日量化报表</span>
+        </button>
+        <button class="seg-btn" id="tabBtnChartLab" type="button">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 5v14"/><rect x="7" y="8" width="4" height="7" rx="1"/><path d="M17 3v18"/><rect x="15" y="9" width="4" height="6" rx="1"/></svg>
+          <span data-i18n="tabChartLab">K 线标注台</span>
         </button>
       </div>
 
@@ -795,12 +898,104 @@
       </div>
     </section>
 
+    <!-- TAB 3: Stage A Chart Lab (Desktop & Mobile K-Line Annotation Workbench) -->
+    <section id="viewChartLab" hidden style="display:flex;flex-direction:column;gap:12px;">
+      <div class="card cl-summary tnum" id="clSummaryStrip">
+        <div class="cl-stat"><div class="cs-l" data-i18n="clStatTicks">真实盘口沉淀</div><div class="cs-v" id="clTicksVal">—</div><div class="cs-s" id="clSpanSub">—</div></div>
+        <div class="cl-stat"><div class="cs-l" data-i18n="clStatMarkers">算法三级机会</div><div class="cs-v" id="clMarkersVal">—</div><div class="cs-s" id="clMarkersSub">—</div></div>
+        <div class="cl-stat"><div class="cs-l" data-i18n="clStatEvents">双向归因新闻</div><div class="cs-v" id="clEventsVal">—</div><div class="cs-s" id="clFrontRunSub">—</div></div>
+        <div class="cl-stat"><div class="cs-l" data-i18n="clStatBoss">老板人工标注</div><div class="cs-v" id="clBossVal">0</div><div class="cs-s" id="clOosSub">—</div></div>
+      </div>
+
+      <div class="card cl-controls">
+        <div class="cl-ctrl-group" id="clTfGroup">
+          <button class="filter-pill active" data-cl-tf="m5" type="button">M5</button>
+          <button class="filter-pill" data-cl-tf="m15" type="button">M15</button>
+          <button class="filter-pill" data-cl-tf="h1" type="button">H1</button>
+          <span style="width:1px;height:18px;background:var(--border);margin:0 2px;"></span>
+          <button class="filter-pill active" data-cl-sess="all" type="button" data-i18n="clSessAll">全时段</button>
+          <button class="filter-pill" data-cl-sess="asian" type="button" data-i18n="clSessAsian">亚盘</button>
+          <button class="filter-pill" data-cl-sess="london" type="button" data-i18n="clSessLondon">欧盘</button>
+          <button class="filter-pill" data-cl-sess="overlap" type="button" data-i18n="clSessOverlap">欧美重叠</button>
+          <button class="filter-pill" data-cl-sess="late_ny" type="button" data-i18n="clSessNy">美盘尾盘</button>
+        </div>
+        <div class="cl-ctrl-group">
+          <button class="cl-toggle active" data-cl-ov="t1" type="button">T1 ≥10p</button>
+          <button class="cl-toggle active" data-cl-ov="t2" type="button">T2 ≥15p</button>
+          <button class="cl-toggle active" data-cl-ov="t3" type="button">T3 ≥25p</button>
+          <button class="cl-toggle active" data-cl-ov="trades" type="button" data-i18n="clOvTrades">实况成交</button>
+          <button class="cl-toggle active" data-cl-ov="boss" type="button" data-i18n="clOvBoss">我的标注</button>
+          <button class="link-btn" id="clExportLabelsBtn" type="button" data-i18n="clExportBtn">导出标注 JSON</button>
+          <button class="link-btn" id="clImportLabelsBtn" type="button" data-i18n="clImportBtn">导入 JSON</button>
+          <input type="file" id="clImportFile" accept=".json,application/json" hidden />
+        </div>
+      </div>
+
+      <div class="cl-jumps" id="clQuickJumps"></div>
+
+      <div class="cl-grid">
+        <div class="card cl-chart-card">
+          <div class="cl-hud tnum" id="clHud">
+            <span data-i18n="clHudHint">点击或拖动 K 线查看盘口、算法标记与 ±60m 新闻归因</span>
+          </div>
+          <div class="cl-canvas" id="clChartContainer"></div>
+          <div class="cl-foot tnum" id="clChartFoot">
+            <span id="clLegendText">T1(90m≥10p/≤8p) · T2(4h≥15p/≤10p) · T3(8h≥25p/≤15p)</span>
+            <span id="clDataStatus">—</span>
+          </div>
+        </div>
+
+        <aside class="card cl-inspector">
+          <div class="cl-bar-box" id="clBarInspector">
+            <div style="color:var(--ink-3)" data-i18n="clSelectBarHint">点击左侧任意一根 K 线，即可在此标注买点/卖点/回避，并查看前后 ±60 分钟全部宏观快讯。</div>
+          </div>
+
+          <div>
+            <div style="font-size:11.5px;font-weight:700;color:var(--ink-2);margin-bottom:6px;" data-i18n="clAnnotateTitle">手动 K 线标注（自动存于本机，支持导出给 Colab）</div>
+            <div class="cl-annotate-row">
+              <button class="cl-lbl-btn buy" data-cl-lbl="buy" type="button" data-i18n="clBtnBuy">★ 做多 BUY</button>
+              <button class="cl-lbl-btn sell" data-cl-lbl="sell" type="button" data-i18n="clBtnSell">★ 做空 SELL</button>
+              <button class="cl-lbl-btn avoid" data-cl-lbl="avoid" type="button" data-i18n="clBtnAvoid">✕ 回避 AVOID</button>
+              <button class="cl-lbl-btn" data-cl-lbl="clear" type="button" data-i18n="clBtnClear">清除</button>
+            </div>
+            <input class="cl-note-input" id="clNoteInput" type="text" style="margin-top:7px;" />
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;margin-bottom:7px;">
+              <span style="font-size:12px;font-weight:700;color:var(--ink-1)" data-i18n="clNewsTitle">选中点前后 ±60m 双向新闻归因</span>
+              <div class="cl-ctrl-group" id="clNewsDirFilter">
+                <button class="filter-pill active" data-cl-ndir="all" type="button" style="padding:3px 9px;font-size:11px;" data-i18n="clNdirAll">全部 ±60m</button>
+                <button class="filter-pill" data-cl-ndir="pre" type="button" style="padding:3px 9px;font-size:11px;" data-i18n="clNdirPre">前 -60m (抢跑)</button>
+                <button class="filter-pill" data-cl-ndir="post" type="button" style="padding:3px 9px;font-size:11px;" data-i18n="clNdirPost">后 +60m (因果)</button>
+              </div>
+            </div>
+            <div class="cl-news-feed" id="clNewsFeed">
+              <div class="empty-state" style="padding:22px 12px;" data-i18n="clLoading">正在加载 14+ 天 K 线与新闻数据包…</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
     <div class="footer-note" id="footerNote">—</div>
   </main>
 
   <script>
     (function () {
       const REMOTE_SNAPSHOT_URL = "https://raw.githubusercontent.com/lohis-aimbot/eventlens/dashboard-live/snapshot.json";
+      const REMOTE_CHART_LAB_URL = "https://raw.githubusercontent.com/lohis-aimbot/eventlens/dashboard-live/chart-lab.json";
+      const BOSS_LABELS_KEY = "eventlens_chart_lab_labels_v1";
+
+      function loadBossLabels() {
+        try {
+          const raw = localStorage.getItem(BOSS_LABELS_KEY);
+          const parsed = raw ? JSON.parse(raw) : {};
+          return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {};
+        } catch (_) {
+          return {};
+        }
+      }
 
       const I18N = {
         zh: {
@@ -899,6 +1094,36 @@
           noTradeMsg: "当前周期暂无成交记录，系统仅在出现明确基本面催化剂与盘面共振时出手",
           footerNote: "移动端浏览器点「添加到主屏幕」即可作为免备案全屏小程序使用 · 数据已自动脱敏，不含密钥或隐私账号",
           triggerPrefix: "触价复评",
+          tabChartLab: "K 线标注台",
+          clStatTicks: "真实盘口沉淀",
+          clStatMarkers: "算法三级机会",
+          clStatEvents: "双向归因新闻",
+          clStatBoss: "老板人工标注",
+          clSessAll: "全时段",
+          clSessAsian: "亚盘",
+          clSessLondon: "欧盘",
+          clSessOverlap: "欧美重叠",
+          clSessNy: "美盘尾盘",
+          clOvTrades: "实况成交",
+          clOvBoss: "我的标注",
+          clExportBtn: "导出标注 JSON",
+          clImportBtn: "导入 JSON",
+          clHudHint: "点击或缩放 K 线查看盘口、点差与 ±60m 宏观快讯",
+          clSelectBarHint: "点击左侧任意一根 K 线，即可标注 买入 / 卖出 / 回避 并排查前后 ±60 分钟新闻。",
+          clAnnotateTitle: "手动 K 线标注（本机自动持久化，一键导出给 Colab）",
+          clBtnBuy: "★ 做多 BUY",
+          clBtnSell: "★ 做空 SELL",
+          clBtnAvoid: "✕ 回避 AVOID",
+          clBtnClear: "清除",
+          clNotePlaceholder: "可选备注（例如：亚盘假突破、欧盘趋势确认、数据前抢跑…）",
+          clNewsTitle: "±60m 双向新闻归因（抓因果也抓抢跑）",
+          clNdirAll: "全部 ±60m",
+          clNdirPre: "到达前 -60m",
+          clNdirPost: "到达后 +60m",
+          clLoading: "正在同步 Stage A K 线与新闻归因数据包…",
+          clNoNews: "所选 K 线前后 ±60 分钟内暂无记录新闻。",
+          clFrontRunTag: "⚠ 到达前异动",
+          clOosLabel: "70% / 30% 盲测分界",
         },
         en: {
           pageTitle: "EventLens · Live Quant Intelligence & Daily Ledger",
@@ -996,6 +1221,36 @@
           noTradeMsg: "No executed trades in this slice — system waits selectively for substantive catalysts.",
           footerNote: "Add to Home Screen on iOS/Android for standalone app experience · Strictly sanitized (zero secrets/account IDs)",
           triggerPrefix: "Price Trigger",
+          tabChartLab: "Chart Lab",
+          clStatTicks: "Real Quote Ticks",
+          clStatMarkers: "3-Tier Algo Setups",
+          clStatEvents: "Attributed News",
+          clStatBoss: "Manual Labels",
+          clSessAll: "All Sessions",
+          clSessAsian: "Asian",
+          clSessLondon: "London",
+          clSessOverlap: "LDN-NY Overlap",
+          clSessNy: "Late NY",
+          clOvTrades: "Demo Trades",
+          clOvBoss: "My Labels",
+          clExportBtn: "Export Labels",
+          clImportBtn: "Import JSON",
+          clHudHint: "Tap or zoom candles to inspect spreads, setups & ±60m news",
+          clSelectBarHint: "Tap any K-line candle to place Buy / Sell / Avoid labels and inspect ±60m news attribution.",
+          clAnnotateTitle: "Manual Candle Labeling (auto-saved locally; export JSON to Colab)",
+          clBtnBuy: "★ BUY",
+          clBtnSell: "★ SELL",
+          clBtnAvoid: "✕ AVOID",
+          clBtnClear: "Clear",
+          clNotePlaceholder: "Optional rationale note (e.g., Asian fakeout, London continuation, pre-feed jump…)",
+          clNewsTitle: "Bidirectional ±60m News Attribution",
+          clNdirAll: "All ±60m",
+          clNdirPre: "Pre -60m (Lag/Run)",
+          clNdirPost: "Post +60m (Causal)",
+          clLoading: "Syncing Stage A 14-day K-line & attribution bundle…",
+          clNoNews: "No attributed macro wires within ±60m of this candle.",
+          clFrontRunTag: "⚠ Pre-Arrival Move",
+          clOosLabel: "70% / 30% OOS Split",
         },
       };
 
@@ -1027,6 +1282,15 @@
         expandedIds: new Set(),
         drawerTab: {},
         highlightDecisionId: null,
+        chartLab: null,
+        clTf: "m5",
+        clSession: "all",
+        clOverlays: { t1: true, t2: true, t3: true, trades: true, boss: true },
+        clSelectedBarTs: null,
+        clNewsDir: "all",
+        bossLabels: loadBossLabels(),
+        clChart: null,
+        clSeries: null,
       };
 
       const el = (id) => document.getElementById(id);
@@ -1117,6 +1381,9 @@
         if (state.snapshot && state.activeTab === "reports") {
           renderCharts(state.snapshot);
         }
+        if (state.chartLab && state.activeTab === "chartlab") {
+          renderChartLab(true);
+        }
       }
 
       function applyStaticI18n() {
@@ -1129,6 +1396,7 @@
           if (I18N[state.lang][k]) node.textContent = I18N[state.lang][k];
         });
         el("decSearch").placeholder = t("searchPlaceholder");
+        if (el("clNoteInput")) el("clNoteInput").placeholder = t("clNotePlaceholder");
         el("footerNote").textContent = t("footerNote");
         localStorage.setItem("eventlens_lang", state.lang);
       }
@@ -1138,6 +1406,7 @@
         state.lang = "zh";
         applyStaticI18n();
         if (state.snapshot) renderAll(state.snapshot);
+        if (state.chartLab) renderChartLab(false);
       });
 
       el("langEnBtn").addEventListener("click", () => {
@@ -1145,6 +1414,7 @@
         state.lang = "en";
         applyStaticI18n();
         if (state.snapshot) renderAll(state.snapshot);
+        if (state.chartLab) renderChartLab(false);
       });
 
       el("themeBtn").addEventListener("click", () => {
@@ -1155,17 +1425,26 @@
       function switchTab(tab) {
         state.activeTab = tab;
         const isDec = tab === "decisions";
+        const isRep = tab === "reports";
+        const isCl = tab === "chartlab";
         el("viewDecisions").hidden = !isDec;
-        el("viewReports").hidden = isDec;
+        el("viewReports").hidden = !isRep;
+        el("viewChartLab").hidden = !isCl;
         el("tabBtnDecisions").classList.toggle("active", isDec);
-        el("tabBtnReports").classList.toggle("active", !isDec);
-        if (!isDec && state.snapshot) {
+        el("tabBtnReports").classList.toggle("active", isRep);
+        el("tabBtnChartLab").classList.toggle("active", isCl);
+        if (isRep && state.snapshot) {
           renderCharts(state.snapshot);
+        }
+        if (isCl) {
+          if (!state.chartLab) fetchChartLab();
+          else renderChartLab(false);
         }
       }
 
       el("tabBtnDecisions").addEventListener("click", () => switchTab("decisions"));
       el("tabBtnReports").addEventListener("click", () => switchTab("reports"));
+      el("tabBtnChartLab").addEventListener("click", () => switchTab("chartlab"));
 
       el("decFilters").addEventListener("click", (e) => {
         const btn = e.target.closest(".filter-pill");
@@ -2013,6 +2292,467 @@
           });
         });
       }
+
+      // ================= STAGE A CHART LAB =================
+      function saveBossLabels() {
+        try {
+          localStorage.setItem(BOSS_LABELS_KEY, JSON.stringify(state.bossLabels));
+        } catch (_) {}
+      }
+
+      function sessionLabel(sess) {
+        const map = {
+          asian: { zh: "亚盘 Asian", en: "Asian" },
+          london: { zh: "欧盘 London", en: "London" },
+          overlap: { zh: "欧美重叠 Overlap", en: "LDN-NY Overlap" },
+          late_ny: { zh: "美盘尾盘 NY", en: "Late NY" },
+        };
+        const hit = map[sess];
+        return hit ? hit[state.lang] : (sess || "—");
+      }
+
+      async function fetchChartLab() {
+        const feed = el("clNewsFeed");
+        if (feed) feed.innerHTML = `<div class="empty-state" style="padding:22px 12px">${esc(t("clLoading"))}</div>`;
+        const customCl = qs.get("chartlab");
+        const candidates = [];
+        if (customCl) {
+          candidates.push(customCl);
+        } else if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
+          candidates.push(`/api/chart-lab?t=${Date.now()}`, `${REMOTE_CHART_LAB_URL}?t=${Date.now()}`);
+        } else {
+          candidates.push(`${REMOTE_CHART_LAB_URL}?t=${Date.now()}`, `./chart-lab.json?t=${Date.now()}`);
+        }
+        for (const url of candidates) {
+          try {
+            const resp = await fetch(url, { cache: "no-store" });
+            if (resp.ok) {
+              state.chartLab = await resp.json();
+              const bars = getDisplayedClBars();
+              if (!state.clSelectedBarTs && bars.length) {
+                state.clSelectedBarTs = bars[bars.length - 1].t;
+              }
+              renderChartLab(true);
+              return;
+            }
+          } catch (_) {}
+        }
+        el("clDataStatus").textContent = state.lang === "en" ? "Dataset not yet synced" : "数据包尚未同步";
+      }
+
+      function getDisplayedClBars() {
+        const cl = state.chartLab;
+        if (!cl || !cl.bars) return [];
+        const raw = cl.bars[state.clTf] || [];
+        if (state.clSession === "all") return raw;
+        return raw.filter((b) => b.s === state.clSession);
+      }
+
+      function snapBarForTs(bars, targetTs) {
+        if (!bars || !bars.length) return null;
+        let lo = 0, hi = bars.length - 1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (bars[mid].t === targetTs) return bars[mid];
+          if (bars[mid].t < targetTs) lo = mid + 1;
+          else hi = mid - 1;
+        }
+        const candA = lo < bars.length ? bars[lo] : null;
+        const candB = hi >= 0 ? bars[hi] : null;
+        if (!candA) return candB;
+        if (!candB) return candA;
+        return Math.abs(candA.t - targetTs) <= Math.abs(candB.t - targetTs) ? candA : candB;
+      }
+
+      function ensureLightweightChart(rebuildTheme) {
+        const container = el("clChartContainer");
+        if (!container) return false;
+        if (typeof window.LightweightCharts === "undefined") {
+          return false;
+        }
+        const isDark = state.theme === "dark";
+        const bgCol = isDark ? "#0d131f" : "#ffffff";
+        const textCol = isDark ? "#94a3b8" : "#475569";
+        const gridCol = isDark ? "rgba(148,163,184,0.08)" : "rgba(15,23,42,0.05)";
+        const upCol = isDark ? "#10b981" : "#059669";
+        const dnCol = isDark ? "#f43f5e" : "#e11d48";
+
+        if (!state.clChart) {
+          state.clChart = window.LightweightCharts.createChart(container, {
+            width: Math.max(280, container.clientWidth || 640),
+            height: container.clientHeight || 420,
+            layout: { background: { color: bgCol }, textColor: textCol },
+            grid: { vertLines: { color: gridCol }, horzLines: { color: gridCol } },
+            crosshair: { mode: window.LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: gridCol },
+            timeScale: { borderColor: gridCol, timeVisible: true, secondsVisible: false },
+            localization: {
+              priceFormatter: (p) => Number(p).toFixed(5),
+            },
+          });
+          state.clSeries = state.clChart.addCandlestickSeries({
+            upColor: upCol,
+            downColor: dnCol,
+            borderUpColor: upCol,
+            borderDownColor: dnCol,
+            wickUpColor: upCol,
+            wickDownColor: dnCol,
+          });
+          if (typeof ResizeObserver !== "undefined") {
+            const ro = new ResizeObserver(() => {
+              if (state.clChart && container.clientWidth > 0) {
+                state.clChart.applyOptions({
+                  width: container.clientWidth,
+                  height: container.clientHeight || 420,
+                });
+              }
+            });
+            ro.observe(container);
+          }
+          state.clChart.subscribeClick((param) => {
+            if (!param || param.time === undefined) return;
+            const clickedTs = Number(param.time);
+            if (Number.isFinite(clickedTs)) {
+              state.clSelectedBarTs = clickedTs;
+              renderClInspector();
+            }
+          });
+          state.clChart.subscribeCrosshairMove((param) => {
+            if (!param || param.time === undefined) return;
+            const bars = getDisplayedClBars();
+            const b = snapBarForTs(bars, Number(param.time));
+            if (b) updateClHud(b);
+          });
+        } else if (rebuildTheme) {
+          state.clChart.applyOptions({
+            layout: { background: { color: bgCol }, textColor: textCol },
+            grid: { vertLines: { color: gridCol }, horzLines: { color: gridCol } },
+            rightPriceScale: { borderColor: gridCol },
+            timeScale: { borderColor: gridCol },
+          });
+          state.clSeries.applyOptions({
+            upColor: upCol, downColor: dnCol,
+            borderUpColor: upCol, borderDownColor: dnCol,
+            wickUpColor: upCol, wickDownColor: dnCol,
+          });
+        }
+        return true;
+      }
+
+      function updateClHud(b) {
+        const hud = el("clHud");
+        if (!hud || !b) return;
+        const rng = ((Number(b.h) - Number(b.l)) / 0.0001).toFixed(1);
+        hud.innerHTML = `
+          <span><strong>${esc(fmtTime(b.iso))}</strong> · <span class="pill">${esc(sessionLabel(b.s))}</span></span>
+          <span class="mono">O ${Number(b.o).toFixed(5)} · H ${Number(b.h).toFixed(5)} · L ${Number(b.l).toFixed(5)} · C ${Number(b.c).toFixed(5)} · R ${rng}p · Sp ${Number(b.sa || 0).toFixed(1)}/${Number(b.sm || 0).toFixed(1)}p</span>
+        `;
+      }
+
+      function buildClMarkers(bars) {
+        const cl = state.chartLab;
+        if (!cl || !bars.length) return [];
+        const stepSec = state.clTf === "h1" ? 3600 : state.clTf === "m15" ? 900 : 300;
+        const maxSnap = stepSec * 2;
+        const barSet = new Set(bars.map((b) => b.t));
+        const markers = [];
+
+        for (const m of (cl.algo_markers || [])) {
+          if (m.tier === 1 && !state.clOverlays.t1) continue;
+          if (m.tier === 2 && !state.clOverlays.t2) continue;
+          if (m.tier === 3 && !state.clOverlays.t3) continue;
+          const b = snapBarForTs(bars, m.t);
+          if (!b || Math.abs(b.t - m.t) > maxSnap || !barSet.has(b.t)) continue;
+          const isLong = m.side === "long";
+          markers.push({
+            time: b.t,
+            position: isLong ? "belowBar" : "aboveBar",
+            color: m.tier === 3 ? "#2563eb" : isLong ? "#059669" : "#e11d48",
+            shape: isLong ? "arrowUp" : "arrowDown",
+            text: `T${m.tier}${isLong ? "L" : "S"} +${Number(m.mfe_pips || 0).toFixed(0)}p`,
+          });
+        }
+
+        if (state.clOverlays.trades) {
+          for (const tr of (cl.trades || [])) {
+            if (!tr.open_ts) continue;
+            const b = snapBarForTs(bars, tr.open_ts);
+            if (!b || Math.abs(b.t - tr.open_ts) > 7200 || !barSet.has(b.t)) continue;
+            markers.push({
+              time: b.t,
+              position: tr.side === "long" ? "belowBar" : "aboveBar",
+              color: "#7c3aed",
+              shape: "circle",
+              text: `${tr.side === "long" ? "DEMO L" : "DEMO S"} ${tr.pips !== null && tr.pips !== undefined ? fmtSigned(tr.pips, 1, "p") : ""}`,
+            });
+          }
+        }
+
+        if (state.clOverlays.boss) {
+          for (const [key, item] of Object.entries(state.bossLabels || {})) {
+            if (!item || !item.t || !item.label) continue;
+            const b = snapBarForTs(bars, Number(item.t));
+            if (!b || Math.abs(b.t - Number(item.t)) > maxSnap || !barSet.has(b.t)) continue;
+            const lbl = String(item.label);
+            markers.push({
+              time: b.t,
+              position: lbl === "buy" ? "belowBar" : "aboveBar",
+              color: lbl === "buy" ? "#16a34a" : lbl === "sell" ? "#dc2626" : "#d97706",
+              shape: lbl === "avoid" ? "square" : lbl === "buy" ? "arrowUp" : "arrowDown",
+              text: lbl === "buy" ? "★ BUY" : lbl === "sell" ? "★ SELL" : "✕ AVOID",
+            });
+          }
+        }
+
+        markers.sort((a, b) => a.time - b.time);
+        return markers;
+      }
+
+      function renderClSummaryAndJumps() {
+        const cl = state.chartLab;
+        if (!cl) return;
+        const win = cl.window || {};
+        el("clTicksVal").textContent = Number(win.total_ticks || 0).toLocaleString();
+        el("clSpanSub").textContent = win.first_iso && win.last_iso
+          ? `${fmtTime(win.first_iso)} → ${fmtTime(win.last_iso)}`
+          : "—";
+
+        const markers = cl.algo_markers || [];
+        const tCounts = [1, 2, 3].map((k) => markers.filter((m) => m.tier === k).length);
+        el("clMarkersVal").textContent = `${markers.length}`;
+        el("clMarkersSub").textContent = `T1:${tCounts[0]} · T2:${tCounts[1]} · T3:${tCounts[2]}`;
+
+        const evs = cl.events || [];
+        const frCount = evs.filter((e) => e.front_run_flag).length;
+        el("clEventsVal").textContent = `${evs.length}`;
+        el("clFrontRunSub").textContent = state.lang === "en"
+          ? `${frCount} pre-arrival jump flags`
+          : `其中 ${frCount} 条触发到达前抢跑/滞后预警`;
+
+        const bossArr = Object.values(state.bossLabels || {}).filter((x) => x && x.label);
+        el("clBossVal").textContent = `${bossArr.length}`;
+        el("clOosSub").textContent = win.oos_split_ts
+          ? `${t("clOosLabel")}: ${fmtTime(new Date(win.oos_split_ts * 1000).toISOString())}`
+          : t("clOosLabel");
+
+        const jumps = [];
+        for (const tr of (cl.trades || [])) {
+          if (!tr.open_ts) continue;
+          const pTxt = tr.pips !== null && tr.pips !== undefined ? fmtSigned(tr.pips, 1, "p") : "OPEN";
+          jumps.push(`<button class="cl-jump-chip trade ${esc(tr.side)}" data-jump-cl="${tr.open_ts}" type="button">Demo ${esc(tr.side === "long" ? "L" : "S")} ${esc(pTxt)} · ${esc(fmtTime(tr.opened_at))}</button>`);
+        }
+        for (const [_, item] of Object.entries(state.bossLabels || {})) {
+          if (!item || !item.t || !item.label) continue;
+          jumps.push(`<button class="cl-jump-chip boss" data-jump-cl="${Number(item.t)}" type="button">★ ${esc(String(item.label).toUpperCase())} · ${esc(fmtTime(item.iso || new Date(item.t * 1000).toISOString()))}</button>`);
+        }
+        for (const m of markers.filter((x) => x.tier >= 2).slice(-8).reverse()) {
+          jumps.push(`<button class="cl-jump-chip" data-jump-cl="${m.t}" type="button">T${m.tier} ${m.side === "long" ? "L" : "S"} +${Number(m.mfe_pips || 0).toFixed(0)}p · ${esc(fmtTime(m.iso))}</button>`);
+        }
+        el("clQuickJumps").innerHTML = jumps.join("");
+      }
+
+      function renderClInspector() {
+        const cl = state.chartLab;
+        if (!cl) return;
+        const bars = getDisplayedClBars();
+        const b = snapBarForTs(bars, Number(state.clSelectedBarTs || (bars[bars.length - 1] && bars[bars.length - 1].t) || 0));
+        if (!b) return;
+        state.clSelectedBarTs = b.t;
+        updateClHud(b);
+
+        const labelKey = `${b.t}`;
+        const existingLbl = state.bossLabels[labelKey] || null;
+        document.querySelectorAll("[data-cl-lbl]").forEach((btn) => {
+          const val = btn.getAttribute("data-cl-lbl");
+          btn.classList.toggle("active", Boolean(existingLbl && existingLbl.label === val));
+        });
+        if (el("clNoteInput")) {
+          el("clNoteInput").value = (existingLbl && existingLbl.note) || "";
+        }
+
+        const matchedMarkers = (cl.algo_markers || []).filter((m) => Math.abs(m.t - b.t) <= 600);
+        const matchedTrades = (cl.trades || []).filter((tr) => tr.open_ts && Math.abs(tr.open_ts - b.t) <= 1800);
+        const rng = ((Number(b.h) - Number(b.l)) / 0.0001).toFixed(1);
+
+        el("clBarInspector").innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
+            <strong>${esc(fmtTime(b.iso))}</strong>
+            <span class="pill blue">${esc(sessionLabel(b.s))}</span>
+          </div>
+          <div class="mono" style="font-size:11.5px;color:var(--ink-2)">
+            C ${Number(b.c).toFixed(5)} · Range ${rng}p · Spread ${Number(b.sa || 0).toFixed(1)}p (max ${Number(b.sm || 0).toFixed(1)}p) · ATR14 ${b.atr14 ?? "—"}p
+          </div>
+          ${matchedMarkers.map((m) => `<div class="pill ${m.side === "long" ? "green" : "red"}">Algo T${m.tier} ${esc(m.side.toUpperCase())} · MFE +${Number(m.mfe_pips).toFixed(1)}p / MAE -${Number(m.mae_pips).toFixed(1)}p (${m.horizon_min}m)</div>`).join("")}
+          ${matchedTrades.map((tr) => `<div class="pill amber">Demo ${esc(tr.side.toUpperCase())} ${tr.pips !== null && tr.pips !== undefined ? fmtSigned(tr.pips, 1, "p") : ""} · MFE +${tr.mfe_pips ?? "—"}p / MAE -${tr.mae_pips ?? "—"}p (${esc(state.lang === "en" ? tr.exit_reason_en : tr.exit_reason_zh)})</div>`).join("")}
+        `;
+
+        const windowSec = 3600;
+        const nearEvents = (cl.events || [])
+          .map((ev) => ({ ev, offsetMin: Math.round((ev.t - b.t) / 60) }))
+          .filter((x) => Math.abs(x.ev.t - b.t) <= windowSec)
+          .filter((x) => {
+            if (state.clNewsDir === "pre") return x.offsetMin <= 0;
+            if (state.clNewsDir === "post") return x.offsetMin >= 0;
+            return true;
+          })
+          .sort((a, c) => Math.abs(a.offsetMin) - Math.abs(c.offsetMin));
+
+        const feed = el("clNewsFeed");
+        if (!nearEvents.length) {
+          feed.innerHTML = `<div class="empty-state" style="padding:20px 12px">${esc(t("clNoNews"))}</div>`;
+          return;
+        }
+        feed.innerHTML = nearEvents.map(({ ev, offsetMin }) => {
+          const offTxt = offsetMin === 0 ? "0m (同根)" : `${offsetMin > 0 ? "+" : ""}${offsetMin}m`;
+          const pre5 = ev.pre_5m_pips !== null && ev.pre_5m_pips !== undefined ? fmtSigned(ev.pre_5m_pips, 1, "p") : "—";
+          const post15 = ev.post_15m_pips !== null && ev.post_15m_pips !== undefined ? fmtSigned(ev.post_15m_pips, 1, "p") : "—";
+          const post60 = ev.post_60m_pips !== null && ev.post_60m_pips !== undefined ? fmtSigned(ev.post_60m_pips, 1, "p") : "—";
+          return `
+            <div class="cl-ev-card ${ev.front_run_flag ? "frontrun" : ""}">
+              <div class="cl-ev-top tnum">
+                <span><strong>${esc(offTxt)}</strong> · <span class="pill">${esc(ev.provider)}</span>${ev.front_run_flag ? ` <span class="pill amber">${esc(t("clFrontRunTag"))}</span>` : ""}</span>
+                <span>${esc(fmtTime(ev.iso, true))}</span>
+              </div>
+              <div class="cl-ev-title">${esc(ev.title || ev.snippet || ev.event_uid)}</div>
+              <div class="cl-ev-pills mono">
+                <span class="pill">Pre-5m ${esc(pre5)}</span>
+                <span class="pill">Post+15m ${esc(post15)}</span>
+                <span class="pill">Post+60m ${esc(post60)}</span>
+                ${ev.runtime_state ? `<span class="pill blue">${esc(ev.portfolio_action || ev.runtime_state)}</span>` : ""}
+              </div>
+            </div>
+          `;
+        }).join("");
+      }
+
+      function renderChartLab(rebuildTheme = false) {
+        const cl = state.chartLab;
+        if (!cl) return;
+        renderClSummaryAndJumps();
+        const bars = getDisplayedClBars();
+        const hasLib = ensureLightweightChart(rebuildTheme);
+        if (hasLib && state.clSeries) {
+          const candleData = bars.map((b) => ({
+            time: Number(b.t),
+            open: Number(b.o),
+            high: Number(b.h),
+            low: Number(b.l),
+            close: Number(b.c),
+          }));
+          state.clSeries.setData(candleData);
+          state.clSeries.setMarkers(buildClMarkers(bars));
+          el("clDataStatus").textContent = `${state.clTf.toUpperCase()} · ${bars.length} bars`;
+        } else {
+          el("clChartContainer").innerHTML = `<div class="empty-state" style="padding:36px 14px">LightweightCharts CDN offline — use quick-jump chips &amp; ±60m inspector on the right (${bars.length} bars loaded).</div>`;
+        }
+        renderClInspector();
+      }
+
+      el("clTfGroup").addEventListener("click", (e) => {
+        const tfBtn = e.target.closest("[data-cl-tf]");
+        if (tfBtn) {
+          state.clTf = tfBtn.getAttribute("data-cl-tf");
+          document.querySelectorAll("[data-cl-tf]").forEach((b) => b.classList.toggle("active", b === tfBtn));
+          renderChartLab(false);
+          return;
+        }
+        const sBtn = e.target.closest("[data-cl-sess]");
+        if (sBtn) {
+          state.clSession = sBtn.getAttribute("data-cl-sess");
+          document.querySelectorAll("[data-cl-sess]").forEach((b) => b.classList.toggle("active", b === sBtn));
+          renderChartLab(false);
+        }
+      });
+
+      document.querySelectorAll("[data-cl-ov]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const k = btn.getAttribute("data-cl-ov");
+          state.clOverlays[k] = !state.clOverlays[k];
+          btn.classList.toggle("active", state.clOverlays[k]);
+          renderChartLab(false);
+        });
+      });
+
+      el("clQuickJumps").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-jump-cl]");
+        if (!btn) return;
+        const targetTs = Number(btn.getAttribute("data-jump-cl"));
+        const bars = getDisplayedClBars();
+        const snapped = snapBarForTs(bars, targetTs);
+        if (snapped) {
+          state.clSelectedBarTs = snapped.t;
+          if (state.clChart) {
+            const span = state.clTf === "h1" ? 3600 * 36 : state.clTf === "m15" ? 900 * 48 : 300 * 72;
+            state.clChart.timeScale().setVisibleRange({ from: snapped.t - span / 2, to: snapped.t + span / 2 });
+          }
+          renderClInspector();
+        }
+      });
+
+      document.querySelectorAll("[data-cl-lbl]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const bars = getDisplayedClBars();
+          const b = snapBarForTs(bars, Number(state.clSelectedBarTs || 0));
+          if (!b) return;
+          const lbl = btn.getAttribute("data-cl-lbl");
+          const key = `${b.t}`;
+          if (lbl === "clear") {
+            delete state.bossLabels[key];
+          } else {
+            state.bossLabels[key] = {
+              t: b.t,
+              iso: b.iso,
+              tf: state.clTf,
+              price: b.c,
+              session: b.s,
+              label: lbl,
+              note: (el("clNoteInput") ? el("clNoteInput").value.trim() : ""),
+              updated_at: new Date().toISOString(),
+            };
+          }
+          saveBossLabels();
+          renderChartLab(false);
+        });
+      });
+
+      el("clNewsDirFilter").addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-cl-ndir]");
+        if (!btn) return;
+        state.clNewsDir = btn.getAttribute("data-cl-ndir");
+        el("clNewsDirFilter").querySelectorAll(".filter-pill").forEach((b) => b.classList.toggle("active", b === btn));
+        renderClInspector();
+      });
+
+      el("clExportLabelsBtn").addEventListener("click", () => {
+        const payload = {
+          schema_version: "chart-lab-labels-v1",
+          exported_at: new Date().toISOString(),
+          labels: state.bossLabels,
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "chart-lab-labels.json";
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+
+      el("clImportLabelsBtn").addEventListener("click", () => el("clImportFile").click());
+      el("clImportFile").addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        try {
+          const parsed = JSON.parse(await file.text());
+          const incoming = (parsed && parsed.labels && typeof parsed.labels === "object") ? parsed.labels : parsed;
+          if (incoming && typeof incoming === "object") {
+            state.bossLabels = { ...state.bossLabels, ...incoming };
+            saveBossLabels();
+            renderChartLab(false);
+          }
+        } catch (_) {}
+        e.target.value = "";
+      });
 
       applyTheme();
       applyStaticI18n();

@@ -5,8 +5,9 @@
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-4D6BFE?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/Tests-148_Passing-10b981?style=flat-square" alt="148 Passing Tests" />
+  <img src="https://img.shields.io/badge/Tests-152_Passing-10b981?style=flat-square" alt="152 Passing Tests" />
   <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/Web_Dashboard-Live_PWA-2563eb?style=flat-square" alt="Live Web Dashboard" /></a>
+  <a href="https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" /></a>
   <a href="docs/blueprint-v2.md"><img src="https://img.shields.io/badge/Blueprint-v2_Stage_A-6366f1?style=flat-square" alt="Commander Blueprint v2" /></a>
   <img src="https://img.shields.io/badge/Execution-Demo_Only_Locked-0f172a?style=flat-square" alt="Demo-Only Locked" />
 </p>
@@ -32,7 +33,7 @@
 
 ## News & Research Log
 
-- **`[2026/11/25]`** Published **[Commander Blueprint v2](docs/blueprint-v2.md)** ([中文版](docs/blueprint-v2_CN.md)), launching **Stage A**: an offline Colab Quant & Reward Lab on 14+ days of continuous real cloud EUR/USD ticks & Tier-1 macro news, an interactive desktop/mobile `Chart Lab`, and a **Gemini vs. DeepSeek** out-of-sample benchmark.
+- **`[2026/11/25]`** Shipped **Stage A Workbench & Deliverables 1–3** per **[Commander Blueprint v2](docs/blueprint-v2.md)** ([中文版](docs/blueprint-v2_CN.md)): read-only `eventlens-shadow export-research` (`src/eventlens/research_lab.py`) syncing 14+ day real cloud tick/news telemetry (`chart-lab.json`), interactive **Tab 3 `Chart Lab`** in the Web Dashboard, and the **[Google Colab Quant & Reward Lab](https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb)** notebook.
 - **`[2026/11/24]`** Completed forensic autopsy of the Nov 11–24 Pepperstone Demo run (`6 trades, 0W/6L, -11.62 USD`). Activated `--kill-switch` on the GCP VM to halt unvalidated Demo entries while continuing uninterrupted `24×5` quote & macro feed capture.
 - **`[2026/11/19]`** Released `single-pass-agent-v4.1`, `tier1-eurusd-filter-v2` (cutting daily LLM evaluations from `80/day` to `~24–27/day`), tighter `8.0p/6.0p` trailing profit locks, NY pre-close entry cutoffs, and a redesigned main-screen Web Dashboard with inline CoT reasoning drawers.
 - **`[2026/11/11]`** Built headless `.NET 6` `EventLensCliBridge.algo` on Ubuntu 24.04 (`cTrader.Automate 1.0.21`), passed disconnected metadata checks, `demo-reconcile`, and bounded `1,000 EUR` Pepperstone Demo `demo-smoke`, entering `24×5` cloud observation.
@@ -115,7 +116,7 @@ EventLens treats **unfiltered forward telemetry** as first-class scientific evid
 
 | Verification Tier | Current Evidence |
 |---|---|
-| **Offline-Verified** | **`148` automated tests** (`pytest -q`), strict `mypy src`, `ruff check .`, and `ruff format --check .` covering Pydantic contracts, risk gates, Razor commission policy, bridge rotation, close-deal race guards, and live-account locks |
+| **Offline-Verified** | **`152` automated tests** (`pytest -q`), strict `mypy src`, `ruff check .`, and `ruff format --check .` covering Pydantic contracts, risk gates, Razor commission policy, bridge rotation, close-deal race guards, live-account locks, and Stage A `research_lab` exports |
 | **Live-Observed** | Ubuntu 24.04 GCP `demo-reconcile`, bounded `1,000 EUR` `demo-smoke`, continuous `24×5` EUR/USD tick & Tier-1 macro SQLite accumulation (`Nov 11–present`), and the full 6-trade Nov 11–24 forward evaluation |
 | **Active Research (Stage A)** | Offline reverse-engineering of clean `MFE/MAE` opportunities, human K-line labeling (`Chart Lab`), `±60m` bidirectional attribution, `Net-R` reward benchmarking, and **Gemini vs. DeepSeek** out-of-sample trials |
 | **Hard-Blocked** | Real-money Live broker endpoints and accounts (`!Account.IsLive` enforced in code & execution bridge) |
@@ -140,9 +141,10 @@ Full technical specification → **[docs/blueprint-v2.md](docs/blueprint-v2.md)*
 
 Monitor live equity, open/closed Demo positions, triggering news catalysts, full model Chain-of-Thought (`CoT`) reasoning, and decision audit logs directly from the browser:
 
-- **Hosted Live Dashboard:** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)**
+- **Hosted Live Dashboard & Chart Lab:** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)**
+- **Stage A Colab Quant & Reward Lab:** **[Open in Google Colab ↗](https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb)** (`notebooks/stage_a_quant_reward_lab.ipynb`)
 - **Project Visual Overview:** **[https://lohis-aimbot.github.io/eventlens/](https://lohis-aimbot.github.io/eventlens/)**
-- **Capabilities:** Main-screen trade ledger (`#mainTradesSection`), clickable open position hero card, inline 3-tab CoT inspection drawer, daily FX PnL curves, bilingual **`中文 / EN`** toggle, Light/Dark themes, mobile **PWA** install (`manifest.webmanifest`), and upcoming **Tab 3 (`Chart Lab`)** for Stage A K-line annotation.
+- **Capabilities:** Main-screen trade ledger (`#mainTradesSection`), clickable open position hero card, inline 3-tab CoT inspection drawer, daily FX PnL curves, **interactive Tab 3 `Chart Lab`** (`M5/M15/H1`, 3-tier algo overlays, manual `Buy/Sell/Avoid` labeling with JSON export, and `±60m` bidirectional news attribution), bilingual **`中文 / EN`** toggle, Light/Dark themes, and mobile **PWA** install.
 
 ---
 
@@ -158,7 +160,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
-# Run full quality & test gate (CI parity: 148 tests)
+# Run full quality & test gate (CI parity: 152 tests)
 ruff check .
 ruff format --check .
 mypy src
@@ -173,7 +175,10 @@ python -m build
 eventlens-shadow --help
 eventlens-shadow start --help
 
-# Launch the local read-only Web Dashboard against local SQLite databases
+# Export sanitized 14+ day K-line, 3-tier labels & ±60m attributed news bundle for Colab / Chart Lab
+eventlens-shadow export-research --output-dir ./research-bundle
+
+# Launch the local read-only Web Dashboard (with live Chart Lab & /api/chart-lab)
 eventlens-shadow dashboard
 ```
 
@@ -182,7 +187,8 @@ eventlens-shadow dashboard
 | `start` / `stop` / `recover` | Run the single-process intraday Shadow / opt-in Demo loop, drain cleanly on `SIGTERM`, or reconcile crash state |
 | `status` / `report` | Open SQLite databases strictly read-only (`?mode=ro`) to audit equity, decisions, latency, and events |
 | `demo-reconcile` / `demo-smoke` / `demo-unlock` | Reconcile `EventLensCliBridge` Demo state, run bounded `1,000–2,000 EUR` smoke verification, or unlock ambiguous states |
-| `export-dashboard` / `dashboard` | Export sanitized static snapshots (`dashboard-live`) or serve the local read-only dashboard |
+| `export-research` | Export strictly sanitized `chart-lab.json`, `bars_m1.csv.gz`, `M5/M15/H1` CSVs, 3-tier setups, and counterfactual `events.json` |
+| `export-dashboard` / `dashboard` | Export sanitized static snapshots (`dashboard-live`) or serve the local read-only dashboard + `/api/chart-lab` |
 
 Headless `24×5` Linux provisioning & Docker `.NET 6` bridge runbook → **[docs/cloud-24x5-deployment.md](docs/cloud-24x5-deployment.md)**
 
@@ -191,7 +197,7 @@ Headless `24×5` Linux provisioning & Docker `.NET 6` bridge runbook → **[docs
 ## 7. Repository Map & Documentation
 
 <details>
-<summary><strong>Repository structure (verified 21 source modules &amp; deployment tree)</strong></summary>
+<summary><strong>Repository structure (verified 22 source modules &amp; deployment tree)</strong></summary>
 
 ```text
 eventlens/
@@ -205,6 +211,7 @@ eventlens/
 │   ├── runtime.py                   IntradayEventRuntime, stateful reviews & ShadowRunner
 │   ├── shadow_cli.py                eventlens-shadow CLI entrypoint & subcommands
 │   ├── dashboard.py                 Sanitized dashboard snapshot exporter & local server
+│   ├── research_lab.py              Read-only Stage A exporter, 3-tier MFE/MAE, ±60m & Net-R engine
 │   ├── sources/
 │   │   ├── english_tier1.py         investingLive, ECB, Fed, BEA, FF & tier1-eurusd-filter-v2
 │   │   ├── ctrader_demo.py          Containerized Demo quote tailer & bridge handshake
@@ -219,10 +226,10 @@ eventlens/
 ├── deploy/gcp/                      Ubuntu 24.04 setup, Docker compose, watchdog & systemd units
 ├── docs/
 │   ├── blueprint-v2.md / _CN.md     Signed-off Commander Blueprint v2 (Stages 0-4)
-│   ├── dashboard/                   Live bilingual PWA Web Dashboard
+│   ├── dashboard/                   Live bilingual PWA Web Dashboard & interactive Chart Lab
 │   └── research/                    Preflight audits, overnight audits & historical FOMC studies
-├── configs/ & notebooks/            Pinned replay manifests & diagnostic notebooks
-└── tests/                           148 unit, protocol, integration & cloud-audit tests
+├── configs/ & notebooks/            Stage A Colab Quant & Reward Lab + diagnostic notebooks
+└── tests/                           152 unit, protocol, integration, cloud-audit & research-lab tests
 ```
 </details>
 

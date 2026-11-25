@@ -1418,6 +1418,25 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             max_decisions=int(getattr(args, "max_decisions", 80)),
         )
 
+    if args.command == "export-research":
+        from .research_lab import export_research_bundle
+
+        diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
+        cli_db = _resolve_cli_demo_state_db(args)
+        out_dir_arg = getattr(args, "output_dir", None)
+        cl_out_arg = getattr(args, "chart_lab_output", None)
+        return export_research_bundle(
+            quotes_db=diag_quotes_db,
+            observer_db=diag_obs_db if diag_obs_db.is_file() else None,
+            shadow_db=Path(args.shadow_db) if Path(args.shadow_db).is_file() else None,
+            memory_db=diag_mem_db if diag_mem_db.is_file() else None,
+            cli_demo_db=cli_db if cli_db.is_file() else None,
+            output_dir=Path(out_dir_arg) if out_dir_arg is not None else None,
+            chart_lab_output=Path(cl_out_arg) if cl_out_arg is not None else None,
+            days=getattr(args, "days", None),
+            basis=str(getattr(args, "basis", "live_poll")),
+        )
+
     if args.command in ("status", "report"):
         diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
         market = _load_latest_market(diag_quotes_db, basis, now=now)
@@ -2274,6 +2293,42 @@ def main(argv: list[str] | None = None) -> None:
         help="Maximum recent decision records to include (default: 80)",
     )
 
+    exp_res_p = sub.add_parser(
+        "export-research",
+        help="Export strictly sanitized 14+ day Stage A Chart Lab JSON & Colab research bundle",
+    )
+    _add_common_db_args(exp_res_p, suppress_defaults=False)
+    exp_res_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional path to cli-demo-broker.sqlite (defaults to shadow-db sibling)",
+    )
+    exp_res_p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional destination directory for Colab CSV/JSON research bundle",
+    )
+    exp_res_p.add_argument(
+        "--chart-lab-output",
+        type=Path,
+        default=None,
+        help="Optional destination path for web Chart Lab chart-lab.json",
+    )
+    exp_res_p.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Optional trailing day window (default: export full available span)",
+    )
+    exp_res_p.add_argument(
+        "--basis",
+        type=str,
+        default="live_poll",
+        help="Quote observation basis filter (default: live_poll)",
+    )
+
     dash_p = sub.add_parser(
         "dashboard",
         help="Serve local read-only Chinese web dashboard against local SQLite databases",
@@ -2348,7 +2403,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "dashboard":
         from .dashboard import serve_dashboard
 
-        diag_mem_db, _, diag_quotes_db = _resolve_companion_dbs(args)
+        diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
         cli_db = _resolve_cli_demo_state_db(args)
         print(f"EventLens dashboard listening on http://{args.host}:{args.port}/")
         serve_dashboard(
@@ -2357,6 +2412,7 @@ def main(argv: list[str] | None = None) -> None:
             shadow_db=Path(args.shadow_db),
             memory_db=diag_mem_db,
             quotes_db=diag_quotes_db,
+            observer_db=diag_obs_db,
             cli_demo_db=cli_db if cli_db.is_file() else None,
         )
         return

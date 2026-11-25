@@ -5,8 +5,9 @@
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-4D6BFE?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/Tests-148_Passing-10b981?style=flat-square" alt="148 项测试通过" />
+  <img src="https://img.shields.io/badge/Tests-152_Passing-10b981?style=flat-square" alt="152 项测试通过" />
   <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/实时看板-Live_PWA-2563eb?style=flat-square" alt="在线实时看板" /></a>
+  <a href="https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" /></a>
   <a href="docs/blueprint-v2_CN.md"><img src="https://img.shields.io/badge/Research-Blueprint_v2-6366f1?style=flat-square" alt="研究蓝图 v2" /></a>
   <img src="https://img.shields.io/badge/Execution-Demo_Only_Locked-0f172a?style=flat-square" alt="实盘物理阻断" />
 </p>
@@ -32,7 +33,7 @@
 
 ## 最新进展与研究日志
 
-- **`[2026/11/25]`** 发布 **[总指挥研究与工程蓝图 v2](docs/blueprint-v2_CN.md)**（[English](docs/blueprint-v2.md)），正式启动 **Stage A**：基于云端连续 14+ 天真实 EUR/USD Tick 与一手宏观快讯数据，搭建离线 Colab 量化与 Reward 实验室、桌面/手机双端交互式 `Chart Lab`，并开展 **Gemini vs. DeepSeek** 盲测集同台基准评测。
+- **`[2026/11/25]`** 按照 **[总指挥研究与工程蓝图 v2](docs/blueprint-v2_CN.md)**（[English](docs/blueprint-v2.md)）正式上线 **Stage A 三大工程交付物**：只读云端导出管线 `eventlens-shadow export-research`（`src/eventlens/research_lab.py`）、Web 看板第 3 个主 Tab **`Chart Lab（K 线标注台）`**，以及一键同步云端 14+ 天数据的 **[Google Colab 量化与 Reward 实验室](https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb)**。
 - **`[2026/11/24]`** 完成 11 月 11–24 日 Pepperstone Demo 真实前向运行法医复盘（`6` 笔交易，`0` 胜 `6` 负，`-11.62 USD`）。已在 GCP 云主机开启 `--kill-switch` 物理阻断新开仓，同时保持 `24×5` 报价与宏观新闻不间断采集沉淀。
 - **`[2026/11/19]`** 上线 `single-pass-agent-v4.1`、`tier1-eurusd-filter-v2`（日均大模型调用从 `80 次/天` 降噪至 `~24–27 次/天`）、收紧 `8.0p/6.0p` 移动锁盈、纽约收盘前禁入保护及主界面直达开仓/CoT 推理链的 Web 看板改版。
 - **`[2026/11/11]`** 在 Ubuntu 24.04 云端完成 `.NET 6` 无头桥接 `EventLensCliBridge.algo`（`cTrader.Automate 1.0.21`）编译与断网元数据检查，通过 `demo-reconcile` 与 `1,000 EUR` 有界 `demo-smoke`，启动 `24×5` 连续观测。
@@ -115,7 +116,7 @@ EventLens 坚持将**真实运行结果（包括策略亏损与隐藏故障）**
 
 | 可信等级 | 当前已覆盖范围 |
 |---|---|
-| **离线验证（Offline-Verified）** | **`148` 项自动化测试**（`pytest -q`）、严格 `mypy src`、`ruff check .` 与 `ruff format --check .`，覆盖契约校验、硬风控、Razor 佣金、桥接滚动切分、平仓对账竞态及实盘账户拦截 |
+| **离线验证（Offline-Verified）** | **`152` 项自动化测试**（`pytest -q`）、严格 `mypy src`、`ruff check .` 与 `ruff format --check .`，覆盖契约校验、硬风控、Razor 佣金、桥接滚动切分、平仓对账竞态、实盘账户拦截及 Stage A 只读导出管线 |
 | **真实观测（Live-Observed）** | Ubuntu 24.04 GCP 云端 `demo-reconcile`、有界 `1,000 EUR` `demo-smoke`、`24×5` 连续 EUR/USD 报价与一手新闻 SQLite 沉淀（11 月 11 日至今）以及完整 6 笔真实 Demo 前向复盘 |
 | **主动研究中（Stage A）** | 14+ 天真实数据反推理想买点、双端 `Chart Lab` 人工标注、`±60m` 双向因果归因、`Net-R` 评分函数基准及 **Gemini vs. DeepSeek** 盲测对比 |
 | **物理阻断（Hard-Blocked）** | 一切真实资金账户（Live）与实盘券商接口（代码与桥接器双层 `!Account.IsLive` 拦截） |
@@ -140,9 +141,10 @@ EventLens 坚持将**真实运行结果（包括策略亏损与隐藏故障）**
 
 可直接通过浏览器或手机端实时查阅云端净值曲线、历史开平仓与入场理由、大模型完整思考链（`CoT`）以及风控拦截日志：
 
-- **实时 Web 看板：** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)**
+- **实时 Web 看板与 K 线标注台：** **[https://lohis-aimbot.github.io/eventlens/dashboard/](https://lohis-aimbot.github.io/eventlens/dashboard/)**
+- **Stage A Colab 量化实验室：** **[在 Google Colab 一键打开 ↗](https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb)**（`notebooks/stage_a_quant_reward_lab.ipynb`）
 - **项目可视化概览：** **[https://lohis-aimbot.github.io/eventlens/](https://lohis-aimbot.github.io/eventlens/)**
-- **核心特性：** 主界面直达持仓与开仓逻辑卡片（`#mainTradesSection`）、内嵌三段式 `CoT` 抽屉、每日量化报表、一键 **`中文 / EN`** 切换、明暗主题、手机 **PWA** 桌面安装，以及即将接入的第 3 个 Tab **`Chart Lab`**。
+- **核心特性：** 主界面直达持仓与开仓逻辑卡片（`#mainTradesSection`）、内嵌三段式 `CoT` 抽屉、每日量化报表、**桌面/手机双端 `Chart Lab`（`M5/M15/H1` 交互式 K 线、算法 3 级标记、老板手动 `Buy/Sell/Avoid` 标注与 JSON 导出、`±60m` 双向新闻归因）**、一键 **`中文 / EN`** 切换、明暗主题与手机 **PWA** 安装。
 
 ---
 
@@ -158,7 +160,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
-# 运行完整 CI 质量门禁（148 项测试通过）
+# 运行完整 CI 质量门禁（152 项测试通过）
 ruff check .
 ruff format --check .
 mypy src
@@ -173,7 +175,10 @@ python -m build
 eventlens-shadow --help
 eventlens-shadow start --help
 
-# 在本地基于 SQLite 数据库启动只读双语 Web 看板
+# 只读导出 14+ 天多周期 K 线、3 级机会标记与 ±60m 双向新闻数据包供 Colab 使用
+eventlens-shadow export-research --output-dir ./research-bundle
+
+# 在本地基于 SQLite 数据库启动只读双语 Web 看板（含实时 Chart Lab 与 /api/chart-lab）
 eventlens-shadow dashboard
 ```
 
@@ -182,7 +187,8 @@ eventlens-shadow dashboard
 | `start` / `stop` / `recover` | 启动单进程日内 Shadow / 显式 Demo 循环、`SIGTERM` 优雅退场或崩溃恢复对账 |
 | `status` / `report` | 强制以只读模式（`?mode=ro`）读取 SQLite 账本、净值统计与延迟诊断报告 |
 | `demo-reconcile` / `demo-smoke` / `demo-unlock` | 核对 `EventLensCliBridge` Demo 持仓、执行 `1,000–2,000 EUR` 有界冒烟检验或异常状态解锁 |
-| `export-dashboard` / `dashboard` | 导出严格脱敏的静态快照（`dashboard-live`）或本地挂载只读看板 |
+| `export-research` | 只读导出脱敏 `chart-lab.json`、`bars_m1.csv.gz`、`M5/M15/H1` K 线、3 级标记与反事实 `events.json` |
+| `export-dashboard` / `dashboard` | 导出严格脱敏的静态快照（`dashboard-live`）或本地挂载只读看板与 `/api/chart-lab` |
 
 Ubuntu 24.04 + Docker `.NET 6` 云端无人值守配置手册 → **[docs/cloud-24x5-deployment.md](docs/cloud-24x5-deployment.md)**
 
@@ -191,7 +197,7 @@ Ubuntu 24.04 + Docker `.NET 6` 云端无人值守配置手册 → **[docs/cloud-
 ## 7. 仓库结构与文档索引
 
 <details>
-<summary><strong>项目目录结构（21 个核心 Python 模块与云端部署组件）</strong></summary>
+<summary><strong>项目目录结构（22 个核心 Python 模块与云端部署组件）</strong></summary>
 
 ```text
 eventlens/
@@ -205,6 +211,7 @@ eventlens/
 │   ├── runtime.py                   IntradayEventRuntime、有状态复盘与 ShadowRunner
 │   ├── shadow_cli.py                eventlens-shadow 命令行入口与子命令调度
 │   ├── dashboard.py                 严格脱敏的静态快照导出器与本地只读服务
+│   ├── research_lab.py              只读 Stage A 导出器、3 级机会标定、±60m 归因与 Net-R 引擎
 │   ├── sources/
 │   │   ├── english_tier1.py         investingLive、ECB、Fed、BEA、FF 与 v2 降噪过滤器
 │   │   ├── ctrader_demo.py          容器化 Demo 报价追踪与桥接文件握手
@@ -219,10 +226,10 @@ eventlens/
 ├── deploy/gcp/                      Ubuntu 24.04 初始化、Docker Compose、看门狗与 systemd 服务
 ├── docs/
 │   ├── blueprint-v2_CN.md / .md     总指挥蓝图 v2（第 0-4 关完整工程与量化设计）
-│   ├── dashboard/                   在线双语 PWA Web 看板源码
+│   ├── dashboard/                   在线双语 PWA Web 看板与交互式 Chart Lab 源码
 │   └── research/                    云端预检审计、跨夜事故复盘与历史 FOMC 研究文档
-├── configs/ & notebooks/            冻结的实验假设配置与诊断 Notebook
-└── tests/                           148 项单元、协议、状态机与云端故障回归测试
+├── configs/ & notebooks/            Stage A Colab 量化与 Reward 实验室及诊断 Notebook
+└── tests/                           152 项单元、协议、状态机、云端故障与 Research Lab 测试
 ```
 </details>
 
