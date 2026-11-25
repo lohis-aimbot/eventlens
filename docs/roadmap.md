@@ -1,5 +1,8 @@
 # Intraday roadmap
 
+> [!NOTE]
+> **November 2026 Pivot — Commander Blueprint v2:** Following the Nov 11–24 live Pepperstone Demo forward autopsy (`6 trades, 0W/6L, -11.62 USD`), Demo entries are halted under `--kill-switch` while continuous `24×5` tick & news collection runs in Stage A offline research mode. See **[Commander Blueprint v2 (EN)](blueprint-v2.md)** and **[总指挥蓝图 v2 (中文)](blueprint-v2_CN.md)** for the current active roadmap.
+
 Each stage needs its own acceptance result before progressing. This is a plan, not
 permission to launch collectors, spend API credits or connect a broker automatically.
 
