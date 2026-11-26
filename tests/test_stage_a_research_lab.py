@@ -10,9 +10,12 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from eventlens.quotes import QuoteStore
 from eventlens.research_lab import (
     aggregate_quote_bars,
+    apply_event_cluster_dedup,
     build_chart_lab_payload,
     classify_fx_session,
     detect_optimal_entries,
@@ -360,3 +363,150 @@ def test_dashboard_html_and_colab_notebook_integrity() -> None:
     for idx, cell in enumerate(code_cells):
         src = "".join(cell["source"])
         ast.parse(src, filename=f"cell_{idx}")
+
+
+def test_apply_event_cluster_dedup_handles_entries_misses_and_errors() -> None:
+    # Case 1: 4 headlines in 26s, 1 active_entry (+0.332) + 3 HOLD misses (-0.1)
+    case1_in = [
+        {
+            "t": 1795613426,
+            "title": "GDP",
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613426,
+            "title": "Personal Income",
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613452,
+            "title": "Claims",
+            "score": 0.332,
+            "r_net": 0.332,
+            "mae_penalty": 0.0,
+            "regime": "active_entry",
+        },
+        {
+            "t": 1795613452,
+            "title": "Core PCE",
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+    ]
+    orig_snapshot = [dict(r) for r in case1_in]
+    out1 = apply_event_cluster_dedup(case1_in, cluster_window_sec=300)
+    assert case1_in == orig_snapshot  # input dicts never mutated
+    assert sum(r["r_net"] for r in out1) == pytest.approx(0.332)
+    assert sum(r["score"] for r in out1) == pytest.approx(0.332)
+    assert [r["regime"] for r in out1].count("active_entry") == 1
+    assert [r["regime"] for r in out1].count("cluster_covered_flat") == 3
+    assert len({r["cluster_id"] for r in out1}) == 1
+
+    # Case 2: 3 duplicate entries (+0.332 each) + 1 miss (-0.1) in same cluster -> scored once
+    case2_in = [
+        {
+            "t": 1795613426,
+            "title": "GDP",
+            "score": 0.332,
+            "r_net": 0.332,
+            "mae_penalty": 0.0,
+            "regime": "active_entry",
+        },
+        {
+            "t": 1795613426,
+            "title": "Income",
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613452,
+            "title": "Claims",
+            "score": 0.332,
+            "r_net": 0.332,
+            "mae_penalty": 0.0,
+            "regime": "active_entry",
+        },
+        {
+            "t": 1795613452,
+            "title": "Core PCE",
+            "score": 0.332,
+            "r_net": 0.332,
+            "mae_penalty": 0.0,
+            "regime": "active_entry",
+        },
+    ]
+    out2 = apply_event_cluster_dedup(case2_in, cluster_window_sec=300)
+    assert sum(r["r_net"] for r in out2) == pytest.approx(0.332)
+    assert sum(r["score"] for r in out2) == pytest.approx(0.332)
+    assert [r["regime"] for r in out2].count("active_entry") == 1
+    assert [r["regime"] for r in out2].count("cluster_duplicate_entry") == 2
+    assert [r["regime"] for r in out2].count("cluster_covered_flat") == 1
+
+    # Case 3: All 4 misses in one cluster -> single worst penalty (-0.25)
+    case3_in = [
+        {
+            "t": 1795613426,
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613426,
+            "score": -0.25,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613452,
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+        {
+            "t": 1795613452,
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+    ]
+    out3 = apply_event_cluster_dedup(case3_in, cluster_window_sec=300)
+    assert sum(r["score"] for r in out3) == pytest.approx(-0.25)
+    assert [r["regime"] for r in out3].count("cluster_dedup_miss") == 3
+
+    # Case 4: Distinct clusters >300s apart + api_error preservation
+    case4_in = [
+        {
+            "t": 1000,
+            "score": 0.341,
+            "r_net": 0.341,
+            "mae_penalty": 0.0,
+            "regime": "active_entry",
+        },
+        {"t": 1020, "score": None, "r_net": None, "mae_penalty": 0.0, "regime": "api_error"},
+        {
+            "t": 1400,
+            "score": -0.1,
+            "r_net": 0.0,
+            "mae_penalty": 0.0,
+            "regime": "missed_qualified_setup",
+        },
+    ]
+    out4 = apply_event_cluster_dedup(case4_in, cluster_window_sec=300)
+    assert out4[0]["cluster_id"] == 0 and out4[1]["cluster_id"] == 0
+    assert out4[2]["cluster_id"] == 1
+    assert out4[1]["regime"] == "api_error" and out4[1]["score"] is None
+    assert out4[2]["score"] == pytest.approx(-0.1)

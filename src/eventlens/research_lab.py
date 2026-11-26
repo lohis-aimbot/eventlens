@@ -883,6 +883,96 @@ def score_decision_net_r(
     return {"score": 0.0, "r_net": 0.0, "mae_penalty": 0.0, "regime": "neutral_flat"}
 
 
+def apply_event_cluster_dedup(
+    records: list[dict[str, Any]],
+    *,
+    cluster_window_sec: int = 300,
+) -> list[dict[str, Any]]:
+    """Deduplicate clustered macro headlines so single-position entries & misses score once."""
+    if not records:
+        return []
+    window_sec = max(0, int(cluster_window_sec))
+    ordered = sorted((dict(r) for r in records), key=lambda r: int(r.get("t") or 0))
+
+    clusters: list[list[dict[str, Any]]] = []
+    cluster_start_t = int(ordered[0].get("t") or 0)
+    current: list[dict[str, Any]] = []
+    for row in ordered:
+        ts = int(row.get("t") or 0)
+        if current and ts - cluster_start_t > window_sec:
+            clusters.append(current)
+            current = [row]
+            cluster_start_t = ts
+        else:
+            if not current:
+                cluster_start_t = ts
+            current.append(row)
+    if current:
+        clusters.append(current)
+
+    deduped: list[dict[str, Any]] = []
+    for cid, group in enumerate(clusters):
+        for row in group:
+            row["cluster_id"] = cid
+            row["cluster_primary"] = False
+
+        entry_indices = [i for i, row in enumerate(group) if row.get("regime") == "active_entry"]
+        if entry_indices:
+            first_entry = entry_indices[0]
+            group[first_entry]["cluster_primary"] = True
+            for i, row in enumerate(group):
+                if i == first_entry or row.get("regime") == "api_error":
+                    continue
+                if row.get("regime") == "active_entry":
+                    row["regime"] = "cluster_duplicate_entry"
+                else:
+                    row["regime"] = "cluster_covered_flat"
+                row["score"] = 0.0
+                row["r_net"] = 0.0
+                row["mae_penalty"] = 0.0
+        else:
+            miss_indices = [
+                i for i, row in enumerate(group) if row.get("regime") == "missed_qualified_setup"
+            ]
+            avoid_indices = [
+                i for i, row in enumerate(group) if row.get("regime") == "avoided_two_way_trap"
+            ]
+            primary_assigned = False
+            if miss_indices:
+                worst_miss = min(
+                    miss_indices,
+                    key=lambda idx: (
+                        float(group[idx]["score"]) if group[idx].get("score") is not None else 0.0,
+                        idx,
+                    ),
+                )
+                group[worst_miss]["cluster_primary"] = True
+                primary_assigned = True
+                for idx in miss_indices:
+                    if idx != worst_miss:
+                        group[idx]["regime"] = "cluster_dedup_miss"
+                        group[idx]["score"] = 0.0
+                        group[idx]["r_net"] = 0.0
+                        group[idx]["mae_penalty"] = 0.0
+            if avoid_indices:
+                first_avoid = avoid_indices[0]
+                if not primary_assigned:
+                    group[first_avoid]["cluster_primary"] = True
+                    primary_assigned = True
+                for idx in avoid_indices[1:]:
+                    group[idx]["regime"] = "cluster_dedup_avoid"
+                    group[idx]["score"] = 0.0
+                    group[idx]["r_net"] = 0.0
+                    group[idx]["mae_penalty"] = 0.0
+            if not primary_assigned:
+                for row in group:
+                    if row.get("regime") != "api_error":
+                        row["cluster_primary"] = True
+                        break
+        deduped.extend(group)
+    return deduped
+
+
 def split_chronological_oos(
     items: list[dict[str, Any]],
     *,
