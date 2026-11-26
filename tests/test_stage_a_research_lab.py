@@ -143,7 +143,12 @@ def _make_sample_observer_and_shadow_db(
         );
         """
     )
-    dec_json = json.dumps({"portfolio_action": "SET_TARGET", "target_direction": "long"})
+    dec_json = json.dumps(
+        {
+            "portfolio_action": "SET_TARGET",
+            "target": {"positions": [{"symbol": "EUR/USD", "target_weight": 0.5}]},
+        }
+    )
     with s_con:
         s_con.execute(
             """
@@ -237,6 +242,17 @@ def test_aggregate_detect_exit_reward_and_attribution(tmp_path: Path) -> None:
     assert sc_avoid["regime"] == "avoided_two_way_trap"
     assert sc_avoid["score"] == 0.25
 
+    sc_err = score_decision_net_r(
+        action="API_ERROR",
+        side=None,
+        long_eval=sim_long["templates"]["T1_scalp"],
+        short_eval=None,
+        has_qualified_setup=True,
+    )
+    assert sc_err["regime"] == "api_error"
+    assert sc_err["score"] is None
+    assert sc_err["r_net"] is None
+
     # Bidirectional event attribution + strict secret redaction
     events = extract_attributed_events(
         observer_db=obs_db,
@@ -249,6 +265,7 @@ def test_aggregate_detect_exit_reward_and_attribution(tmp_path: Path) -> None:
     ev = events[0]
     assert ev["runtime_state"] == "approved"
     assert ev["portfolio_action"] == "SET_TARGET"
+    assert ev["target_direction"] == "long"
     assert ev["post_15m_pips"] is not None and ev["post_15m_pips"] > 5.0
     assert "[REDACTED_API_KEY]" in ev["snippet"] or "sk-test" not in json.dumps(events)
     assert "/Users/tester" not in json.dumps(events)

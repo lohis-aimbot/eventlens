@@ -829,6 +829,9 @@ def score_decision_net_r(
     norm_action = action.upper().strip()
     norm_side = side.lower().strip() if side else None
 
+    if norm_action == "API_ERROR":
+        return {"score": None, "r_net": None, "mae_penalty": 0.0, "regime": "api_error"}
+
     if norm_action in ("BUY", "SELL", "SET_TARGET", "LONG", "SHORT") and norm_side in (
         "long",
         "short",
@@ -908,6 +911,26 @@ def _clean_snippet(raw_title: str, raw_text: str, *, max_len: int = 240) -> str:
     return compact[: max_len - 1].rstrip() + "…"
 
 
+def _extract_target_direction(dec_obj: dict[str, Any]) -> str | None:
+    """Resolve target direction from either flat fields or nested AgentDecision target positions."""
+    direct = dec_obj.get("target_direction")
+    if isinstance(direct, str) and direct.lower().strip() in ("long", "short"):
+        return direct.lower().strip()
+    target = dec_obj.get("target")
+    if isinstance(target, dict):
+        positions = target.get("positions")
+        if isinstance(positions, list):
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                weight = _safe_float(pos.get("target_weight"))
+                if weight is not None and weight > 0:
+                    return "long"
+                if weight is not None and weight < 0:
+                    return "short"
+    return None
+
+
 def extract_attributed_events(
     *,
     observer_db: Path | None,
@@ -951,7 +974,7 @@ def extract_attributed_events(
                     "filter_reason": sanitize_string(str(r["reason"] or "")),
                     "decision_id": str(r["decision_id"]) if r["decision_id"] else None,
                     "portfolio_action": dec_obj.get("portfolio_action"),
-                    "target_direction": dec_obj.get("target_direction"),
+                    "target_direction": _extract_target_direction(dec_obj),
                 }
                 ref = str(r["source_reference"] or "")
                 eid = str(r["event_id"] or "")
