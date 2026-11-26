@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from .dashboard import (
     _extract_headline_and_meta,
@@ -23,15 +22,13 @@ from .dashboard import (
     sanitize_and_verify_snapshot,
     sanitize_string,
 )
+from .quotes import classify_fx_session
 
 RESEARCH_BUNDLE_SCHEMA_VERSION = "research-bundle-v1"
 CHART_LAB_SCHEMA_VERSION = "chart-lab-v1"
 
 PIP_SIZE = 0.0001
 RAZOR_COMMISSION_ROUNDTRIP_PIPS = 0.60  # $3 per side per 100k lot ~= 0.60 pips round-trip
-
-_LONDON_TZ = ZoneInfo("Europe/London")
-_NY_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -128,28 +125,6 @@ def resolve_exit_templates(*, atr14_pips: float = 10.0) -> tuple[ExitTemplateSpe
         dynamic_atr=True,
     )
     return (*STATIC_EXIT_TEMPLATES, t4)
-
-
-def classify_fx_session(dt: datetime) -> str:
-    """Classify UTC/aware timestamp into Asian, London, London-NY Overlap, or Late NY."""
-    utc_dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-    ldn = utc_dt.astimezone(_LONDON_TZ)
-    nyc = utc_dt.astimezone(_NY_TZ)
-
-    ldn_mins = ldn.hour * 60 + ldn.minute
-    nyc_mins = nyc.hour * 60 + nyc.minute
-
-    is_london = (8 * 60) <= ldn_mins < (16 * 60 + 30)
-    is_ny_am = (8 * 60) <= nyc_mins < (12 * 60)
-    is_ny_pm = (12 * 60) <= nyc_mins < (17 * 60)
-
-    if is_london and is_ny_am:
-        return "overlap"
-    if is_london:
-        return "london"
-    if is_ny_pm:
-        return "late_ny"
-    return "asian"
 
 
 def _attach_atr14(bars: list[dict[str, Any]], *, step_seconds: int) -> None:

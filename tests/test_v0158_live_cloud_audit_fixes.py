@@ -274,7 +274,7 @@ def test_directory_tail_drains_tracked_file_before_smaller_uuid_new_file(tmp_pat
 def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_resets_next_day(
     tmp_path: Path,
 ) -> None:
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.1"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v5.0"
     assert '"EUR/USD <= <level>"' in SINGLE_PASS_SYSTEM_PROMPT
     assert '"EUR/USD >= <level>"' in SINGLE_PASS_SYSTEM_PROMPT
     assert '"structured_price_condition"' in SINGLE_PASS_SYSTEM_PROMPT
@@ -290,8 +290,12 @@ def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_re
     assert "--max-quote-age 8.0" in svc_src
     assert "--max-quote-wait-seconds 120" in svc_src
     assert "--review-breakout-pips 8" in svc_src
+    assert "--llm-provider auto" in svc_src
+    assert "--gemini-model gemini-4-hydrogen" in svc_src
+    assert "--gemini-thinking-level low" in svc_src
+    assert "--max-reviews-per-thesis 20" in svc_src
 
-    t_day1 = datetime(2026, 11, 12, 23, 50, 0, tzinfo=UTC)
+    t_day1 = datetime(2026, 11, 12, 16, 20, 0, tzinfo=UTC)  # London before 22:00 UTC NY rollover
     now_box = [t_day1]
     mid_box = [Decimal("1.15700")]
     tick = [0]
@@ -351,7 +355,7 @@ def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_re
         rt = IntradayEventRuntime(
             memory=mem,
             portfolio_state=ledger,
-            market_provider=lambda ts: _live_market(ts, mid=mid_box[0]),
+            market_provider=lambda ts: _live_market(ts, mid=mid_box[0], c5m=Decimal("-3.5")),
             agent=agent,
             target_validator=DeterministicTargetValidator(),
             risk_engine=DeterministicHardRiskEngine(policy=risk_pol, clock=clock),
@@ -416,9 +420,9 @@ def test_stateful_breakout_review_converts_hold_to_entry_and_daily_review_cap_re
         mid_box[0] = Decimal("1.15550")
         assert asyncio.run(runner.step_reviews()) == ()
 
-        # Roll past UTC midnight into Day 2 -> daily review budget resets automatically,
+        # Roll past NY 17:00 rollover into Day 2 London/Overlap -> daily review budget resets automatically,
         # "EUR/USD <= 1.15580" triggers structured_price_condition, converts to short SET_TARGET, and fills!
-        now_box[0] = datetime(2026, 11, 13, 0, 5, 0, tzinfo=UTC)
+        now_box[0] = datetime(2026, 11, 13, 13, 5, 0, tzinfo=UTC)
         rev_results = asyncio.run(runner.step_reviews())
         assert len(rev_results) == 1
         assert rev_results[0].status == "shadow_recorded"

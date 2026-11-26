@@ -210,20 +210,20 @@ class ProtectiveExitPolicy(Contract):
     def pepperstone_razor_200(
         cls,
         *,
-        max_holding_seconds: int = 18000,
+        max_holding_seconds: int = 14400,
         max_quote_age_ms: int = 2000,
         max_position_loss_usd: Decimal = Decimal("7.00"),
         take_profit_usd: Decimal | None = None,
         stop_loss_pips: Decimal | None = Decimal("14.0"),
-        take_profit_pips: Decimal | None = Decimal("42.0"),
-        trailing_activation_pips: Decimal | None = Decimal("8.0"),
+        take_profit_pips: Decimal | None = Decimal("24.0"),
+        trailing_activation_pips: Decimal | None = Decimal("10.0"),
         trailing_distance_pips: Decimal | None = Decimal("6.0"),
         max_daily_loss_usd: Decimal = Decimal("8.00"),
         allow_commission_bearing_zero_spread: bool = True,
     ) -> "ProtectiveExitPolicy":
-        """Pepperstone Razor $200 USD Demo swing protection standard:
-        5h horizon, position-scaled 14-pip SL ($7.00 hard USD cap), 42-pip TP (3:1 RR),
-        +8.0-pip trailing profit lock (6.0-pip pullback distance, locking >= +2.0p), and $8.00 daily loss cap."""
+        """Pepperstone Razor $200 USD Demo T2_mid_swing protection standard:
+        4h horizon, position-scaled 14-pip SL ($7.00 hard USD cap), 24-pip TP,
+        +10.0-pip trailing profit lock (6.0-pip pullback distance, locking >= +4.0p), and $8.00 daily loss cap."""
         return cls(
             max_holding_seconds=max_holding_seconds,
             max_position_loss_usd=max_position_loss_usd,

@@ -38,6 +38,7 @@ from .observer import Basis, CaptureError, ObserverStore, evaluate_observer_stre
 from .quotes import (
     QuoteStore,
     build_market_snapshot,
+    classify_fx_session,
     is_fx_weekend_closed,
     validate_market_quote,
 )
@@ -59,7 +60,7 @@ from .trading.portfolio import (
     PortfolioState,
     classify_exposure_change,
 )
-from .trading.risk import DeterministicHardRiskEngine
+from .trading.risk import DeterministicHardRiskEngine, trading_day_window
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ class ReviewPolicy(Contract):
     cooldown_seconds: float = Field(default=120.0, ge=0)
     max_reviews_per_thesis: int = Field(default=3, ge=1)
     max_total_review_calls: int = Field(default=10, ge=1)
+    breakout_only_when_positioned: bool = True
 
 
 class AuditSink(Protocol):
@@ -1448,6 +1450,32 @@ class IntradayEventRuntime:
         memory_snap = await self.memory.snapshot(as_of=max(pre_now, event.received_timestamp))
         pre_market = self.market_provider(pre_now)
         pre_portfolio = await self._snapshot_portfolio(pre_market)
+        risk_pol = getattr(self.risk_engine, "policy", None)
+        allowed_sessions = getattr(risk_pol, "allowed_entry_sessions", None)
+        has_open_exposure = any(
+            p.instrument == "EUR/USD" and p.quantity != 0 for p in pre_portfolio.positions
+        ) or bool(pre_portfolio.pending_order_ids)
+        if allowed_sessions is not None and not has_open_exposure:
+            fx_sess = classify_fx_session(pre_now)
+            if fx_sess not in allowed_sessions:
+                sess_reason = f"outside_allowed_entry_session:{fx_sess}"
+                if self.state_store is not None:
+                    self.state_store.upsert_event_state(
+                        event_id=event.event_id,
+                        source_reference=event.source_reference,
+                        received_at=event.received_timestamp,
+                        now=pre_now,
+                        state="filtered_out",
+                        reason=sess_reason,
+                        increment_attempts=False,
+                    )
+                await log("filter", "reject", sess_reason)
+                return RuntimeCycleResult(
+                    event_id=event.event_id,
+                    status="filtered_out",
+                    reason=sess_reason,
+                    audit_records=tuple(cycle_audit),
+                )
         pre_as_of = max(
             pre_now,
             event.received_timestamp,
@@ -3557,9 +3585,18 @@ class ShadowRunner:
         mid = (bid + ask) / Decimal("2")
 
         store = self.runtime.state_store
+        risk_pol = getattr(self.runtime.risk_engine, "policy", None)
+        allowed_sessions = getattr(risk_pol, "allowed_entry_sessions", None)
 
         review_window_start: datetime | None = (
-            now.replace(hour=0, minute=0, second=0, microsecond=0)
+            trading_day_window(
+                now,
+                tz_name=getattr(risk_pol, "trading_timezone", "America/New_York"),
+                close_hour=getattr(risk_pol, "daily_close_hour", 16),
+                close_minute=getattr(risk_pol, "daily_close_minute", 55),
+                rollover_hour=getattr(risk_pol, "rollover_hour", 17),
+                rollover_minute=getattr(risk_pol, "rollover_minute", 0),
+            )[1]
             if self._run_duration_seconds is None
             else None
         )
@@ -3576,8 +3613,11 @@ class ShadowRunner:
 
         def _thesis_reviews(tid: str) -> int:
             if store is not None:
-                return store.count_reviews(thesis_id=tid)
-            return len(self._in_memory_review_times.get(tid, ()))
+                return store.count_reviews(thesis_id=tid, since=review_window_start)
+            ts_list = self._in_memory_review_times.get(tid, ())
+            if review_window_start is not None:
+                return sum(1 for ts in ts_list if ts >= review_window_start)
+            return len(ts_list)
 
         def _last_thesis_trigger(tid: str) -> datetime | None:
             if store is not None:
@@ -3594,6 +3634,10 @@ class ShadowRunner:
             return ()
 
         mem_snap = await self.runtime.memory.snapshot(as_of=now)
+        rev_portfolio = await self.runtime._snapshot_portfolio(market)
+        has_open_pos = any(
+            p.instrument == "EUR/USD" and p.quantity != 0 for p in rev_portfolio.positions
+        ) or bool(rev_portfolio.pending_order_ids)
         results: list[RuntimeCycleResult] = []
 
         for thesis in mem_snap.theses:
@@ -3658,7 +3702,12 @@ class ShadowRunner:
             chosen_detail: str = ""
             chosen_dedup: str = ""
 
-            if self.review_policy.enable_price_conditions:
+            can_trigger_watch = (
+                has_open_pos
+                or allowed_sessions is None
+                or classify_fx_session(now_iter) in allowed_sessions
+            )
+            if self.review_policy.enable_price_conditions and can_trigger_watch:
                 for ce in cond_evals:
                     if ce.executable and ce.triggered:
                         dkey = f"{thesis.thesis_id}:r{thesis.revision}:price:{ce.raw_condition.strip()}"
@@ -3681,7 +3730,12 @@ class ShadowRunner:
                     )
                     chosen_dedup = dkey
 
-            if chosen_kind is None and self.review_policy.breakout_excursion_pips is not None:
+            allow_breakout = has_open_pos or not self.review_policy.breakout_only_when_positioned
+            if (
+                chosen_kind is None
+                and allow_breakout
+                and self.review_policy.breakout_excursion_pips is not None
+            ):
                 excursion_pips = abs(mid - ref_mid) / Decimal("0.0001")
                 if excursion_pips >= self.review_policy.breakout_excursion_pips:
                     dkey = (

@@ -27,6 +27,7 @@ class ModelResponse(BaseModel):
     content: str = Field(min_length=1)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+    provider: str | None = None
     model_id: str | None = None
     system_fingerprint: str | None = None
     reasoning_content: str | None = None
@@ -240,6 +241,7 @@ class DeepSeekClient:
                 content=cleaned_content,
                 input_tokens=usage["prompt_tokens"],
                 output_tokens=usage["completion_tokens"],
+                provider="deepseek",
                 model_id=raw.get("model"),
                 system_fingerprint=raw.get("system_fingerprint"),
                 reasoning_content=reasoning_content,

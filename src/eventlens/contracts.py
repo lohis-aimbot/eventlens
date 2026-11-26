@@ -299,6 +299,8 @@ class PriceTrajectorySummary(Contract):
     change_5m_pips: Decimal | None = None
     change_15m_pips: Decimal | None = None
     change_30m_pips: Decimal | None = None
+    change_60m_pips: Decimal | None = None
+    change_240m_pips: Decimal | None = None
     window_15m_high_mid: Decimal | None = Field(default=None, gt=0)
     window_15m_low_mid: Decimal | None = Field(default=None, gt=0)
     window_30m_high_mid: Decimal | None = Field(default=None, gt=0)
@@ -309,6 +311,9 @@ class PriceTrajectorySummary(Contract):
     direction_5m: Literal["up", "down", "flat", "missing"] = "missing"
     direction_15m: Literal["up", "down", "flat", "missing"] = "missing"
     direction_30m: Literal["up", "down", "flat", "missing"] = "missing"
+    direction_60m: Literal["up", "down", "flat", "missing"] = "missing"
+    direction_240m: Literal["up", "down", "flat", "missing"] = "missing"
+    fx_session: Literal["asian", "london", "overlap", "late_ny"] | None = None
     short_window_coverage_status: Literal["complete", "partial", "missing"] = "missing"
     coverage_ratio_30m: float | None = Field(default=None, ge=0, le=1)
     quote_freshness_ms: int | None = Field(default=None, ge=0)
@@ -320,10 +325,14 @@ class PriceTrajectorySummary(Contract):
         d5 = _window_direction(self.change_5m_pips)
         d15 = _window_direction(self.change_15m_pips)
         d30 = _window_direction(self.change_30m_pips)
+        d60 = _window_direction(self.change_60m_pips)
+        d240 = _window_direction(self.change_240m_pips)
         object.__setattr__(self, "direction_1m", d1)
         object.__setattr__(self, "direction_5m", d5)
         object.__setattr__(self, "direction_15m", d15)
         object.__setattr__(self, "direction_30m", d30)
+        object.__setattr__(self, "direction_60m", d60)
+        object.__setattr__(self, "direction_240m", d240)
         present_short = sum(
             1
             for x in (self.change_1m_pips, self.change_5m_pips, self.change_15m_pips)

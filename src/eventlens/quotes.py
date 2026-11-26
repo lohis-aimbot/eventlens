@@ -27,7 +27,31 @@ from .contracts import (
 )
 from .observer import Basis, ObserverStore
 
+_LONDON_TZ = ZoneInfo("Europe/London")
 _NY_TZ = ZoneInfo("America/New_York")
+FXSession = Literal["asian", "london", "overlap", "late_ny"]
+
+
+def classify_fx_session(dt: datetime) -> FXSession:
+    """Classify UTC/aware timestamp into Asian, London, London-NY Overlap, or Late NY."""
+    utc_dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    ldn = utc_dt.astimezone(_LONDON_TZ)
+    nyc = utc_dt.astimezone(_NY_TZ)
+
+    ldn_mins = ldn.hour * 60 + ldn.minute
+    nyc_mins = nyc.hour * 60 + nyc.minute
+
+    is_london = (8 * 60) <= ldn_mins < (16 * 60 + 30)
+    is_ny_am = (8 * 60) <= nyc_mins < (12 * 60)
+    is_ny_pm = (12 * 60) <= nyc_mins < (17 * 60)
+
+    if is_london and is_ny_am:
+        return "overlap"
+    if is_london:
+        return "london"
+    if is_ny_pm:
+        return "late_ny"
+    return "asian"
 
 
 def is_fx_weekend_closed(ts: datetime) -> bool:
@@ -453,6 +477,59 @@ class QuoteStore:
                 out.append((utc(datetime.fromisoformat(row["received_at"])), mid))
             return tuple(out)
 
+    def mid_near(
+        self,
+        symbol: str,
+        target_ts: datetime,
+        *,
+        cutoff: datetime,
+        tolerance_seconds: float,
+        basis: Basis = "live_poll",
+    ) -> Decimal | None:
+        """Return causal mid closest to target_ts within tolerance_seconds and <= cutoff."""
+        if tolerance_seconds < 0:
+            return None
+        target_utc = utc(target_ts)
+        cutoff_utc = utc(cutoff)
+        tol = timedelta(seconds=tolerance_seconds)
+        win_start_dt = target_utc - tol
+        win_end_dt = min(cutoff_utc, target_utc + tol)
+        if win_end_dt < win_start_dt:
+            return None
+        win_start_iso = win_start_dt.isoformat()
+        win_end_iso = win_end_dt.isoformat()
+        before_end_iso = min(target_utc, win_end_dt).isoformat()
+        after_start_iso = max(target_utc, win_start_dt).isoformat()
+        cutoff_iso = cutoff_utc.isoformat()
+        with self._lock:
+            before = self.db.execute(
+                """SELECT received_at, quote FROM quote_observations
+                WHERE symbol=? AND basis=?
+                  AND available_at IS NOT NULL AND available_at <= ?
+                  AND received_at >= ? AND received_at <= ?
+                ORDER BY received_at DESC, source_at DESC, sequence DESC LIMIT 1""",
+                (symbol, basis, cutoff_iso, win_start_iso, before_end_iso),
+            ).fetchone()
+            after = self.db.execute(
+                """SELECT received_at, quote FROM quote_observations
+                WHERE symbol=? AND basis=?
+                  AND available_at IS NOT NULL AND available_at <= ?
+                  AND received_at >= ? AND received_at <= ?
+                ORDER BY received_at ASC, source_at ASC, sequence ASC LIMIT 1""",
+                (symbol, basis, cutoff_iso, after_start_iso, win_end_iso),
+            ).fetchone()
+        candidates = [row for row in (before, after) if row is not None]
+        if not candidates:
+            return None
+        best = min(
+            candidates,
+            key=lambda row: abs(
+                (utc(datetime.fromisoformat(row["received_at"])) - target_utc).total_seconds()
+            ),
+        )
+        q = BridgeQuote.model_validate_json(best["quote"])
+        return (q.bid + q.ask) / Decimal("2")
+
     def active_session_remaining_seconds(
         self, cutoff: datetime, *, symbol: str = "EURUSD", basis: Basis = "live_poll"
     ) -> float | None:
@@ -693,6 +770,8 @@ def compute_price_trajectory(
     cutoff: datetime,
     *,
     instrument: str = "EUR/USD",
+    htf_1h_mid: Decimal | None = None,
+    htf_4h_mid: Decimal | None = None,
 ) -> PriceTrajectorySummary | None:
     """Compute causal pip changes and range bounds strictly from observations <= cutoff."""
     cutoff_utc = utc(cutoff)
@@ -739,6 +818,16 @@ def compute_price_trajectory(
         cov_ratio_30m = 0.0
     latest_ts = causal[-1][0]
     freshness_ms = max(0, int((cutoff_utc - latest_ts).total_seconds() * 1000))
+    change_60m = (
+        ((current_mid - htf_1h_mid) / EURUSD_PIP).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if htf_1h_mid is not None and htf_1h_mid > Decimal("0")
+        else _horizon_delta_pips(3600.0, 2400.0, 4800.0)
+    )
+    change_240m = (
+        ((current_mid - htf_4h_mid) / EURUSD_PIP).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+        if htf_4h_mid is not None and htf_4h_mid > Decimal("0")
+        else _horizon_delta_pips(14400.0, 12600.0, 16200.0)
+    )
     return PriceTrajectorySummary(
         instrument=instrument,
         as_of=cutoff_utc,
@@ -747,6 +836,8 @@ def compute_price_trajectory(
         change_5m_pips=_horizon_delta_pips(300.0, 210.0, 420.0),
         change_15m_pips=_horizon_delta_pips(900.0, 660.0, 1140.0),
         change_30m_pips=_horizon_delta_pips(1800.0, 1350.0, 2250.0),
+        change_60m_pips=change_60m,
+        change_240m_pips=change_240m,
         window_15m_high_mid=max(mids_15m) if mids_15m else None,
         window_15m_low_mid=min(mids_15m) if mids_15m else None,
         window_30m_high_mid=max(mids_30m) if mids_30m else None,
@@ -754,6 +845,7 @@ def compute_price_trajectory(
         sample_count_30m=len(mids_30m),
         max_gap_30m_seconds=max_gap_30m_s,
         coverage_ratio_30m=cov_ratio_30m,
+        fx_session=classify_fx_session(cutoff_utc),
         quote_freshness_ms=freshness_ms,
         evidence_id=f"traj:{instrument}:{cutoff_utc.isoformat()}",
     )
@@ -777,7 +869,27 @@ def build_market_snapshot(
             quotes=(),
         )
     samples = quotes.recent_mids(symbol, cutoff, basis=basis)
-    trajectory = compute_price_trajectory(samples, cutoff, instrument=instrument)
+    mid_1h = quotes.mid_near(
+        symbol,
+        cutoff - timedelta(hours=1),
+        cutoff=cutoff,
+        tolerance_seconds=1200.0,
+        basis=basis,
+    )
+    mid_4h = quotes.mid_near(
+        symbol,
+        cutoff - timedelta(hours=4),
+        cutoff=cutoff,
+        tolerance_seconds=1800.0,
+        basis=basis,
+    )
+    trajectory = compute_price_trajectory(
+        samples,
+        cutoff,
+        instrument=instrument,
+        htf_1h_mid=mid_1h,
+        htf_4h_mid=mid_4h,
+    )
     return MarketSnapshot(
         snapshot_id=f"quote:{obs.quote.session_id}:{obs.quote.sequence}",
         as_of=cutoff,

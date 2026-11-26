@@ -115,8 +115,8 @@ def _live_market(as_of: datetime, *, mid: Decimal = Decimal("1.08500")) -> Marke
             evidence_id="traj-v4-1",
             as_of=as_of,
             current_mid=mid,
-            change_1m_pips=Decimal("-3.2"),
-            change_5m_pips=Decimal("-6.0"),
+            change_1m_pips=Decimal("-2.5"),
+            change_5m_pips=Decimal("-3.5"),
             change_15m_pips=Decimal("-9.5"),
             change_30m_pips=Decimal("-11.0"),
             window_15m_high_mid=mid + Decimal("0.00110"),
@@ -183,17 +183,20 @@ def test_deepseek_reasoner_cot_extraction_fence_strip_and_400_fallback(monkeypat
 
 
 def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path) -> None:
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.1"
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v5.0"
 
     risk_pol = RiskPolicy.pepperstone_razor_200_guarded()
     exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
     assert risk_pol.min_equity_usd == Decimal("140.00")
     assert risk_pol.ex_ante_stop_loss_pips == Decimal("14.0")
     assert risk_pol.entry_cutoff_minutes_before_close == 120
-    assert exit_pol.max_holding_seconds == 18000
+    assert risk_pol.allowed_entry_sessions == ("london", "overlap")
+    assert risk_pol.max_same_direction_chase_5m_pips == Decimal("4.0")
+    assert risk_pol.max_countertrend_htf_4h_pips == Decimal("30.0")
+    assert exit_pol.max_holding_seconds == 14400
     assert exit_pol.stop_loss_pips == Decimal("14.0")
-    assert exit_pol.take_profit_pips == Decimal("42.0")
-    assert exit_pol.trailing_activation_pips == Decimal("8.0")
+    assert exit_pol.take_profit_pips == Decimal("24.0")
+    assert exit_pol.trailing_activation_pips == Decimal("10.0")
     assert exit_pol.trailing_distance_pips == Decimal("6.0")
 
     t0 = datetime(2026, 11, 16, 13, 0, 0, tzinfo=UTC)
@@ -395,8 +398,14 @@ def test_v4_swing_agent_runtime_dashboard_export_and_sanitization(tmp_path: Path
         assert any(d["review_meta"] is not None for d in parsed["decisions"])
         assert all("[INTERNAL STATEFUL REVIEW]" not in d["headline"] for d in parsed["decisions"])
         assert parsed["market_state_card"]["market_bias"] == "neutral"
-        assert parsed["model_config"]["risk_profile"]["trailing_activation_pips"] == 8.0
+        assert parsed["model_config"]["risk_profile"]["take_profit_pips"] == 24.0
+        assert parsed["model_config"]["risk_profile"]["trailing_activation_pips"] == 10.0
         assert parsed["model_config"]["risk_profile"]["trailing_distance_pips"] == 6.0
+        assert parsed["model_config"]["risk_profile"]["max_holding_seconds"] == 14400
+        assert parsed["model_config"]["risk_profile"]["allowed_entry_sessions"] == [
+            "london",
+            "overlap",
+        ]
         assert parsed["model_config"]["risk_profile"]["entry_cutoff_minutes_before_close"] == 120
         assert "deepseek-reasoner" in parsed["model_config"]["model"]
 
@@ -836,7 +845,10 @@ def test_v41_ignore_event_preserves_watch_and_pre_close_cutoff_blocks_entries_no
             "思考3：触价唤醒做空。",
         )
 
-    risk_pol = RiskPolicy.pepperstone_razor_200_guarded()
+    risk_pol = RiskPolicy.pepperstone_razor_200_guarded(
+        allowed_entry_sessions=None,
+        max_same_direction_chase_5m_pips=None,
+    )
     exit_pol = ProtectiveExitPolicy.pepperstone_razor_200()
     shd_path = tmp_path / "watch_shd.sqlite"
     mem = SQLiteThesisMemory(tmp_path / "watch_mem.sqlite", clock=clock, allow_targets=True)

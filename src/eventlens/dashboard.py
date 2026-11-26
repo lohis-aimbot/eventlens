@@ -56,6 +56,10 @@ _REASON_ZH_MAP: dict[str, str] = {
     "protective_exit_pending": "存在待执行的保护性平仓指令",
     "unreliable_position_valuation": "当前持仓实时估值异常",
     "missing_active_thesis_backing": "缺少有效绑定档案（旧版规则）",
+    "entry_blocked_outside_allowed_session": "非高流动性时段（仅允许 london/overlap 欧/美盘开新仓）",
+    "outside_allowed_entry_session": "非欧/美高流动性时段空仓前置跳过（省 LLM 额度）",
+    "chase_5m_move_exceeds_limit": "5 分钟同向脉冲超过 4.0p，硬风控拦截追单",
+    "extreme_htf_4h_countertrend_blocked": "4 小时主趋势波动 >= 30p，硬风控禁止逆势抄底/摸顶",
 }
 
 _REASON_EN_MAP: dict[str, str] = {
@@ -80,6 +84,10 @@ _REASON_EN_MAP: dict[str, str] = {
     "protective_exit_pending": "Protective exit order pending",
     "unreliable_position_valuation": "Open position valuation unreliable",
     "missing_active_thesis_backing": "Missing active legacy thesis backing",
+    "entry_blocked_outside_allowed_session": "Outside allowed high-liquidity FX sessions (london/overlap)",
+    "outside_allowed_entry_session": "Skipped pre-LLM outside allowed FX sessions while flat",
+    "chase_5m_move_exceeds_limit": "Same-direction 5m impulse exceeds 4.0p chase cap",
+    "extreme_htf_4h_countertrend_blocked": "4h HTF trend move >= 30p; extreme counter-trend blocked",
 }
 
 _EXIT_REASON_EN: dict[str, str] = {
@@ -411,9 +419,20 @@ def _collect_decisions_and_funnel(
     decisions_out: list[dict[str, Any]] = []
     system_prompts: dict[str, str] = {SINGLE_PASS_PROMPT_VERSION: SINGLE_PASS_SYSTEM_PROMPT}
     latest_card: dict[str, Any] | None = None
-    active_model = (
+    llm_prov = (os.environ.get("LLM_PROVIDER") or "auto").strip().lower()
+    has_gem = bool((os.environ.get("GEMINI_API_KEY") or "").strip())
+    has_ds = bool((os.environ.get("DEEPSEEK_API_KEY") or "").strip())
+    gem_mdl = (os.environ.get("GEMINI_MODEL") or "gemini-4-hydrogen").strip() or "gemini-4-hydrogen"
+    gem_lvl = (os.environ.get("GEMINI_THINKING_LEVEL") or "low").strip() or "low"
+    ds_mdl = (
         os.environ.get("DEEPSEEK_MODEL") or "deepseek-reasoner"
     ).strip() or "deepseek-reasoner"
+    if llm_prov == "gemini" or (llm_prov == "auto" and has_gem and not has_ds):
+        active_model = f"{gem_mdl} ({gem_lvl})"
+    elif llm_prov == "auto" and has_gem and has_ds:
+        active_model = f"{gem_mdl} ({gem_lvl}) -> {ds_mdl} fallback"
+    else:
+        active_model = ds_mdl
     pinned = pinned_decision_ids or set()
 
     mem_raw_by_event: dict[str, str] = {}
@@ -1346,11 +1365,14 @@ def build_dashboard_snapshot(
                 "prompt_version": SINGLE_PASS_PROMPT_VERSION,
                 "risk_profile": {
                     "stop_loss_pips": 14.0,
-                    "take_profit_pips": 42.0,
-                    "trailing_activation_pips": 8.0,
+                    "take_profit_pips": 24.0,
+                    "trailing_activation_pips": 10.0,
                     "trailing_distance_pips": 6.0,
-                    "max_holding_seconds": 18000,
+                    "max_holding_seconds": 14400,
                     "entry_cutoff_minutes_before_close": 120,
+                    "allowed_entry_sessions": ["london", "overlap"],
+                    "max_same_direction_chase_5m_pips": 4.0,
+                    "max_countertrend_htf_4h_pips": 30.0,
                     "min_equity_usd": 140.0,
                     "max_daily_loss_usd": 8.0,
                     "max_risk_per_trade_pct": 2.0,

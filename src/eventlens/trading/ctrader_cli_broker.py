@@ -279,7 +279,7 @@ class CTraderCliDemoBrokerAdapter:
         in_flight_unknown_timeout_seconds: float = 15.0,
         require_stop_loss_confirmation: bool = True,
         default_stop_loss_pips: float | None = 14.0,
-        default_take_profit_pips: float | None = 42.0,
+        default_take_profit_pips: float | None = 24.0,
         publish_fault_mode: PublishFaultMode = "none",
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:

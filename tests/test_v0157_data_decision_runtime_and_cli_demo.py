@@ -291,8 +291,8 @@ def test_g3_g5_nov04_fault_sequence_blocked_and_evidence_verified() -> None:
     - verify_decision_evidence flags contradicted_price_direction (or missing_short_window_coverage without prose)
     - cited_evidence_ids stays empty (never auto-injected)
     - DeterministicHardRiskEngine blocks new risk with all 3 independent integrity reasons."""
-    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v4.1"
-    assert "scales leveraged buying power" in SINGLE_PASS_SYSTEM_PROMPT
+    assert SINGLE_PASS_PROMPT_VERSION == "single-pass-agent-v5.0"
+    assert "target_weight" in SINGLE_PASS_SYSTEM_PROMPT
 
     now = datetime(2026, 11, 4, 15, 0, 41, tzinfo=UTC)
     sched = datetime(2026, 11, 4, 14, 45, 0, tzinfo=UTC)
@@ -439,7 +439,7 @@ def test_golden_clean_macro_1m_breakout_against_30m_drift_and_unscheduled_news_a
         as_of=now,
         current_mid=Decimal("1.12510"),
         change_1m_pips=Decimal("4.8"),
-        change_5m_pips=Decimal("4.2"),
+        change_5m_pips=Decimal("3.8"),
         change_15m_pips=Decimal("3.5"),
         change_30m_pips=Decimal("-8.5"),
         max_gap_30m_seconds=1.1,

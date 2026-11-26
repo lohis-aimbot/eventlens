@@ -22,7 +22,7 @@ from ..contracts import (
     RiskAssessment,
     Thesis,
 )
-from ..quotes import QuoteQualityPolicy, validate_market_quote
+from ..quotes import QuoteQualityPolicy, classify_fx_session, validate_market_quote
 from .portfolio import (
     ExAnteTradeRiskMetrics,
     ExposureChangeKind,
@@ -167,6 +167,9 @@ class RiskPolicy(Contract):
     estimated_commission_round_trip_per_million_usd: Decimal = Field(default=Decimal("6.0"), ge=0)
     estimated_fixed_fee_usd: Decimal = Field(default=Decimal("0"), ge=0)
     cap_quantity_by_risk_budget: bool = False
+    allowed_entry_sessions: tuple[str, ...] | None = None
+    max_same_direction_chase_5m_pips: Decimal | None = Field(default=None, gt=0)
+    max_countertrend_htf_4h_pips: Decimal | None = Field(default=None, gt=0)
 
     @classmethod
     def pepperstone_razor_200(
@@ -180,6 +183,9 @@ class RiskPolicy(Contract):
         max_margin_utilization_pct: Decimal | None = None,
         cap_quantity_by_risk_budget: bool = False,
         entry_cutoff_minutes_before_close: int = 120,
+        allowed_entry_sessions: tuple[str, ...] | None = ("london", "overlap"),
+        max_same_direction_chase_5m_pips: Decimal | None = Decimal("4.0"),
+        max_countertrend_htf_4h_pips: Decimal | None = Decimal("30.0"),
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo account standard: 200x leverage, 0.01..100 lots, controlled risk."""
         return cls(
@@ -201,6 +207,9 @@ class RiskPolicy(Contract):
             max_margin_utilization_pct=max_margin_utilization_pct,
             cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
             entry_cutoff_minutes_before_close=entry_cutoff_minutes_before_close,
+            allowed_entry_sessions=allowed_entry_sessions,
+            max_same_direction_chase_5m_pips=max_same_direction_chase_5m_pips,
+            max_countertrend_htf_4h_pips=max_countertrend_htf_4h_pips,
         )
 
     @classmethod
@@ -214,6 +223,9 @@ class RiskPolicy(Contract):
         max_margin_utilization_pct: Decimal = Decimal("0.25"),
         cap_quantity_by_risk_budget: bool = True,
         entry_cutoff_minutes_before_close: int = 120,
+        allowed_entry_sessions: tuple[str, ...] | None = ("london", "overlap"),
+        max_same_direction_chase_5m_pips: Decimal | None = Decimal("4.0"),
+        max_countertrend_htf_4h_pips: Decimal | None = Decimal("30.0"),
     ) -> "RiskPolicy":
         """Pepperstone Razor $200 USD Demo profile with explicit q-dependent ex-ante risk-budget sizing."""
         return cls.pepperstone_razor_200(
@@ -224,6 +236,9 @@ class RiskPolicy(Contract):
             max_margin_utilization_pct=max_margin_utilization_pct,
             cap_quantity_by_risk_budget=cap_quantity_by_risk_budget,
             entry_cutoff_minutes_before_close=entry_cutoff_minutes_before_close,
+            allowed_entry_sessions=allowed_entry_sessions,
+            max_same_direction_chase_5m_pips=max_same_direction_chase_5m_pips,
+            max_countertrend_htf_4h_pips=max_countertrend_htf_4h_pips,
         )
 
     def ex_ante_trade_risk(
@@ -590,6 +605,40 @@ class DeterministicHardRiskEngine:
                 entry_cutoff_minutes_before_close=self.policy.entry_cutoff_minutes_before_close,
             ):
                 reasons.append("pre_close_entry_cutoff_active")
+            if self.policy.allowed_entry_sessions is not None:
+                fx_sess = classify_fx_session(checked_at)
+                if fx_sess not in self.policy.allowed_entry_sessions:
+                    reasons.append(f"entry_blocked_outside_allowed_session:{fx_sess}")
+            eur_pos = next(
+                (
+                    p
+                    for p in target.positions
+                    if p.instrument == "EUR/USD" and p.weight != Decimal("0")
+                ),
+                None,
+            )
+            traj = market.price_trajectory
+            if eur_pos is not None and traj is not None:
+                side_sign = Decimal("1") if eur_pos.weight > Decimal("0") else Decimal("-1")
+                if (
+                    self.policy.max_same_direction_chase_5m_pips is not None
+                    and traj.change_5m_pips is not None
+                    and side_sign * traj.change_5m_pips
+                    > self.policy.max_same_direction_chase_5m_pips
+                ):
+                    reasons.append("chase_5m_move_exceeds_limit")
+                if (
+                    self.policy.max_countertrend_htf_4h_pips is not None
+                    and traj.change_240m_pips is not None
+                ):
+                    if (
+                        eur_pos.weight > Decimal("0")
+                        and traj.change_240m_pips <= -self.policy.max_countertrend_htf_4h_pips
+                    ) or (
+                        eur_pos.weight < Decimal("0")
+                        and traj.change_240m_pips >= self.policy.max_countertrend_htf_4h_pips
+                    ):
+                        reasons.append("extreme_htf_4h_countertrend_blocked")
 
         if gross_weight > self.policy.max_gross_weight:
             reasons.append("gross_weight_limit_exceeded")

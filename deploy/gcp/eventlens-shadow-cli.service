@@ -26,11 +26,14 @@ ExecStart=/bin/sh -ec 'exec /opt/eventlens/.venv/bin/eventlens-shadow start \
     --poll-news \
     --news-source tier1_english \
     --call-model \
+    --llm-provider auto \
+    --gemini-model gemini-4-hydrogen \
+    --gemini-thinking-level low \
     --max-quote-age 8.0 \
     --max-quote-wait-seconds 120 \
     --enable-stateful-reviews \
     --review-breakout-pips 8 \
-    --periodic-review-seconds 1800 \
+    --max-reviews-per-thesis 20 \
     --max-total-review-calls 500 \
     --max-daily-llm-calls 80 \
     --close-on-stop \

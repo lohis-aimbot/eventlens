@@ -24,7 +24,7 @@ from .contracts import (
     Thesis,
     ThesisChange,
 )
-from .deepseek import DeepSeekClient
+from .gemini import build_llm_client_from_environment
 from .observer import APPLICATION_ID as OBSERVER_APPLICATION_ID
 from .observer import (
     ObserverStore,
@@ -868,7 +868,7 @@ def _build_policies(
             max_quote_age_ms=max_quote_age_ms,
         )
         exit_pol = ProtectiveExitPolicy.pepperstone_razor_200(
-            max_holding_seconds=int(raw_holding) if raw_holding is not None else 18000,
+            max_holding_seconds=int(raw_holding) if raw_holding is not None else 14400,
             max_quote_age_ms=max_quote_age_ms,
         )
         cost_model = ShadowCostModel.pepperstone_razor()
@@ -945,6 +945,15 @@ def _build_policies(
             if dist_val is not None:
                 exit_updates["trailing_distance_pips"] = dist_val
 
+    if risk_updates or getattr(args, "allowed_entry_sessions", None) is not None:
+        raw_sess = getattr(args, "allowed_entry_sessions", None)
+        if raw_sess is not None:
+            cleaned_sess = str(raw_sess).strip()
+            if cleaned_sess.lower() in {"all", "any", "none", "off"}:
+                risk_updates["allowed_entry_sessions"] = None
+            else:
+                parsed_sess = tuple(s.strip() for s in cleaned_sess.split(",") if s.strip())
+                risk_updates["allowed_entry_sessions"] = parsed_sess or None
     if risk_updates:
         risk = RiskPolicy.model_validate({**risk.model_dump(), **risk_updates})
     if exit_updates:
@@ -1135,7 +1144,7 @@ async def _run_demo_smoke(
         default_take_profit_pips=(
             float(exit_policy.take_profit_pips)
             if exit_policy.take_profit_pips is not None
-            else 22.0
+            else 24.0
         ),
     )
     try:
@@ -1584,7 +1593,12 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             review_horizon_s = float(getattr(args, "review_horizon_seconds", 3600.0))
             agent = (
                 SinglePassTradingAgent(
-                    DeepSeekClient.from_environment(model=getattr(args, "deepseek_model", None)),
+                    build_llm_client_from_environment(
+                        provider=getattr(args, "llm_provider", "auto"),
+                        gemini_model=getattr(args, "gemini_model", None),
+                        gemini_thinking_level=getattr(args, "gemini_thinking_level", None),
+                        deepseek_model=getattr(args, "deepseek_model", None),
+                    ),
                     max_quote_age=timedelta(seconds=getattr(args, "max_quote_age", 2.0)),
                     allow_commission_bearing_zero_spread=(
                         risk_policy.allow_commission_bearing_zero_spread
@@ -1690,6 +1704,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                 cooldown_seconds=float(getattr(args, "review_cooldown_seconds", 120.0)),
                 max_reviews_per_thesis=int(getattr(args, "max_reviews_per_thesis", 3)),
                 max_total_review_calls=int(getattr(args, "max_total_review_calls", 10)),
+                breakout_only_when_positioned=not bool(getattr(args, "breakout_when_flat", False)),
             )
             if getattr(args, "ctrader_cli_demo_orders", False):
                 from .trading.ctrader_cli_broker import CTraderCliDemoBrokerAdapter
@@ -1715,7 +1730,7 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                     default_take_profit_pips=(
                         float(exit_policy.take_profit_pips)
                         if exit_policy.take_profit_pips is not None
-                        else 42.0
+                        else 24.0
                     ),
                 )
                 cli_demo_adapter.reconcile()
@@ -1931,12 +1946,40 @@ def main(argv: list[str] | None = None) -> None:
         choices=("live_poll", "synthetic_fixture"),
         default="live_poll",
     )
-    start_p.add_argument("--call-model", action="store_true", help="Opt in to paid DeepSeek calls")
+    start_p.add_argument(
+        "--call-model",
+        action="store_true",
+        help="Opt in to paid LLM calls (Gemini 4 primary + DeepSeek fallback when configured)",
+    )
+    start_p.add_argument(
+        "--llm-provider",
+        choices=("auto", "gemini", "deepseek"),
+        default="auto",
+        help="LLM routing policy: auto (Gemini primary -> DeepSeek fallback), gemini only, or deepseek only",
+    )
+    start_p.add_argument(
+        "--gemini-model",
+        type=str,
+        default=None,
+        help="Optional Gemini model override (defaults to GEMINI_MODEL env var or gemini-4-hydrogen)",
+    )
+    start_p.add_argument(
+        "--gemini-thinking-level",
+        choices=("low", "medium", "high", "xhigh", "none"),
+        default=None,
+        help="Optional Gemini 4 thinkingLevel override (default: GEMINI_THINKING_LEVEL env var or low)",
+    )
     start_p.add_argument(
         "--deepseek-model",
         type=str,
         default=None,
         help="Optional DeepSeek model override (defaults to DEEPSEEK_MODEL env var or deepseek-reasoner)",
+    )
+    start_p.add_argument(
+        "--allowed-entry-sessions",
+        type=str,
+        default=None,
+        help="Comma-separated FX sessions allowed for flat new entries (default: london,overlap; pass 'all' to disable)",
     )
     start_p.add_argument(
         "--poll-news",
@@ -2071,6 +2114,12 @@ def main(argv: list[str] | None = None) -> None:
         type=int,
         default=10,
         help="Maximum total stateful review calls per ShadowRunner session (default: 10)",
+    )
+    start_p.add_argument(
+        "--breakout-when-flat",
+        action="store_true",
+        default=False,
+        help="Allow price_breakout_excursion stateful reviews even when flat (disabled by default in v5)",
     )
     start_p.add_argument("--max-holding-seconds", type=int, default=None)
     start_p.add_argument(
