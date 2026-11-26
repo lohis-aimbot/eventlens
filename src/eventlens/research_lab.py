@@ -923,7 +923,10 @@ def _extract_target_direction(dec_obj: dict[str, Any]) -> str | None:
             for pos in positions:
                 if not isinstance(pos, dict):
                     continue
-                weight = _safe_float(pos.get("target_weight"))
+                raw_w = (
+                    pos.get("weight") if pos.get("weight") is not None else pos.get("target_weight")
+                )
+                weight = _safe_float(raw_w)
                 if weight is not None and weight > 0:
                     return "long"
                 if weight is not None and weight < 0:

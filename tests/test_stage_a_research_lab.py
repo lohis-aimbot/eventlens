@@ -146,7 +146,7 @@ def _make_sample_observer_and_shadow_db(
     dec_json = json.dumps(
         {
             "portfolio_action": "SET_TARGET",
-            "target": {"positions": [{"symbol": "EUR/USD", "target_weight": 0.5}]},
+            "target": {"positions": [{"instrument": "EUR/USD", "weight": "0.50"}]},
         }
     )
     with s_con:
