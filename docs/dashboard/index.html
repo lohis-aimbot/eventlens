@@ -276,6 +276,73 @@
     .rr-tp { background: var(--green); flex: 3; opacity: 0.82; }
     .rr-labels { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-4); }
 
+    /* Auto-Evolution & Anti-Turtle Panel */
+    .evo-card {
+      padding: 15px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: linear-gradient(155deg, var(--surface) 0%, var(--surface-2) 100%);
+    }
+    .evo-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .evo-title-wrap { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .evo-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (max-width: 780px) {
+      .evo-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    .evo-metric-box {
+      padding: 10px 12px;
+      border-radius: var(--r-md);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .evo-metric-box .em-l { font-size: 11px; font-weight: 600; color: var(--ink-3); }
+    .evo-metric-box .em-v { font-size: 17px; font-weight: 750; color: var(--ink-1); }
+    .evo-metric-box .em-s { font-size: 11px; color: var(--ink-4); }
+    .evo-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 860px) {
+      .evo-columns { grid-template-columns: 1fr; }
+    }
+    .evo-subbox {
+      padding: 10px 12px;
+      border-radius: var(--r-md);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+    .evo-sub-title { font-size: 11.5px; font-weight: 700; color: var(--ink-2); }
+    .evo-item {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+      padding: 6px 0;
+      border-top: 1px dashed var(--border);
+    }
+    .evo-item:first-of-type { border-top: none; padding-top: 2px; }
+    .evo-rule { font-size: 12px; color: var(--ink-2); line-height: 1.45; }
+
     /* Market Regime Card */
     .regime-card {
       padding: 16px 20px;
@@ -784,6 +851,29 @@
         <div class="regime-params tnum" id="riskProfileChips"></div>
       </div>
 
+      <!-- Auto-Evolution & Anti-Turtle Scoreboard -->
+      <div class="card evo-card" id="evolutionCard" hidden>
+        <div class="evo-head">
+          <div class="evo-title-wrap">
+            <span class="regime-title" data-i18n="evoTitle">Auto-Evolution · 自动进化与反乌龟考评台</span>
+            <span class="pill blue mono" id="evoVerChip">v5.0</span>
+            <span class="pill" id="evoStatusChip">—</span>
+          </div>
+          <span class="tnum" style="font-size:11.5px;color:var(--ink-3);" id="evoSummaryText">—</span>
+        </div>
+        <div class="evo-metrics tnum" id="evoMetricsGrid"></div>
+        <div class="evo-columns">
+          <div class="evo-subbox">
+            <div class="evo-sub-title" data-i18n="evoMissTitle">近期踏空重罚与成熟考评明细（1.0x / T3 1.25x）</div>
+            <div id="evoMissList"></div>
+          </div>
+          <div class="evo-subbox">
+            <div class="evo-sub-title" data-i18n="evoRulesTitle">进化实战准则与版本晋升 / 回滚历史</div>
+            <div id="evoRulesAndVersions"></div>
+          </div>
+        </div>
+      </div>
+
       <!-- Executed & Open Trades with Embedded Entry Logic (Main Screen Front-and-Center) -->
       <section class="section-block" id="mainTradesSection">
         <div class="section-bar">
@@ -1052,7 +1142,20 @@
           dailyTblSub: "点击任意交易日可筛选下方成交通道",
           tradeTblAll: "交易流水与思考链溯源",
           tradeTblDay: "交易流水与溯源",
-          tradeTblSub: "每笔成交均可一键跳回当时触发开仓的 DeepSeek 完整思考链",
+          tradeTblSub: "每笔成交均可一键跳回当时触发开仓的 AI 完整思考链",
+          evoTitle: "自动进化与反缩头乌龟考评台",
+          evoScoreLbl: "累计 Net-R 奖励分",
+          evoCapLbl: "合格机会捕获率",
+          evoProgLbl: "下轮打擂进度",
+          evoGuardLbl: "双保险回滚防线",
+          evoMissTitle: "近期踏空重罚与成熟事件考评（严惩 -1.0x / T3 -1.25x）",
+          evoRulesTitle: "进化动态法则与版本晋升 / 回滚记录",
+          evoNoMisses: "暂无成熟考评事件 — 新闻走完 4 小时成熟窗后每 30 分钟自动结算。",
+          evoNoRules: "当前运行基线法则；攒满 6 个成熟簇或 48 小时将自动打擂升级。",
+          evoMissTag: "踏空重罚",
+          evoWinTag: "出手得分",
+          evoTrapTag: "避坑",
+          evoFlatTag: "观望",
           flatStatus: "空仓待机",
           flatTitle: "空仓观察中",
           flatDesc: "等待高确信催化剂",
@@ -1179,7 +1282,20 @@
           dailyTblSub: "Select any trading day row to filter the execution ledger below",
           tradeTblAll: "Execution Ledger & CoT Traceability",
           tradeTblDay: "Trades & CoT Trace",
-          tradeTblSub: "Click any execution to jump straight to its triggering DeepSeek Chain-of-Thought",
+          tradeTblSub: "Click any execution to jump straight to its triggering AI Chain-of-Thought",
+          evoTitle: "Auto-Evolution & Anti-Turtle Scoreboard",
+          evoScoreLbl: "Cumulative Net-R Reward",
+          evoCapLbl: "Qualified Capture Rate",
+          evoProgLbl: "Next Arena Progress",
+          evoGuardLbl: "Dual Rollback Guard",
+          evoMissTitle: "Matured Event Scores & Miss Penalties (-1.0x / T3 -1.25x)",
+          evoRulesTitle: "Evolved Rules & Version Promotion / Rollback Log",
+          evoNoMisses: "No matured scored clusters yet — auto-settled every 30m after 4h window.",
+          evoNoRules: "Running baseline policy; Arena triggers every 6 clusters or 48h.",
+          evoMissTag: "MISS PENALTY",
+          evoWinTag: "ENTRY",
+          evoTrapTag: "AVOID",
+          evoFlatTag: "FLAT",
           flatStatus: "FLAT",
           flatTitle: "Flat · Standby",
           flatDesc: "Awaiting substantive macro or CB catalyst",
@@ -1636,7 +1752,7 @@
         const [bTxt, bCls] = biasMap[card.market_bias] || biasMap.neutral;
         el("biasChip").textContent = bTxt;
         el("biasChip").className = bCls;
-        el("modelChip").textContent = `${mc.model || "deepseek-reasoner"} · ${(mc.prompt_version || "v4.0").replace("single-pass-agent-", "")}`;
+        el("modelChip").textContent = `${mc.model || "gemini-4-hydrogen"} · ${(mc.prompt_version || "v5.0").replace("single-pass-agent-", "")}`;
         if (card.watch_condition) {
           el("watchChip").hidden = false;
           el("watchChip").textContent = `⚡ ${card.watch_condition}`;
@@ -1651,18 +1767,114 @@
         }
         el("stateNoteText").textContent = noteTxt;
 
-        const trailAct = rp.trailing_activation_pips ?? 8;
+        const trailAct = rp.trailing_activation_pips ?? 10;
         const trailDist = rp.trailing_distance_pips ?? 6;
         const cutoffMin = rp.entry_cutoff_minutes_before_close ?? 120;
         const cutoffH = cutoffMin >= 60 ? `${(cutoffMin / 60).toFixed(cutoffMin % 60 === 0 ? 0 : 1)}h` : `${cutoffMin}m`;
         const rpLabels = state.lang === "en"
-          ? [`SL ${rp.stop_loss_pips || 14}p`, `TP ${rp.take_profit_pips || 42}p`, `Trail ${trailAct}/${trailDist}p`, `Max ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `Cutoff ${cutoffH}`, `Risk ≤ ${rp.max_risk_per_trade_pct || 2}%`]
-          : [`止损 ${rp.stop_loss_pips || 14}p`, `止盈 ${rp.take_profit_pips || 42}p`, `移动 ${trailAct}/${trailDist}p`, `持仓 ${Math.round((rp.max_holding_seconds || 18000) / 3600)}h`, `${t("preCloseLabel")} ${cutoffH}`, `单笔 ≤ ${rp.max_risk_per_trade_pct || 2}%`];
+          ? [`SL ${rp.stop_loss_pips || 14}p`, `TP ${rp.take_profit_pips || 24}p`, `Trail ${trailAct}/${trailDist}p`, `Max ${Math.round((rp.max_holding_seconds || 14400) / 3600)}h`, `Cutoff ${cutoffH}`, `Risk ≤ ${rp.max_risk_per_trade_pct || 2}%`]
+          : [`止损 ${rp.stop_loss_pips || 14}p`, `止盈 ${rp.take_profit_pips || 24}p`, `移动 ${trailAct}/${trailDist}p`, `持仓 ${Math.round((rp.max_holding_seconds || 14400) / 3600)}h`, `${t("preCloseLabel")} ${cutoffH}`, `单笔 ≤ ${rp.max_risk_per_trade_pct || 2}%`];
         el("riskProfileChips").innerHTML = rpLabels.map((x) => `<span class="pill tnum">${esc(x)}</span>`).join("");
 
+        renderEvolution(s);
         renderMainTrades(s);
         renderDecisions(s);
         renderReports(s);
+      }
+
+      function renderEvolution(s) {
+        const evo = s.evolution;
+        const card = el("evolutionCard");
+        if (!evo || !card) return;
+        card.hidden = false;
+        const ver = evo.active_version || "v5.0";
+        el("evoVerChip").textContent = ver;
+        const score = Number(evo.cumulative_reward_score || 0);
+        const capPct = Math.round(Number(evo.capture_rate ?? 1) * 100);
+        const scChip = el("evoStatusChip");
+        scChip.className = `pill ${score > 0 ? "green" : score < 0 ? "red" : ""}`;
+        scChip.textContent = `${score >= 0 ? "+" : ""}${score.toFixed(2)} Net-R · ${capPct}%`;
+        el("evoSummaryText").textContent = evo.active_summary_zh || "";
+
+        const consec = Number(evo.consecutive_losses || 0);
+        const lossLim = Number(evo.rollback_loss_limit || 2);
+        const rewFloor = Number(evo.rollback_reward_floor ?? -1.5);
+        const curClusters = Number(evo.clusters_since_promotion || 0);
+        const targetClusters = Number(evo.arena_cluster_target || 6);
+        el("evoMetricsGrid").innerHTML = `
+          <div class="evo-metric-box">
+            <span class="em-l">${esc(t("evoScoreLbl"))}</span>
+            <span class="em-v ${score > 0 ? "pos" : score < 0 ? "neg" : ""}">${score >= 0 ? "+" : ""}${score.toFixed(2)}</span>
+            <span class="em-s">${Number(evo.matured_clusters_total || 0)} clusters settled</span>
+          </div>
+          <div class="evo-metric-box">
+            <span class="em-l">${esc(t("evoCapLbl"))}</span>
+            <span class="em-v ${capPct < 40 ? "neg" : "pos"}">${capPct}%</span>
+            <span class="em-s">${Number(evo.captured_clusters || 0)} captured / ${Number(evo.missed_clusters || 0)} missed (floor ≥40%)</span>
+          </div>
+          <div class="evo-metric-box">
+            <span class="em-l">${esc(t("evoProgLbl"))}</span>
+            <span class="em-v">${curClusters} / ${targetClusters}</span>
+            <span class="em-s">6 clusters or 48h Arena</span>
+          </div>
+          <div class="evo-metric-box">
+            <span class="em-l">${esc(t("evoGuardLbl"))}</span>
+            <span class="em-v ${consec >= 1 || score <= -1.0 ? "neg" : ""}">${consec}/${lossLim}L · ${rewFloor.toFixed(1)}R</span>
+            <span class="em-s">2 losses OR score ≤ -1.5</span>
+          </div>
+        `;
+
+        const scored = (evo.recent_scored || []).slice(0, 6);
+        const missList = el("evoMissList");
+        if (!scored.length) {
+          missList.innerHTML = `<div style="font-size:12px;color:var(--ink-3)">${esc(t("evoNoMisses"))}</div>`;
+        } else {
+          missList.innerHTML = scored.map((r) => {
+            const rs = r.reward_score !== null && r.reward_score !== undefined ? Number(r.reward_score) : 0;
+            const reg = r.reward_regime;
+            let tag = t("evoFlatTag"), cls = "pill";
+            if (reg === "missed_qualified_setup") { tag = `${t("evoMissTag")} T${r.miss_tier || 2}`; cls = "pill red"; }
+            else if (reg === "active_entry") { tag = `${t("evoWinTag")} ${r.runtime_direction || ""}`; cls = rs >= 0 ? "pill green" : "pill red"; }
+            else if (reg === "avoided_two_way_trap") { tag = t("evoTrapTag"); cls = "pill amber"; }
+            return `
+              <div class="evo-item">
+                <div style="min-width:0;flex:1;">
+                  <div style="font-weight:600;color:var(--ink-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.headline)}">${esc(r.headline)}</div>
+                  <div style="font-size:11px;color:var(--ink-4);">${esc(fmtTime(r.event_iso))} · ${esc(r.session)} · ${esc(r.strategy_version)}</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+                  <span class="${cls}">${esc(tag)}</span>
+                  <span class="mono tnum ${rs > 0 ? "pos" : rs < 0 ? "neg" : ""}" style="font-weight:700;">${rs >= 0 ? "+" : ""}${rs.toFixed(2)}</span>
+                </div>
+              </div>
+            `;
+          }).join("");
+        }
+
+        const rules = evo.dynamic_prompt_rules || [];
+        const vers = (evo.versions || []).slice(0, 5);
+        let rvHtml = "";
+        if (rules.length) {
+          rvHtml += rules.map((rl, i) => `<div class="evo-rule">${i + 1}. ${esc(rl)}</div>`).join("");
+        } else {
+          rvHtml += `<div style="font-size:12px;color:var(--ink-3)">${esc(t("evoNoRules"))}</div>`;
+        }
+        if (vers.length) {
+          rvHtml += vers.map((v) => {
+            const stCls = v.status === "rolled_back" ? "pill red" : v.status === "promoted" ? "pill green" : "pill blue";
+            return `
+              <div class="evo-item">
+                <div style="min-width:0;flex:1;">
+                  <span class="mono" style="font-weight:700;">${esc(v.version_id)}</span>
+                  <span class="${stCls}" style="margin-left:6px;">${esc(v.status)}</span>
+                  <div style="font-size:11px;color:var(--ink-3);margin-top:2px;">${esc(v.rollback_reason || v.summary_zh || "")}</div>
+                </div>
+                <span style="font-size:11px;color:var(--ink-4);flex-shrink:0;">${esc(fmtTime(v.promoted_at || v.created_at))}</span>
+              </div>
+            `;
+          }).join("");
+        }
+        el("evoRulesAndVersions").innerHTML = rvHtml;
       }
 
       function sourceLabel(src) {

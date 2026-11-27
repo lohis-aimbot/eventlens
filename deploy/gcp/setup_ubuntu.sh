@@ -37,6 +37,7 @@ fi
 install -d -m 0755 -o eventlens -g eventlens "${APP_DIR}"
 install -d -m 0750 -o eventlens -g eventlens "${STATE_DIR}"
 install -d -m 0750 -o eventlens -g eventlens "${STATE_DIR}/data"
+install -d -m 0750 -o eventlens -g eventlens "${STATE_DIR}/evolution"
 install -d -m 0755 -o eventlens -g eventlens "${STATE_DIR}/algo"
 # Official `ghcr.io/spotware/ctrader-console:latest` has empty `Config.User` (defaults to container root;
 # non-root runtime override is not verified). Setgid + default ACLs for `eventlens` ensure files created
@@ -99,6 +100,10 @@ install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-bridge-watchdog.service" \
   /etc/systemd/system/eventlens-bridge-watchdog.service
 install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-bridge-watchdog.timer" \
   /etc/systemd/system/eventlens-bridge-watchdog.timer
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-evolution.service" \
+  /etc/systemd/system/eventlens-evolution.service
+install -m 0644 "${APP_DIR}/deploy/gcp/eventlens-evolution.timer" \
+  /etc/systemd/system/eventlens-evolution.timer
 systemctl daemon-reload
 
 cat <<EOF

@@ -1,0 +1,30 @@
+[Unit]
+Description=EventLens Auto-Evolution Settlement, Dual Rollback Guard & 6-Cluster Arena
+After=network-online.target eventlens-shadow-cli.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=eventlens
+Group=eventlens
+WorkingDirectory=/opt/eventlens
+EnvironmentFile=/etc/eventlens/eventlens.env
+
+ExecStart=/opt/eventlens/.venv/bin/eventlens-shadow evolve-tick \
+    --shadow-db /var/lib/eventlens/data/shadow-ledger.sqlite \
+    --memory-db /var/lib/eventlens/data/shadow-memory.sqlite \
+    --observer-db /var/lib/eventlens/data/observer.sqlite \
+    --quotes-db /var/lib/eventlens/data/live-quotes.sqlite \
+    --evolution-db /var/lib/eventlens/data/evolution.sqlite \
+    --active-strategy /var/lib/eventlens/evolution/active_strategy.json \
+    --llm-provider auto \
+    --gemini-model gemini-4-hydrogen \
+    --gemini-thinking-level low
+ExecStartPost=/bin/bash /opt/eventlens/deploy/gcp/publish_dashboard_snapshot.sh running
+
+TimeoutStartSec=300
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/eventlens

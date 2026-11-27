@@ -1,0 +1,11 @@
+[Unit]
+Description=Run EventLens Auto-Evolution & Anti-Turtle Settlement every 30 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Unit=eventlens-evolution.service
+
+[Install]
+WantedBy=timers.target

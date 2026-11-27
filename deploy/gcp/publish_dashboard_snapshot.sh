@@ -34,6 +34,8 @@ mkdir -p "${EXPORT_DIR}"
   --shadow-db "${STATE_DIR}/data/shadow-ledger.sqlite" \
   --memory-db "${STATE_DIR}/data/shadow-memory.sqlite" \
   --quotes-db "${STATE_DIR}/data/live-quotes.sqlite" \
+  --evolution-db "${STATE_DIR}/data/evolution.sqlite" \
+  --active-strategy "${STATE_DIR}/evolution/active_strategy.json" \
   --vm-status "${VM_STATUS}" \
   --output "${EXPORT_JSON}" >/dev/null
 

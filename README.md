@@ -5,10 +5,10 @@
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-4D6BFE?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/Tests-152_Passing-10b981?style=flat-square" alt="152 Passing Tests" />
+  <img src="https://img.shields.io/badge/Tests-167_Passing-10b981?style=flat-square" alt="167 Passing Tests" />
   <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/Web_Dashboard-Live_PWA-2563eb?style=flat-square" alt="Live Web Dashboard" /></a>
   <a href="https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" /></a>
-  <a href="docs/blueprint-v2.md"><img src="https://img.shields.io/badge/Blueprint-v2_Stage_A-6366f1?style=flat-square" alt="Commander Blueprint v2" /></a>
+  <img src="https://img.shields.io/badge/Strategy-v5_Auto--Evolution-6366f1?style=flat-square" alt="Strategy v5 + Auto-Evolution" />
   <img src="https://img.shields.io/badge/Execution-Demo_Only_Locked-0f172a?style=flat-square" alt="Demo-Only Locked" />
 </p>
 
@@ -33,6 +33,8 @@
 
 ## News & Research Log
 
+- **`[2026/11/27]`** Shipped the **Auto-Evolution & Anti-Turtle Reward Engine** (`src/eventlens/evolution.py`, `eventlens-shadow evolve-tick`, `eventlens-evolution.timer`): settles matured `4h` events every `30m` using strict anti-turtle penalties (`alpha_miss = 1.0x`, `1.25x` on missed `T3 >= 25p` moves, `+0.05` idle avoid cap), enforces a `>= 40%` qualified opportunity capture veto, runs a `6`-cluster / `48h` Meta-Optimizer Arena that hot-reloads `active_strategy.json` within hard bounds, protects Demo capital via a **dual-trigger auto-rollback circuit breaker** (`2` consecutive stop-losses / `-2.0R` live OR `<= -1.5` matured anti-turtle reward score), and exposes the live **Auto-Evolution Scoreboard** in `docs/dashboard/index.html`.
+- **`[2026/11/26]`** Released & deployed **Strategy v5** (`single-pass-agent-v5.0`): added `GeminiClient` (`gemini-4-hydrogen`, `thinkingLevel="low"`) + `DeepSeekClient` automatic failover (`src/eventlens/gemini.py`), `london`/`overlap` entry gating, causal `1h/4h` HTF & `5m` anti-chase hard guardrails, `T2_mid_swing` protection (`14p SL / 24p TP / +10p->6p trailing / 4h`), daily NY rollover reset for `"market-state-watch"` (`trading_day_window`), and pure event-driven breakout reviews. Lifted `--kill-switch` on `eventlens-demo-01` for controlled Demo forward validation.
 - **`[2026/11/25]`** Shipped **Stage A Workbench & Deliverables 1–3** per **[Commander Blueprint v2](docs/blueprint-v2.md)** ([中文版](docs/blueprint-v2_CN.md)): read-only `eventlens-shadow export-research` (`src/eventlens/research_lab.py`) syncing 14+ day real cloud tick/news telemetry (`chart-lab.json`), interactive **Tab 3 `Chart Lab`** in the Web Dashboard, and the **[Google Colab Quant & Reward Lab](https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb)** notebook.
 - **`[2026/11/24]`** Completed forensic autopsy of the Nov 11–24 Pepperstone Demo run (`6 trades, 0W/6L, -11.62 USD`). Activated `--kill-switch` on the GCP VM to halt unvalidated Demo entries while continuing uninterrupted `24×5` quote & macro feed capture.
 - **`[2026/11/19]`** Released `single-pass-agent-v4.1`, `tier1-eurusd-filter-v2` (cutting daily LLM evaluations from `80/day` to `~24–27/day`), tighter `8.0p/6.0p` trailing profit locks, NY pre-close entry cutoffs, and a redesigned main-screen Web Dashboard with inline CoT reasoning drawers.
@@ -48,10 +50,10 @@
 
 Instead of treating an LLM as an unconstrained black-box trader, EventLens enforces a strict architectural separation between **semantic reasoning** and **deterministic execution safety**:
 
-- **Zero Credential Custody:** The LLM (`DeepSeek` today, benchmarked against `Gemini` in Stage A) only receives structured context and outputs bounded JSON proposals—it never touches broker keys or raw order endpoints.
-- **Deterministic Risk & Exit Authority:** Pure Python guards (`DeterministicHardRiskEngine`) govern position sizing, spread/staleness checks, cross-day loss baselines, `--kill-switch` enforcement, and model-free pip SL/TP/trailing/timeout exits.
+- **Zero Credential Custody:** The LLM (`Gemini 4 Hydrogen` primary with automatic `DeepSeek` failover via `FailoverModelClient`) only receives structured context and outputs bounded JSON proposals—it never touches broker keys or raw order endpoints.
+- **Deterministic Risk & Exit Authority:** Pure Python guards (`DeterministicHardRiskEngine`) govern `london`/`overlap` session gates, `5m` anti-chase / `4h` HTF counter-trend blocks, `q`-scaled risk budgets (`<= 2%`), daily loss caps (`8 USD`), `--kill-switch` enforcement, and model-free `T2_mid_swing` SL/TP/trailing/timeout exits.
 - **Anti-Lookahead Data Integrity:** Every Tier-1 headline and broker tick preserves distinct `source_at`, `published_at`, `received_at`, and `available_at` UTC clocks in SQLite, preventing inadvertent future-information leakage during replay or evaluation.
-- **Scientific Accountability:** Forward failures are quarantined, audited trade-by-trade (`MFE`/`MAE` + post-entry drift), and resolved through out-of-sample offline evaluation rather than unverified parameter guesswork.
+- **Anti-Turtle Auto-Evolution:** Matured events settle causally with full `1.0x–1.25x` missed-opportunity penalties; every `6` matured clusters or `48h` candidate profiles compete under a `>= 40%` capture-rate veto and dual-trigger auto-rollback (`2` losses or `<= -1.5` reward score).
 
 ---
 
@@ -61,18 +63,22 @@ Instead of treating an LLM as an unconstrained black-box trader, EventLens enfor
 flowchart LR
     subgraph LiveRuntime["Live 24x5 Cloud Runtime (GCP Ubuntu 24.04 + Docker)"]
         News["Tier-1 English Feeds<br/>(investingLive, ECB, Fed, BEA, FF)"] --> Filter["tier1-eurusd-filter-v2<br/>Dedup & Multi-Event Bundler"]
-        Bridge["EventLensCliBridge (.NET 6)<br/>Pepperstone Demo Bid/Ask Quotes"] --> Quotes["QuoteStore<br/>Clock & Razor Spread Gate"]
-        Filter --> Agent["SinglePassTradingAgent v4.1<br/>+ SQLite Thesis Memory"]
+        Bridge["EventLensCliBridge (.NET 6)<br/>Pepperstone Demo Bid/Ask Quotes"] --> Quotes["QuoteStore<br/>1h/4h Causal Lookups & Razor Gate"]
+        Filter --> Agent["SinglePassTradingAgent v5.0<br/>Gemini 4 Hydrogen + DeepSeek Failover"]
         Quotes --> Agent
-        Agent --> Risk["DeterministicHardRiskEngine<br/>Sizing · Loss Floor · --kill-switch"]
-        Risk --> Ledger["SQLiteShadowLedger /<br/>CLI Demo Execution (!IsLive)"]
-        Ledger --> Dash["Sanitized Snapshot Sync -> GitHub Pages"]
+        Agent --> Risk["DeterministicHardRiskEngine<br/>london/overlap · 5m/4h · 2% Sizing"]
+        Risk --> Ledger["SQLiteShadowLedger / CLI Demo<br/>T2 Exits (14p/24p/+10p/6p/4h)"]
+        Ledger --> Dash["Sanitized Snapshot & Chart Lab -> GitHub Pages"]
     end
 
-    subgraph StageALab["Stage A Offline Research Feedback Loop"]
-        Ledger --> Export["14+ Day Read-Only<br/>SQLite Research Export"]
-        Export --> Lab["Chart Lab (Human + 3-Tier Labels)<br/>& Colab Net-R Reward Lab"]
-        Lab -->|"Out-of-Sample Validated Policy"| Agent
+    subgraph AutoEvo["Autonomous Evolution & Anti-Turtle Loop (every 30m)"]
+        Ledger --> Settle["Causal 4h Settlement & -1.0x/-1.25x Miss Penalty"]
+        Settle --> Guard{"Dual Rollback Guard<br/>(>=2 Losses OR Score <= -1.5)"}
+        Guard -- "Healthy + 6 Clusters/48h" --> Arena["Meta-Optimizer & Capture >= 40% Arena"]
+        Guard -- "Tripped" --> Hot["Rollback & Blacklist Hash"]
+        Arena -- "Promoted" --> Hot["active_strategy.json Hot-Reload"]
+        Hot --> Agent
+        Hot --> Risk
     end
 ```
 
@@ -81,10 +87,11 @@ flowchart LR
 | Layer | Canonical Modules | Implemented Responsibilities & Safeguards |
 |---|---|---|
 | **Information Intake** | `src/eventlens/sources/english_tier1.py`, `src/eventlens/observer.py`, `src/eventlens/latency.py` | Captures Tier-1 English macro feeds; `tier1-eurusd-filter-v2` drops session roundups, option expiries, and non-G2 noise; tracks 4D feed health and strict arrival clocks without fabricating missing release timestamps |
-| **LLM & Thesis Memory** | `src/eventlens/trading/agent.py`, `src/eventlens/deepseek.py`, `src/eventlens/memory.py`, `src/eventlens/sqlite_memory.py` | Executes `single-pass-agent-v4.1` structured JSON proposals (`IGNORE_EVENT`, `HOLD`, `SET_TARGET`, `CLOSE`) backed by immutable SQLite evidence/thesis revisions and idempotent event-bundle crash recovery |
-| **Quotes & Cost Policy** | `src/eventlens/quotes.py`, `src/eventlens/sources/ctrader_demo.py`, `ctrader/EventLensCliBridge/` | Streams `12h`-rotated Pepperstone Demo EUR/USD ticks from a containerized `.NET 6` cBot (`--exit-on-stop`); enforces `QuoteQualityPolicy` freshness checks and `UsdPerOneLot` / `UsdPerMillionUsdVolume` Razor commission accounting |
-| **Hard Risk & Execution** | `src/eventlens/trading/risk.py`, `src/eventlens/trading/portfolio.py`, `src/eventlens/trading/execution.py`, `src/eventlens/trading/ctrader_cli_broker.py` | Enforces `q`-scaled risk budgets, conservative cross-day `demo_daily_state` loss guards, FX weekend sleep, NY pre-close entry cutoffs, `--kill-switch`, `ClosingDealId`-verified Demo settlement, and hard `!Account.IsLive` blocks |
-| **Runtime & Web UI** | `src/eventlens/runtime.py`, `src/eventlens/shadow_cli.py`, `src/eventlens/dashboard.py`, `docs/dashboard/index.html` | Single-process `ShadowRunner`, model-free protective exit monitoring, read-only SQLite diagnostics (`?mode=ro`), and bilingual PWA dashboard synchronization |
+| **LLM & Failover Memory** | `src/eventlens/gemini.py`, `src/eventlens/deepseek.py`, `src/eventlens/trading/agent.py`, `src/eventlens/memory.py`, `src/eventlens/sqlite_memory.py` | Runs `GeminiClient` (`gemini-4-hydrogen`, `thinkingLevel="low"`) with automatic `DeepSeekClient` failover (`FailoverModelClient`), `single-pass-agent-v5.0` structured JSON proposals, and hot-reloadable dynamic prompt rules |
+| **Quotes & HTF Metrics** | `src/eventlens/quotes.py`, `src/eventlens/sources/ctrader_demo.py`, `ctrader/EventLensCliBridge/` | Streams `12h`-rotated Pepperstone Demo EUR/USD ticks; computes DST-aware FX sessions, `O(log N)` causal `1h`/`4h` lookups, and `UsdPerOneLot` / `UsdPerMillionUsdVolume` Razor commission accounting |
+| **Hard Risk & T2 Exits** | `src/eventlens/trading/risk.py`, `src/eventlens/trading/portfolio.py`, `src/eventlens/trading/execution.py`, `src/eventlens/trading/ctrader_cli_broker.py` | Enforces `london`/`overlap` entry gating, `5m` chase & `4h` counter-trend blocks, `2%` risk sizing, `8 USD` daily loss guard, `ClosingDealId` Demo verification, `!Account.IsLive` hard block, and `T2_mid_swing` (`14/24/+10/6/4h`) exits |
+| **Auto-Evolution Engine** | `src/eventlens/evolution.py`, `src/eventlens/research_lab.py` | Runs every `30m` via `eventlens-evolution.timer`: `4h` causal settlement with strict anti-turtle penalties (`1.0x`, `1.25x` T3), `>= 40%` capture gate, `6`-cluster/`48h` Meta-Optimizer Arena, `active_strategy.json` hot-reload, and dual-trigger auto-rollback |
+| **Runtime & Web UI** | `src/eventlens/runtime.py`, `src/eventlens/shadow_cli.py`, `src/eventlens/dashboard.py`, `docs/dashboard/index.html` | Single-process `ShadowRunner` with NY daily watch-review reset, read-only SQLite diagnostics, `Chart Lab`, and live Auto-Evolution Scoreboard synchronization |
 
 ---
 
@@ -116,9 +123,9 @@ EventLens treats **unfiltered forward telemetry** as first-class scientific evid
 
 | Verification Tier | Current Evidence |
 |---|---|
-| **Offline-Verified** | **`152` automated tests** (`pytest -q`), strict `mypy src`, `ruff check .`, and `ruff format --check .` covering Pydantic contracts, risk gates, Razor commission policy, bridge rotation, close-deal race guards, live-account locks, and Stage A `research_lab` exports |
-| **Live-Observed** | Ubuntu 24.04 GCP `demo-reconcile`, bounded `1,000 EUR` `demo-smoke`, continuous `24×5` EUR/USD tick & Tier-1 macro SQLite accumulation (`Nov 11–present`), and the full 6-trade Nov 11–24 forward evaluation |
-| **Active Research (Stage A)** | Offline reverse-engineering of clean `MFE/MAE` opportunities, human K-line labeling (`Chart Lab`), `±60m` bidirectional attribution, `Net-R` reward benchmarking, and **Gemini vs. DeepSeek** out-of-sample trials |
+| **Offline-Verified** | **`167` automated tests** (`pytest -q`), strict `mypy src` (`24 source files`), `ruff check .`, and `ruff format --check .` covering Gemini 4 failover, Strategy v5 risk gates, Auto-Evolution settlement, dual rollback, anti-turtle capture veto, and `research_lab` exports |
+| **Live-Observed** | Ubuntu 24.04 GCP `gemini-4-hydrogen` live connectivity, `demo-reconcile`, bounded `demo-smoke`, continuous `24×5` EUR/USD tick & Tier-1 macro SQLite accumulation (`Nov 11–present`), and Strategy v5 forward Demo execution |
+| **Autonomous Evolution** | Cloud `eventlens-evolution.timer` (`30m` settlement, `-1.0x / -1.25x` T3 miss penalties, `>= 40%` capture veto, `6`-cluster/`48h` Meta-Optimizer Arena, `active_strategy.json` hot-reload, and `2`-loss / `-1.5` score rollback guard) |
 | **Hard-Blocked** | Real-money Live broker endpoints and accounts (`!Account.IsLive` enforced in code & execution bridge) |
 
 ---
@@ -131,7 +138,7 @@ EventLens treats **unfiltered forward telemetry** as first-class scientific evid
 | **Stage 1 · Two-Phase Ladder** | **Phase A:** Empirical discovery & reward benchmark on 14+ day real cloud data; **Phase B:** Scale to 2–5Y macro bars & decouple LLM semantic factors from a Walk-Forward ML/reward policy (`60% / 20% / 20%`) | Phase B unlocked only after positive Phase A out-of-sample alpha |
 | **Stage 2 · Dual Labeling & Attribution** | Algorithmic 3-tier markers (`90m >= 10p`, `4h >= 15p`, `8h >= 25p`) + human `Buy/Sell/Avoid` tags; **4 FX sessions**; bidirectional **`-60m` pre-arrival** (front-running/lag) + **`0–15m / 15–60m` post-arrival** news attribution | `Chart Lab` JSON + Colab dataset |
 | **Stage 3 · Net-R Reward & Exits** | Standardized net `R` after spread & Razor fees with `>70%` drawdown penalty, miss/avoid shaping, **4 exit templates** (`10/15p`, `14/24p+trail`, `18/36p`, `ATR`) + `30m/1h/4h` drift, evaluated on a **`70% / 30%` OOS split** | Reproducible Colab Reward Lab |
-| **Stage 4 · Deliverables & Arena** | Read-only 14-day export pipeline → desktop/mobile `Chart Lab` Tab → **Gemini vs. DeepSeek** blind OOS showdown → coordinated release of validated strategy + `max_reviews_per_thesis` fix | Explicit operator sign-off to lift `--kill-switch` |
+| **Stage 4 · Strategy v5 & Auto-Evolution** | Stage A OOS win by `gemini-4-hydrogen` -> shipped **Strategy v5** (`v5.0`, `london/overlap`, `T2`, daily review reset), lifted `--kill-switch`, and activated 30m **Auto-Evolution Engine** | Live on `eventlens-demo-01` |
 
 Full technical specification → **[docs/blueprint-v2.md](docs/blueprint-v2.md)**
 
@@ -160,7 +167,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
-# Run full quality & test gate (CI parity: 152 tests)
+# Run full quality & test gate (CI parity: 167 tests)
 ruff check .
 ruff format --check .
 mypy src
@@ -178,13 +185,17 @@ eventlens-shadow start --help
 # Export sanitized 14+ day K-line, 3-tier labels & ±60m attributed news bundle for Colab / Chart Lab
 eventlens-shadow export-research --output-dir ./research-bundle
 
-# Launch the local read-only Web Dashboard (with live Chart Lab & /api/chart-lab)
+# Run one Auto-Evolution settlement, dual-trigger rollback & 6-cluster arena check
+eventlens-shadow evolve-tick --no-call-model
+
+# Launch the local read-only Web Dashboard (with live Chart Lab, Auto-Evolution & /api/chart-lab)
 eventlens-shadow dashboard
 ```
 
 | Subcommand | Role |
 |---|---|
-| `start` / `stop` / `recover` | Run the single-process intraday Shadow / opt-in Demo loop, drain cleanly on `SIGTERM`, or reconcile crash state |
+| `start` / `stop` / `recover` | Run the single-process intraday Shadow / opt-in Demo loop (with `--active-strategy` hot-reload), drain cleanly on `SIGTERM`, or reconcile crash state |
+| `evolve-tick` | Settle matured `4h` events with anti-turtle miss penalties (`1.0x / 1.25x`), enforce dual rollback (`>= 2` losses or `<= -1.5` reward score), and run the `6`-cluster / `48h` Meta-Optimizer Arena |
 | `status` / `report` | Open SQLite databases strictly read-only (`?mode=ro`) to audit equity, decisions, latency, and events |
 | `demo-reconcile` / `demo-smoke` / `demo-unlock` | Reconcile `EventLensCliBridge` Demo state, run bounded `1,000–2,000 EUR` smoke verification, or unlock ambiguous states |
 | `export-research` | Export strictly sanitized `chart-lab.json`, `bars_m1.csv.gz`, `M5/M15/H1` CSVs, 3-tier setups, and counterfactual `events.json` |
@@ -197,7 +208,7 @@ Headless `24×5` Linux provisioning & Docker `.NET 6` bridge runbook → **[docs
 ## 7. Repository Map & Documentation
 
 <details>
-<summary><strong>Repository structure (verified 22 source modules &amp; deployment tree)</strong></summary>
+<summary><strong>Repository structure (verified 24 source files &amp; deployment tree)</strong></summary>
 
 ```text
 eventlens/
@@ -205,31 +216,32 @@ eventlens/
 │   ├── contracts.py                 Immutable Pydantic schemas & strict UTC clock checks
 │   ├── observer.py                  Tier-1 macro capture, revisions & 4D stream health
 │   ├── latency.py                   Clock-lag decomposition utilities
-│   ├── quotes.py                    QuoteStore, as-of alignment & Razor spread/cost policy
+│   ├── quotes.py                    QuoteStore, DST FX sessions, 1h/4h lookups & Razor policy
 │   ├── memory.py / sqlite_memory.py Durable SQLite evidence & immutable thesis revisions
-│   ├── deepseek.py                  Structured JSON LLM client adapter
-│   ├── runtime.py                   IntradayEventRuntime, stateful reviews & ShadowRunner
-│   ├── shadow_cli.py                eventlens-shadow CLI entrypoint & subcommands
-│   ├── dashboard.py                 Sanitized dashboard snapshot exporter & local server
-│   ├── research_lab.py              Read-only Stage A exporter, 3-tier MFE/MAE, ±60m & Net-R engine
+│   ├── gemini.py / deepseek.py      Gemini 4 (thinkingLevel) primary & DeepSeek failover JSON clients
+│   ├── evolution.py                 Auto-Evolution Engine, anti-turtle arena, hot-reload & dual rollback
+│   ├── runtime.py                   IntradayEventRuntime, daily watch-review reset & ShadowRunner
+│   ├── shadow_cli.py                eventlens-shadow CLI entrypoint (`start`, `evolve-tick`, etc.)
+│   ├── dashboard.py                 Sanitized dashboard & Auto-Evolution exporter + local server
+│   ├── research_lab.py              Read-only Stage A exporter, 3-tier MFE/MAE, ±60m & anti-turtle Net-R
 │   ├── sources/
 │   │   ├── english_tier1.py         investingLive, ECB, Fed, BEA, FF & tier1-eurusd-filter-v2
 │   │   ├── ctrader_demo.py          Containerized Demo quote tailer & bridge handshake
 │   │   └── events.py                Source & filter contracts
 │   └── trading/
-│       ├── agent.py                 SinglePassTradingAgent (single-pass-agent-v4.1)
+│       ├── agent.py                 SinglePassTradingAgent (single-pass-agent-v5.0 + hot-reload prompt)
 │       ├── portfolio.py             Target sizing & q-dependent risk budgets
-│       ├── risk.py                  DeterministicHardRiskEngine & --kill-switch
-│       ├── execution.py             SQLiteShadowLedger & model-free pip SL/TP/trailing
+│       ├── risk.py                  DeterministicHardRiskEngine (session, 5m/4h HTF, --kill-switch)
+│       ├── execution.py             SQLiteShadowLedger & model-free T2 pip SL/TP/trailing
 │       └── ctrader_cli_broker.py    ClosingDealId-verified CLI Demo execution (!Account.IsLive)
 ├── ctrader/EventLensCliBridge/      .NET 6 cBot (cTrader.Automate 1.0.21) + packages.lock.json
-├── deploy/gcp/                      Ubuntu 24.04 setup, Docker compose, watchdog & systemd units
+├── deploy/gcp/                      Ubuntu 24.04 setup, Docker compose, watchdog, evolution timer & units
 ├── docs/
 │   ├── blueprint-v2.md / _CN.md     Signed-off Commander Blueprint v2 (Stages 0-4)
-│   ├── dashboard/                   Live bilingual PWA Web Dashboard & interactive Chart Lab
+│   ├── dashboard/                   Live bilingual PWA Web Dashboard, Evolution Scoreboard & Chart Lab
 │   └── research/                    Preflight audits, overnight audits & historical FOMC studies
 ├── configs/ & notebooks/            Stage A Colab Quant & Reward Lab + diagnostic notebooks
-└── tests/                           152 unit, protocol, integration, cloud-audit & research-lab tests
+└── tests/                           167 unit, protocol, integration, cloud-audit & auto-evolution tests
 ```
 </details>
 
@@ -248,4 +260,4 @@ eventlens/
 ---
 
 > [!IMPORTANT]
-> **Research Boundary & Disclaimer:** EventLens is built strictly for quantitative systems research and educational demonstration. Real-money Live broker endpoints and accounts are hard-blocked in code (`!Account.IsLive`), `--kill-switch` is currently engaged on the cloud VM, and past Demo or offline observations do **not** guarantee future trading profitability.
+> **Research Boundary & Disclaimer:** EventLens is built strictly for quantitative systems research and educational demonstration. Real-money Live broker endpoints and accounts are permanently hard-blocked in code (`!Account.IsLive`). Cloud execution runs exclusively on an isolated Pepperstone Demo account guarded by `2%` max per-trade risk, an `8 USD` daily loss cap, and the dual-trigger Auto-Evolution rollback circuit breaker; past Demo or offline observations do **not** guarantee future trading profitability.

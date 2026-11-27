@@ -283,6 +283,8 @@ class SinglePassTradingAgent:
         max_short_window_gap_seconds: float = 120.0,
         decision_ttl: timedelta = timedelta(minutes=2),
         review_horizon: timedelta = timedelta(hours=1),
+        system_prompt_override: str | None = None,
+        prompt_version_override: str | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         if (
@@ -312,6 +314,8 @@ class SinglePassTradingAgent:
         )
         self.decision_ttl = decision_ttl
         self.review_horizon = review_horizon
+        self.system_prompt_override = system_prompt_override
+        self.prompt_version_override = prompt_version_override
         self.clock = clock
 
     async def decide(self, context: AgentContext) -> AgentDecision:
@@ -336,7 +340,9 @@ class SinglePassTradingAgent:
         if started < context.as_of:
             raise ValueError("Reasoning clock cannot precede context cutoff")
         user = self._context_json(context)
-        reply = await self.client.complete_json(system=SINGLE_PASS_SYSTEM_PROMPT, user=user)
+        eff_system_prompt = self.system_prompt_override or SINGLE_PASS_SYSTEM_PROMPT
+        eff_prompt_version = self.prompt_version_override or SINGLE_PASS_PROMPT_VERSION
+        reply = await self.client.complete_json(system=eff_system_prompt, user=user)
         completed = self.clock()
         if completed.tzinfo is None or completed.utcoffset() is None:
             raise ValueError("Agent clock must be timezone-aware")
@@ -356,7 +362,7 @@ class SinglePassTradingAgent:
             based_on_snapshot_id=context.portfolio.snapshot_id,
             provider=reply.provider or self.client.provider,
             model_version=model_version,
-            prompt_version=SINGLE_PASS_PROMPT_VERSION,
+            prompt_version=eff_prompt_version,
             started_at=started,
             completed_at=completed,
             valid_until=completed + self.decision_ttl,

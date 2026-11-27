@@ -1271,11 +1271,27 @@ def build_dashboard_snapshot(
     memory_db: Path | None = None,
     quotes_db: Path | None = None,
     cli_demo_db: Path | None = None,
+    evolution_db: Path | None = None,
+    active_strategy_path: Path | None = None,
     vm_status: str = "running",
     max_decisions: int = 80,
 ) -> dict[str, Any]:
     """Assemble a sanitized, read-only dashboard snapshot from local EventLens SQLite stores."""
+    from .evolution import load_evolution_dashboard_summary
+
     eff_cli_db = cli_demo_db or (shadow_db.parent / "cli-demo-broker.sqlite")
+    eff_evo_db = (
+        evolution_db if evolution_db is not None else (shadow_db.parent / "evolution.sqlite")
+    )
+    if active_strategy_path is not None:
+        eff_active_path = active_strategy_path
+    elif (
+        shadow_db.parent.name == "data"
+        and (shadow_db.parent.parent / "evolution" / "active_strategy.json").is_file()
+    ):
+        eff_active_path = shadow_db.parent.parent / "evolution" / "active_strategy.json"
+    else:
+        eff_active_path = shadow_db.parent / "active_strategy.json"
     shadow_conn = _open_ro(shadow_db)
     mem_conn = _open_ro(memory_db)
     quotes_conn = _open_ro(quotes_db)
@@ -1355,6 +1371,19 @@ def build_dashboard_snapshot(
             daily_funnel=daily_funnel,
             funnel=funnel,
         )
+        evo_summary = load_evolution_dashboard_summary(
+            evolution_db=eff_evo_db,
+            active_strategy_path=eff_active_path,
+            shadow_db=shadow_db,
+            cli_demo_db=eff_cli_db if eff_cli_db.is_file() else None,
+        )
+        evo_params = evo_summary.get("active_params") or {}
+        evo_ver = str(evo_summary.get("active_version") or "v5.0")
+        eff_prompt_ver = (
+            SINGLE_PASS_PROMPT_VERSION
+            if evo_ver == "v5.0"
+            else f"{SINGLE_PASS_PROMPT_VERSION}+{evo_ver}"
+        )
 
         return {
             "schema_version": DASHBOARD_SCHEMA_VERSION,
@@ -1362,22 +1391,28 @@ def build_dashboard_snapshot(
             "vm_status": vm_status,
             "model_config": {
                 "model": detected_model,
-                "prompt_version": SINGLE_PASS_PROMPT_VERSION,
+                "prompt_version": eff_prompt_ver,
+                "evolution_version": evo_ver,
                 "risk_profile": {
-                    "stop_loss_pips": 14.0,
-                    "take_profit_pips": 24.0,
-                    "trailing_activation_pips": 10.0,
-                    "trailing_distance_pips": 6.0,
-                    "max_holding_seconds": 14400,
+                    "stop_loss_pips": float(evo_params.get("stop_loss_pips", 14.0)),
+                    "take_profit_pips": float(evo_params.get("take_profit_pips", 24.0)),
+                    "trailing_activation_pips": evo_params.get("trailing_activation_pips", 10.0),
+                    "trailing_distance_pips": evo_params.get("trailing_distance_pips", 6.0),
+                    "max_holding_seconds": int(evo_params.get("max_holding_seconds", 14400)),
                     "entry_cutoff_minutes_before_close": 120,
                     "allowed_entry_sessions": ["london", "overlap"],
-                    "max_same_direction_chase_5m_pips": 4.0,
-                    "max_countertrend_htf_4h_pips": 30.0,
+                    "max_same_direction_chase_5m_pips": float(
+                        evo_params.get("max_same_direction_chase_5m_pips", 4.0)
+                    ),
+                    "max_countertrend_htf_4h_pips": float(
+                        evo_params.get("max_countertrend_htf_4h_pips", 30.0)
+                    ),
                     "min_equity_usd": 140.0,
                     "max_daily_loss_usd": 8.0,
                     "max_risk_per_trade_pct": 2.0,
                 },
             },
+            "evolution": evo_summary,
             "account": account,
             "quote": latest_quote,
             "market_state_card": market_state_card
@@ -1408,6 +1443,8 @@ def export_dashboard_snapshot(
     memory_db: Path | None = None,
     quotes_db: Path | None = None,
     cli_demo_db: Path | None = None,
+    evolution_db: Path | None = None,
+    active_strategy_path: Path | None = None,
     vm_status: str = "running",
     max_decisions: int = 80,
 ) -> dict[str, Any]:
@@ -1416,6 +1453,8 @@ def export_dashboard_snapshot(
         memory_db=memory_db,
         quotes_db=quotes_db,
         cli_demo_db=cli_demo_db,
+        evolution_db=evolution_db,
+        active_strategy_path=active_strategy_path,
         vm_status=vm_status,
         max_decisions=max_decisions,
     )
@@ -1449,6 +1488,8 @@ def serve_dashboard(
     quotes_db: Path | None = None,
     observer_db: Path | None = None,
     cli_demo_db: Path | None = None,
+    evolution_db: Path | None = None,
+    active_strategy_path: Path | None = None,
     static_dir: Path | None = None,
 ) -> None:
     """Serve the local Chinese EventLens PWA + live read-only /api/snapshot & /api/chart-lab."""
@@ -1467,6 +1508,8 @@ def serve_dashboard(
                     memory_db=memory_db,
                     quotes_db=quotes_db,
                     cli_demo_db=cli_demo_db,
+                    evolution_db=evolution_db,
+                    active_strategy_path=active_strategy_path,
                 )
                 body = sanitize_and_verify_snapshot(snapshot).encode("utf-8")
                 self.send_response(HTTPStatus.OK)

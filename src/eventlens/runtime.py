@@ -1188,6 +1188,7 @@ class IntradayEventRuntime:
         max_actionable_event_lag_seconds: float | None = None,
         max_daily_llm_calls: int | None = None,
         source_health_provider: Callable[[Event, datetime], str | None] | None = None,
+        strategy_reloader: Callable[[bool], Any] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.memory = memory
@@ -1218,6 +1219,7 @@ class IntradayEventRuntime:
         self.max_daily_llm_calls = max_daily_llm_calls
         self._in_memory_llm_call_times: list[datetime] = []
         self.source_health_provider = source_health_provider
+        self.strategy_reloader = strategy_reloader
         self.clock = clock
         self._lock = asyncio.Lock()
 
@@ -1450,11 +1452,13 @@ class IntradayEventRuntime:
         memory_snap = await self.memory.snapshot(as_of=max(pre_now, event.received_timestamp))
         pre_market = self.market_provider(pre_now)
         pre_portfolio = await self._snapshot_portfolio(pre_market)
-        risk_pol = getattr(self.risk_engine, "policy", None)
-        allowed_sessions = getattr(risk_pol, "allowed_entry_sessions", None)
         has_open_exposure = any(
             p.instrument == "EUR/USD" and p.quantity != 0 for p in pre_portfolio.positions
         ) or bool(pre_portfolio.pending_order_ids)
+        if self.strategy_reloader is not None:
+            self.strategy_reloader(has_open_exposure)
+        risk_pol = getattr(self.risk_engine, "policy", None)
+        allowed_sessions = getattr(risk_pol, "allowed_entry_sessions", None)
         if allowed_sessions is not None and not has_open_exposure:
             fx_sess = classify_fx_session(pre_now)
             if fx_sess not in allowed_sessions:

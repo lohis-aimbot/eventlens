@@ -1344,6 +1344,20 @@ async def _run_demo_smoke(
         qstore.close()
 
 
+def _resolve_evolution_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    shadow_db = Path(args.shadow_db)
+    raw_evo = getattr(args, "evolution_db", None)
+    evo_db = Path(raw_evo) if raw_evo is not None else (shadow_db.parent / "evolution.sqlite")
+    raw_active = getattr(args, "active_strategy", None)
+    if raw_active is not None:
+        active_path = Path(raw_active)
+    elif shadow_db.parent.name == "data" and (shadow_db.parent.parent / "evolution").exists():
+        active_path = shadow_db.parent.parent / "evolution" / "active_strategy.json"
+    else:
+        active_path = shadow_db.parent / "active_strategy.json"
+    return evo_db, active_path
+
+
 async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
     now = datetime.now(UTC)
     initial_cash_usd, risk_policy, exit_policy, cost_model = _build_policies(args)
@@ -1417,14 +1431,47 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
 
         diag_mem_db, _, diag_quotes_db = _resolve_companion_dbs(args)
         cli_db = _resolve_cli_demo_state_db(args)
+        evo_db, active_strategy_path = _resolve_evolution_paths(args)
         return export_dashboard_snapshot(
             output_path=Path(args.output),
             shadow_db=Path(args.shadow_db),
             memory_db=diag_mem_db,
             quotes_db=diag_quotes_db,
             cli_demo_db=cli_db if cli_db.is_file() else None,
+            evolution_db=evo_db,
+            active_strategy_path=active_strategy_path,
             vm_status=str(getattr(args, "vm_status", "running")),
             max_decisions=int(getattr(args, "max_decisions", 80)),
+        )
+
+    if args.command == "evolve-tick":
+        from .deepseek import ModelCallError
+        from .evolution import run_evolution_tick
+
+        _, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
+        cli_db = _resolve_cli_demo_state_db(args)
+        evo_db, active_strategy_path = _resolve_evolution_paths(args)
+        llm_client: Any = None
+        if not bool(getattr(args, "no_call_model", False)):
+            try:
+                llm_client = build_llm_client_from_environment(
+                    provider=getattr(args, "llm_provider", "auto"),
+                    gemini_model=getattr(args, "gemini_model", None),
+                    gemini_thinking_level=getattr(args, "gemini_thinking_level", None),
+                    deepseek_model=getattr(args, "deepseek_model", None),
+                )
+            except ModelCallError:
+                llm_client = None
+        return await run_evolution_tick(
+            evolution_db=evo_db,
+            active_strategy_path=active_strategy_path,
+            shadow_db=Path(args.shadow_db),
+            quotes_db=diag_quotes_db,
+            observer_db=diag_obs_db if diag_obs_db.is_file() else None,
+            cli_demo_db=cli_db if cli_db.is_file() else None,
+            llm_client=llm_client,
+            force_arena=bool(getattr(args, "force_arena", False)),
+            maturity_seconds=int(getattr(args, "maturity_seconds", 14400)),
         )
 
     if args.command == "export-research":
@@ -1624,19 +1671,40 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
             max_daily_llm: int | None = (
                 int(raw_daily_llm) if raw_daily_llm is not None and int(raw_daily_llm) > 0 else None
             )
+            risk_engine = DeterministicHardRiskEngine(policy=risk_policy)
+            from .evolution import LiveStrategyReloader
+
+            _, auto_active_strategy_path = _resolve_evolution_paths(args)
+            raw_active_arg = getattr(args, "active_strategy", None)
+            eff_active_strategy = (
+                Path(raw_active_arg)
+                if raw_active_arg is not None
+                else (auto_active_strategy_path if auto_active_strategy_path.is_file() else None)
+            )
+            reloader: LiveStrategyReloader | None = (
+                LiveStrategyReloader(
+                    eff_active_strategy,
+                    agent=agent if call_model else None,
+                    risk_engine=risk_engine,
+                    ledger=ledger,
+                )
+                if eff_active_strategy is not None
+                else None
+            )
             runtime = IntradayEventRuntime(
                 memory=memory,
                 portfolio_state=ledger,
                 market_provider=market_provider,
                 agent=agent,
                 target_validator=DeterministicTargetValidator(),
-                risk_engine=DeterministicHardRiskEngine(policy=risk_policy),
+                risk_engine=risk_engine,
                 shadow_executor=ledger,
                 state_store=state_store,
                 event_filter=ev_filter,
                 max_quote_wait_age=timedelta(seconds=max_quote_wait_s),
                 max_actionable_event_lag_seconds=max_actionable_lag_s,
                 max_daily_llm_calls=max_daily_llm,
+                strategy_reloader=reloader.reload_if_changed if reloader is not None else None,
             )
 
             if args.command == "recover":
@@ -1733,7 +1801,14 @@ async def _run_command(args: argparse.Namespace) -> dict[str, Any]:
                         else 24.0
                     ),
                 )
+                if reloader is not None:
+                    reloader.cli_demo_adapter = cli_demo_adapter
+                    reloader.reload_if_changed(
+                        has_open_exposure=bool(cli_demo_adapter.open_positions())
+                    )
                 cli_demo_adapter.reconcile()
+            elif reloader is not None:
+                reloader.reload_if_changed(has_open_exposure=False)
             continuous_mode = bool(getattr(args, "continuous", False))
             runner = ShadowRunner(
                 runtime=runtime,
@@ -2150,6 +2225,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Explicitly confirm handoff of an open position at shutdown without draining to flat",
     )
     start_p.add_argument("--kill-switch", action="store_true")
+    start_p.add_argument(
+        "--active-strategy",
+        type=Path,
+        default=None,
+        help="Optional path to active_strategy.json for hot-reloading Auto-Evolution strategy profiles",
+    )
 
     stop_p = sub.add_parser("stop", help="Signal a running Shadow loop to stop cleanly")
     _add_common_db_args(stop_p, suppress_defaults=True)
@@ -2341,6 +2422,18 @@ def main(argv: list[str] | None = None) -> None:
         default=80,
         help="Maximum recent decision records to include (default: 80)",
     )
+    exp_dash_p.add_argument(
+        "--evolution-db",
+        type=Path,
+        default=None,
+        help="Optional path to evolution.sqlite (defaults to shadow-db sibling)",
+    )
+    exp_dash_p.add_argument(
+        "--active-strategy",
+        type=Path,
+        default=None,
+        help="Optional path to active_strategy.json",
+    )
 
     exp_res_p = sub.add_parser(
         "export-research",
@@ -2401,6 +2494,82 @@ def main(argv: list[str] | None = None) -> None:
         default=8787,
         help="Bind port (default: 8787)",
     )
+    dash_p.add_argument(
+        "--evolution-db",
+        type=Path,
+        default=None,
+        help="Optional path to evolution.sqlite (defaults to shadow-db sibling)",
+    )
+    dash_p.add_argument(
+        "--active-strategy",
+        type=Path,
+        default=None,
+        help="Optional path to active_strategy.json",
+    )
+
+    evo_p = sub.add_parser(
+        "evolve-tick",
+        help="Run causal reward settlement, dual-trigger rollback check, and 6-cluster/48h auto-evolution arena",
+    )
+    _add_common_db_args(evo_p, suppress_defaults=False)
+    evo_p.add_argument(
+        "--cli-demo-state-db",
+        type=Path,
+        default=None,
+        help="Optional path to cli-demo-broker.sqlite (defaults to shadow-db sibling)",
+    )
+    evo_p.add_argument(
+        "--evolution-db",
+        type=Path,
+        default=None,
+        help="Path to evolution.sqlite (defaults to <shadow-db-dir>/evolution.sqlite)",
+    )
+    evo_p.add_argument(
+        "--active-strategy",
+        type=Path,
+        default=None,
+        help="Path to active_strategy.json for hot-reload persistence",
+    )
+    evo_p.add_argument(
+        "--llm-provider",
+        choices=("auto", "gemini", "deepseek"),
+        default="auto",
+        help="LLM backend for Meta-Optimizer and arena replay (default: auto)",
+    )
+    evo_p.add_argument(
+        "--gemini-model",
+        type=str,
+        default="gemini-4-hydrogen",
+        help="Gemini model for Auto-Evolution (default: gemini-4-hydrogen)",
+    )
+    evo_p.add_argument(
+        "--gemini-thinking-level",
+        choices=("low", "medium", "high", "xhigh", "none"),
+        default="low",
+        help="Gemini thinking level for Auto-Evolution (default: low)",
+    )
+    evo_p.add_argument(
+        "--deepseek-model",
+        type=str,
+        default=None,
+        help="Optional DeepSeek fallback model ID",
+    )
+    evo_p.add_argument(
+        "--force-arena",
+        action="store_true",
+        help="Force Meta-Optimizer + Head-to-Head arena even before 6-cluster / 48h trigger",
+    )
+    evo_p.add_argument(
+        "--no-call-model",
+        action="store_true",
+        help="Run offline causal settlement and rollback checks only (no LLM arena calls)",
+    )
+    evo_p.add_argument(
+        "--maturity-seconds",
+        type=int,
+        default=14400,
+        help="Seconds after an event before reward settlement becomes eligible (default: 14400 = 4h)",
+    )
 
     args = parser.parse_args(argv)
     if hasattr(args, "max_quote_wait_seconds") and (
@@ -2454,6 +2623,7 @@ def main(argv: list[str] | None = None) -> None:
 
         diag_mem_db, diag_obs_db, diag_quotes_db = _resolve_companion_dbs(args)
         cli_db = _resolve_cli_demo_state_db(args)
+        evo_db, active_strategy_path = _resolve_evolution_paths(args)
         print(f"EventLens dashboard listening on http://{args.host}:{args.port}/")
         serve_dashboard(
             host=str(args.host),
@@ -2463,6 +2633,8 @@ def main(argv: list[str] | None = None) -> None:
             quotes_db=diag_quotes_db,
             observer_db=diag_obs_db,
             cli_demo_db=cli_db if cli_db.is_file() else None,
+            evolution_db=evo_db,
+            active_strategy_path=active_strategy_path,
         )
         return
     result = asyncio.run(_run_command(args))

@@ -36,6 +36,7 @@ ExecStart=/bin/sh -ec 'exec /opt/eventlens/.venv/bin/eventlens-shadow start \
     --max-reviews-per-thesis 20 \
     --max-total-review-calls 500 \
     --max-daily-llm-calls 80 \
+    --active-strategy /var/lib/eventlens/evolution/active_strategy.json \
     --close-on-stop \
     --exit-drain-timeout 60 \
     ${EXTRA_SHADOW_ARGS:-}'

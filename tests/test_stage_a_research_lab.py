@@ -243,7 +243,56 @@ def test_aggregate_detect_exit_reward_and_attribution(tmp_path: Path) -> None:
         has_qualified_setup=False,
     )
     assert sc_avoid["regime"] == "avoided_two_way_trap"
-    assert sc_avoid["score"] == 0.25
+    assert sc_avoid["score"] == 0.05
+
+    from eventlens.research_lab import evaluate_anti_turtle_gate, is_tradable_qualified_setup
+
+    # Strict anti-turtle penalties: 1.0x on missed T2 and 1.25x on T3 (>=25p MFE)
+    qual_asian, _ = is_tradable_qualified_setup(
+        "asian",
+        {"available": True, "r_net": 1.67, "sl_pips": 14.0, "mfe_pips": 24.0},
+        None,
+    )
+    assert qual_asian is False
+    qual_ok, qual_tier = is_tradable_qualified_setup(
+        "overlap",
+        {"available": True, "r_net": 1.67, "sl_pips": 14.0, "mfe_pips": 28.0},
+        None,
+    )
+    assert qual_ok is True and qual_tier == 3
+    sc_t3_miss = score_decision_net_r(
+        action="HOLD",
+        side=None,
+        long_eval={"available": True, "r_net": 1.6, "sl_pips": 14.0, "mfe_pips": 28.0},
+        short_eval=None,
+        has_qualified_setup=True,
+        setup_tier=3,
+    )
+    assert sc_t3_miss["score"] == pytest.approx(-2.0)
+
+    veto = evaluate_anti_turtle_gate(
+        [
+            {
+                "cluster_primary": True,
+                "regime": "missed_qualified_setup",
+                "r_net": 0.0,
+                "has_qualified_setup": True,
+            },
+            {
+                "cluster_primary": True,
+                "regime": "missed_qualified_setup",
+                "r_net": 0.0,
+                "has_qualified_setup": True,
+            },
+            {
+                "cluster_primary": True,
+                "regime": "active_entry",
+                "r_net": 1.0,
+                "has_qualified_setup": True,
+            },
+        ]
+    )
+    assert veto["passed"] is False and veto["capture_rate"] == pytest.approx(0.333)
 
     sc_err = score_decision_net_r(
         action="API_ERROR",

@@ -613,6 +613,186 @@ def compute_natural_drifts(
     }
 
 
+def _simulate_exit_spec(
+    bars_m1: list[dict[str, Any]],
+    ts_idx: list[int],
+    entry_bar: dict[str, Any],
+    entry_px: float,
+    start_idx: int,
+    side: str,
+    tmpl: ExitTemplateSpec,
+    commission_roundtrip_pips: float,
+) -> dict[str, Any]:
+    """Run one causal Bid/Ask exit specification against ordered M1 bars."""
+    sign = 1.0 if side == "long" else -1.0
+    end_t = int(entry_bar["t"]) + tmpl.max_hold_min * 60
+    sl_level = (
+        entry_px - tmpl.sl_pips * PIP_SIZE if side == "long" else entry_px + tmpl.sl_pips * PIP_SIZE
+    )
+    tp_level = (
+        entry_px + tmpl.tp_pips * PIP_SIZE if side == "long" else entry_px - tmpl.tp_pips * PIP_SIZE
+    )
+    trail_stop: float | None = None
+    peak_fav_pips = 0.0
+    mfe_pips = 0.0
+    mae_pips = 0.0
+    exit_px: float | None = None
+    exit_reason = "timeout"
+    hold_min = 0
+
+    idx = start_idx
+    last_seen_bar: dict[str, Any] | None = None
+    while idx < len(bars_m1) and ts_idx[idx] <= end_t:
+        fb = bars_m1[idx]
+        last_seen_bar = fb
+        hold_min = max(1, (ts_idx[idx] - int(entry_bar["t"])) // 60)
+
+        if side == "long":
+            adv_px = float(fb["bl"])
+            fav_px = float(fb["bh"])
+            mfe_pips = max(mfe_pips, (fav_px - entry_px) / PIP_SIZE)
+            mae_pips = max(mae_pips, (entry_px - adv_px) / PIP_SIZE)
+
+            active_stop = max(sl_level, trail_stop) if trail_stop is not None else sl_level
+            # Conservative ordering: stop checks run before take-profit within the same bar.
+            if adv_px <= active_stop:
+                exit_px = active_stop
+                exit_reason = (
+                    "trailing_stop"
+                    if trail_stop is not None and active_stop == trail_stop
+                    else "stop_loss"
+                )
+                break
+            if fav_px >= tp_level:
+                exit_px = tp_level
+                exit_reason = "take_profit"
+                break
+            cur_fav = (fav_px - entry_px) / PIP_SIZE
+            if cur_fav > peak_fav_pips:
+                peak_fav_pips = cur_fav
+            if (
+                tmpl.trail_act_pips is not None
+                and tmpl.trail_dist_pips is not None
+                and peak_fav_pips >= tmpl.trail_act_pips
+            ):
+                cand_trail = entry_px + (peak_fav_pips - tmpl.trail_dist_pips) * PIP_SIZE
+                trail_stop = cand_trail if trail_stop is None else max(trail_stop, cand_trail)
+        else:
+            adv_px = float(fb["ah"])
+            fav_px = float(fb["al"])
+            mfe_pips = max(mfe_pips, (entry_px - fav_px) / PIP_SIZE)
+            mae_pips = max(mae_pips, (adv_px - entry_px) / PIP_SIZE)
+
+            active_stop = min(sl_level, trail_stop) if trail_stop is not None else sl_level
+            if adv_px >= active_stop:
+                exit_px = active_stop
+                exit_reason = (
+                    "trailing_stop"
+                    if trail_stop is not None and active_stop == trail_stop
+                    else "stop_loss"
+                )
+                break
+            if fav_px <= tp_level:
+                exit_px = tp_level
+                exit_reason = "take_profit"
+                break
+            cur_fav = (entry_px - fav_px) / PIP_SIZE
+            if cur_fav > peak_fav_pips:
+                peak_fav_pips = cur_fav
+            if (
+                tmpl.trail_act_pips is not None
+                and tmpl.trail_dist_pips is not None
+                and peak_fav_pips >= tmpl.trail_act_pips
+            ):
+                cand_trail = entry_px - (peak_fav_pips - tmpl.trail_dist_pips) * PIP_SIZE
+                trail_stop = cand_trail if trail_stop is None else min(trail_stop, cand_trail)
+
+        idx += 1
+
+    if exit_px is None:
+        if last_seen_bar is None:
+            return {
+                "available": False,
+                "sl_pips": tmpl.sl_pips,
+                "tp_pips": tmpl.tp_pips,
+                "net_pips": None,
+                "r_net": None,
+                "mfe_pips": 0.0,
+                "mae_pips": 0.0,
+                "exit_reason": "insufficient_future_bars",
+                "holding_min": 0,
+            }
+        exit_px = float(last_seen_bar["bc"]) if side == "long" else float(last_seen_bar["ac"])
+        exit_reason = "timeout"
+
+    gross_pips = (exit_px - entry_px) / PIP_SIZE * sign
+    net_pips = round(gross_pips - commission_roundtrip_pips, 2)
+    r_net = round(net_pips / max(0.1, tmpl.sl_pips), 3)
+    return {
+        "available": True,
+        "sl_pips": tmpl.sl_pips,
+        "tp_pips": tmpl.tp_pips,
+        "net_pips": net_pips,
+        "r_net": r_net,
+        "mfe_pips": round(mfe_pips, 1),
+        "mae_pips": round(mae_pips, 1),
+        "exit_reason": exit_reason,
+        "holding_min": hold_min,
+    }
+
+
+def simulate_single_exit_policy(
+    bars_m1: list[dict[str, Any]],
+    entry_ts: int,
+    side: str,
+    *,
+    sl_pips: float,
+    tp_pips: float,
+    trail_act_pips: float | None = None,
+    trail_dist_pips: float | None = None,
+    max_hold_min: int = 240,
+    commission_roundtrip_pips: float = RAZOR_COMMISSION_ROUNDTRIP_PIPS,
+    m1_ts: list[int] | None = None,
+) -> dict[str, Any]:
+    """Simulate a custom SL/TP/trailing/max-hold exit spec causally using Bid/Ask quotes."""
+    if side not in ("long", "short"):
+        raise ValueError(f"Unsupported trade side: {side}")
+    ts_idx = m1_ts if m1_ts is not None else [int(b["t"]) for b in bars_m1]
+    entry_bar = _price_at_timestamp(bars_m1, ts_idx, entry_ts, tolerance_sec=600)
+    if entry_bar is None:
+        return {
+            "available": False,
+            "sl_pips": float(sl_pips),
+            "tp_pips": float(tp_pips),
+            "net_pips": None,
+            "r_net": None,
+            "mfe_pips": 0.0,
+            "mae_pips": 0.0,
+            "exit_reason": "no_entry_bar",
+            "holding_min": 0,
+        }
+    entry_px = float(entry_bar["ac"]) if side == "long" else float(entry_bar["bc"])
+    start_idx = bisect_left(ts_idx, int(entry_bar["t"]) + 60)
+    tmpl = ExitTemplateSpec(
+        name="custom_policy",
+        sl_pips=float(sl_pips),
+        tp_pips=float(tp_pips),
+        trail_act_pips=float(trail_act_pips) if trail_act_pips is not None else None,
+        trail_dist_pips=float(trail_dist_pips) if trail_dist_pips is not None else None,
+        max_hold_min=int(max_hold_min),
+    )
+    return _simulate_exit_spec(
+        bars_m1,
+        ts_idx,
+        entry_bar,
+        entry_px,
+        start_idx,
+        side,
+        tmpl,
+        commission_roundtrip_pips,
+    )
+
+
 def simulate_exit_templates(
     bars_m1: list[dict[str, Any]],
     entry_ts: int,
@@ -640,131 +820,22 @@ def simulate_exit_templates(
 
     entry_px = float(entry_bar["ac"]) if side == "long" else float(entry_bar["bc"])
     start_idx = bisect_left(ts_idx, int(entry_bar["t"]) + 60)
-
     drifts = compute_natural_drifts(bars_m1, ts_idx, int(entry_bar["t"]))
     sign = 1.0 if side == "long" else -1.0
 
-    results: dict[str, dict[str, Any]] = {}
-    for tmpl in templates:
-        end_t = int(entry_bar["t"]) + tmpl.max_hold_min * 60
-        sl_level = (
-            entry_px - tmpl.sl_pips * PIP_SIZE
-            if side == "long"
-            else entry_px + tmpl.sl_pips * PIP_SIZE
+    results = {
+        tmpl.name: _simulate_exit_spec(
+            bars_m1,
+            ts_idx,
+            entry_bar,
+            entry_px,
+            start_idx,
+            side,
+            tmpl,
+            commission_roundtrip_pips,
         )
-        tp_level = (
-            entry_px + tmpl.tp_pips * PIP_SIZE
-            if side == "long"
-            else entry_px - tmpl.tp_pips * PIP_SIZE
-        )
-        trail_stop: float | None = None
-        peak_fav_pips = 0.0
-        mfe_pips = 0.0
-        mae_pips = 0.0
-        exit_px: float | None = None
-        exit_reason = "timeout"
-        hold_min = 0
-
-        idx = start_idx
-        last_seen_bar: dict[str, Any] | None = None
-        while idx < len(bars_m1) and ts_idx[idx] <= end_t:
-            fb = bars_m1[idx]
-            last_seen_bar = fb
-            hold_min = max(1, (ts_idx[idx] - int(entry_bar["t"])) // 60)
-
-            if side == "long":
-                adv_px = float(fb["bl"])
-                fav_px = float(fb["bh"])
-                mfe_pips = max(mfe_pips, (fav_px - entry_px) / PIP_SIZE)
-                mae_pips = max(mae_pips, (entry_px - adv_px) / PIP_SIZE)
-
-                active_stop = max(sl_level, trail_stop) if trail_stop is not None else sl_level
-                # Conservative ordering: stop checks run before take-profit within the same bar.
-                if adv_px <= active_stop:
-                    exit_px = active_stop
-                    exit_reason = (
-                        "trailing_stop"
-                        if trail_stop is not None and active_stop == trail_stop
-                        else "stop_loss"
-                    )
-                    break
-                if fav_px >= tp_level:
-                    exit_px = tp_level
-                    exit_reason = "take_profit"
-                    break
-                cur_fav = (fav_px - entry_px) / PIP_SIZE
-                if cur_fav > peak_fav_pips:
-                    peak_fav_pips = cur_fav
-                if (
-                    tmpl.trail_act_pips is not None
-                    and tmpl.trail_dist_pips is not None
-                    and peak_fav_pips >= tmpl.trail_act_pips
-                ):
-                    cand_trail = entry_px + (peak_fav_pips - tmpl.trail_dist_pips) * PIP_SIZE
-                    trail_stop = cand_trail if trail_stop is None else max(trail_stop, cand_trail)
-            else:
-                adv_px = float(fb["ah"])
-                fav_px = float(fb["al"])
-                mfe_pips = max(mfe_pips, (entry_px - fav_px) / PIP_SIZE)
-                mae_pips = max(mae_pips, (adv_px - entry_px) / PIP_SIZE)
-
-                active_stop = min(sl_level, trail_stop) if trail_stop is not None else sl_level
-                if adv_px >= active_stop:
-                    exit_px = active_stop
-                    exit_reason = (
-                        "trailing_stop"
-                        if trail_stop is not None and active_stop == trail_stop
-                        else "stop_loss"
-                    )
-                    break
-                if fav_px <= tp_level:
-                    exit_px = tp_level
-                    exit_reason = "take_profit"
-                    break
-                cur_fav = (entry_px - fav_px) / PIP_SIZE
-                if cur_fav > peak_fav_pips:
-                    peak_fav_pips = cur_fav
-                if (
-                    tmpl.trail_act_pips is not None
-                    and tmpl.trail_dist_pips is not None
-                    and peak_fav_pips >= tmpl.trail_act_pips
-                ):
-                    cand_trail = entry_px - (peak_fav_pips - tmpl.trail_dist_pips) * PIP_SIZE
-                    trail_stop = cand_trail if trail_stop is None else min(trail_stop, cand_trail)
-
-            idx += 1
-
-        if exit_px is None:
-            if last_seen_bar is None:
-                results[tmpl.name] = {
-                    "available": False,
-                    "sl_pips": tmpl.sl_pips,
-                    "tp_pips": tmpl.tp_pips,
-                    "net_pips": None,
-                    "r_net": None,
-                    "mfe_pips": 0.0,
-                    "mae_pips": 0.0,
-                    "exit_reason": "insufficient_future_bars",
-                    "holding_min": 0,
-                }
-                continue
-            exit_px = float(last_seen_bar["bc"]) if side == "long" else float(last_seen_bar["ac"])
-            exit_reason = "timeout"
-
-        gross_pips = (exit_px - entry_px) / PIP_SIZE * sign
-        net_pips = round(gross_pips - commission_roundtrip_pips, 2)
-        r_net = round(net_pips / max(0.1, tmpl.sl_pips), 3)
-        results[tmpl.name] = {
-            "available": True,
-            "sl_pips": tmpl.sl_pips,
-            "tp_pips": tmpl.tp_pips,
-            "net_pips": net_pips,
-            "r_net": r_net,
-            "mfe_pips": round(mfe_pips, 1),
-            "mae_pips": round(mae_pips, 1),
-            "exit_reason": exit_reason,
-            "holding_min": hold_min,
-        }
+        for tmpl in templates
+    }
 
     return {
         "available": True,
@@ -789,6 +860,31 @@ def simulate_exit_templates(
     }
 
 
+def is_tradable_qualified_setup(
+    session: str,
+    long_eval: dict[str, Any] | None,
+    short_eval: dict[str, Any] | None,
+    *,
+    matched_tier: int | None = None,
+    allowed_sessions: tuple[str, ...] = ("london", "overlap"),
+    min_r_net: float = 0.50,
+) -> tuple[bool, int | None]:
+    """Identify tradable setups inside allowed liquidity sessions for anti-turtle miss penalties."""
+    if session not in allowed_sessions:
+        return False, None
+    avail = [e for e in (long_eval, short_eval) if e and e.get("available")]
+    valid_rs = [float(e["r_net"]) for e in avail if e.get("r_net") is not None]
+    best_r = max(valid_rs) if valid_rs else 0.0
+    best_mfe = max([float(e.get("mfe_pips") or 0.0) for e in avail] or [0.0])
+    qualified = best_r >= min_r_net or (
+        matched_tier is not None and matched_tier >= 2 and best_r > 0.0
+    )
+    if not qualified:
+        return False, None
+    tier = 3 if (matched_tier == 3 or best_mfe >= 25.0) else 2
+    return True, tier
+
+
 def score_decision_net_r(
     *,
     action: str,
@@ -797,10 +893,13 @@ def score_decision_net_r(
     short_eval: dict[str, Any] | None,
     has_qualified_setup: bool,
     lambda_mae: float = 0.50,
-    alpha_miss: float = 0.30,
-    alpha_avoid: float = 0.25,
+    alpha_miss: float = 1.00,
+    alpha_avoid: float = 0.05,
+    t3_miss_multiplier: float = 1.25,
+    setup_tier: int | None = None,
+    min_qualified_r: float = 0.50,
 ) -> dict[str, Any]:
-    """Compute Blueprint v2 Stage 3 standardized Net-R reward with MAE & miss/avoid shaping."""
+    """Compute standardized Net-R reward with full anti-turtle miss penalties and reduced idle farming."""
     norm_action = action.upper().strip()
     norm_side = side.lower().strip() if side else None
 
@@ -839,15 +938,22 @@ def score_decision_net_r(
         else None
     )
     if has_qualified_setup:
-        valid_rs = [r for r in (r_long, r_short) if r is not None and r > 0.0]
-        if valid_rs:
-            best_r = max(valid_rs)
-            return {
-                "score": round(-alpha_miss * best_r, 3),
-                "r_net": 0.0,
-                "mae_penalty": 0.0,
-                "regime": "missed_qualified_setup",
-            }
+        pos_rs = [r for r in (r_long, r_short) if r is not None and r > 0.0]
+        if pos_rs:
+            best_r = max(pos_rs)
+            if best_r >= min_qualified_r or setup_tier is not None:
+                mfe_long = float((long_eval or {}).get("mfe_pips") or 0.0)
+                mfe_short = float((short_eval or {}).get("mfe_pips") or 0.0)
+                is_t3 = (setup_tier == 3) or max(mfe_long, mfe_short) >= 25.0
+                eff_mult = alpha_miss * (t3_miss_multiplier if is_t3 else 1.0)
+                return {
+                    "score": round(-eff_mult * best_r, 3),
+                    "r_net": 0.0,
+                    "mae_penalty": 0.0,
+                    "regime": "missed_qualified_setup",
+                    "missed_r": round(best_r, 3),
+                    "miss_tier": 3 if is_t3 else 2,
+                }
     if r_long is not None and r_short is not None and r_long < 0.0 and r_short < 0.0:
         return {
             "score": round(alpha_avoid, 3),
@@ -856,6 +962,44 @@ def score_decision_net_r(
             "regime": "avoided_two_way_trap",
         }
     return {"score": 0.0, "r_net": 0.0, "mae_penalty": 0.0, "regime": "neutral_flat"}
+
+
+def evaluate_anti_turtle_gate(
+    deduped_records: list[dict[str, Any]],
+    *,
+    min_capture_rate: float = 0.40,
+    incumbent_capture_rate: float | None = None,
+) -> dict[str, Any]:
+    """Veto overly passive candidate strategies that dodge entries to game risk-free score."""
+    primary = [r for r in deduped_records if r.get("cluster_primary")]
+    missed = sum(1 for r in primary if r.get("regime") == "missed_qualified_setup")
+    captured = sum(
+        1
+        for r in primary
+        if r.get("regime") == "active_entry"
+        and (bool(r.get("has_qualified_setup")) or float(r.get("r_net") or 0.0) >= 0.50)
+    )
+    total_qualified = captured + missed
+    capture_rate = 1.0 if total_qualified == 0 else round(captured / total_qualified, 3)
+    required_floor = (
+        max(min_capture_rate, round(incumbent_capture_rate - 0.10, 3))
+        if incumbent_capture_rate is not None
+        else min_capture_rate
+    )
+    passed = capture_rate >= required_floor and not (total_qualified >= 2 and captured == 0)
+    return {
+        "passed": passed,
+        "capture_rate": capture_rate,
+        "required_floor": required_floor,
+        "captured_clusters": captured,
+        "missed_clusters": missed,
+        "total_qualified_clusters": total_qualified,
+        "veto_reason": (
+            None
+            if passed
+            else f"anti_turtle_capture_rate_veto:{capture_rate:.3f}<{required_floor:.3f}"
+        ),
+    }
 
 
 def apply_event_cluster_dedup(
@@ -1185,12 +1329,13 @@ def extract_attributed_events(
             }
 
             if include_counterfactuals and bars_m1:
-                has_setup = False
+                matched_tier: int | None = None
                 if algo_markers and marker_ts:
                     pos = bisect_left(marker_ts, ev_ts - 900)
                     while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 900:
-                        has_setup = True
-                        break
+                        m_tier = int(algo_markers[pos].get("tier") or 1)
+                        matched_tier = m_tier if matched_tier is None else max(matched_tier, m_tier)
+                        pos += 1
                 long_cf = simulate_exit_templates(
                     bars_m1, ev_ts, "long", atr14_pips=atr14, m1_ts=m1_ts
                 )
@@ -1199,6 +1344,14 @@ def extract_attributed_events(
                 )
                 t2_long = (long_cf.get("templates") or {}).get("T2_mid_swing")
                 t2_short = (short_cf.get("templates") or {}).get("T2_mid_swing")
+                qual_ok, qual_tier = is_tradable_qualified_setup(
+                    str(ev_dict["session"]),
+                    t2_long,
+                    t2_short,
+                    matched_tier=matched_tier,
+                )
+                ev_dict["has_qualified_setup"] = qual_ok
+                ev_dict["qualified_tier"] = qual_tier
                 ev_dict["counterfactual_long"] = long_cf.get("templates", {})
                 ev_dict["counterfactual_short"] = short_cf.get("templates", {})
                 ev_dict["reward_t2"] = score_decision_net_r(
@@ -1206,7 +1359,8 @@ def extract_attributed_events(
                     side=rt_info.get("target_direction"),
                     long_eval=t2_long,
                     short_eval=t2_short,
-                    has_qualified_setup=has_setup,
+                    has_qualified_setup=qual_ok,
+                    setup_tier=qual_tier,
                 )
 
             events.append(ev_dict)
