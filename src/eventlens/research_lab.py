@@ -868,6 +868,7 @@ def is_tradable_qualified_setup(
     matched_tier: int | None = None,
     allowed_sessions: tuple[str, ...] = ("london", "overlap"),
     min_r_net: float = 0.50,
+    immediate_move_60m_pips: float | None = None,
 ) -> tuple[bool, int | None]:
     """Identify tradable setups inside allowed liquidity sessions for anti-turtle miss penalties."""
     if session not in allowed_sessions:
@@ -876,9 +877,13 @@ def is_tradable_qualified_setup(
     valid_rs = [float(e["r_net"]) for e in avail if e.get("r_net") is not None]
     best_r = max(valid_rs) if valid_rs else 0.0
     best_mfe = max([float(e.get("mfe_pips") or 0.0) for e in avail] or [0.0])
-    qualified = best_r >= min_r_net or (
-        matched_tier is not None and matched_tier >= 2 and best_r > 0.0
-    )
+    tier_match = matched_tier is not None and matched_tier >= 2 and best_r > 0.0
+    if immediate_move_60m_pips is None:
+        qualified = tier_match or best_r >= min_r_net
+    else:
+        qualified = tier_match or (
+            abs(float(immediate_move_60m_pips)) >= 8.0 and best_r >= min_r_net
+        )
     if not qualified:
         return False, None
     tier = 3 if (matched_tier == 3 or best_mfe >= 25.0) else 2
@@ -1331,8 +1336,8 @@ def extract_attributed_events(
             if include_counterfactuals and bars_m1:
                 matched_tier: int | None = None
                 if algo_markers and marker_ts:
-                    pos = bisect_left(marker_ts, ev_ts - 900)
-                    while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 900:
+                    pos = bisect_left(marker_ts, ev_ts - 300)
+                    while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 1200:
                         m_tier = int(algo_markers[pos].get("tier") or 1)
                         matched_tier = m_tier if matched_tier is None else max(matched_tier, m_tier)
                         pos += 1
@@ -1349,6 +1354,7 @@ def extract_attributed_events(
                     t2_long,
                     t2_short,
                     matched_tier=matched_tier,
+                    immediate_move_60m_pips=ev_dict["post_60m_pips"],
                 )
                 ev_dict["has_qualified_setup"] = qual_ok
                 ev_dict["qualified_tier"] = qual_tier

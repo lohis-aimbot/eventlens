@@ -46,6 +46,7 @@ from .research_lab import (
     _price_at_timestamp,
     aggregate_quote_bars,
     apply_event_cluster_dedup,
+    compute_natural_drifts,
     detect_optimal_entries,
     evaluate_anti_turtle_gate,
     is_tradable_qualified_setup,
@@ -776,7 +777,7 @@ def _load_runtime_candidates_for_settlement(
         rows = conn.execute(
             """
             SELECT event_id, source_reference, state, reason, received_at, updated_at,
-                   context_json, decision_id, decision_json
+                   context_json, decision_id, decision_json, assessment_json
             FROM runtime_events
             WHERE decision_json IS NOT NULL
                OR reason LIKE 'same_direction_5m_chase_exceeded%'
@@ -792,9 +793,18 @@ def _load_runtime_candidates_for_settlement(
         conn.close()
 
 
+def _is_operator_halt(row: dict[str, Any]) -> bool:
+    reason_low = str(row.get("reason") or "").lower()
+    assess_low = str(row.get("assessment_json") or "").lower()
+    for token in ("kill_switch", "daily_llm_budget_exhausted", "broker_reconciliation"):
+        if token in reason_low or token in assess_low:
+            return True
+    return False
+
+
 def _parse_event_metrics(
     row: dict[str, Any],
-) -> tuple[str, datetime | None, str, str, str | None, str]:
+) -> tuple[str, datetime | None, str, str, str | None, str, str]:
     ev_id = str(row["event_id"])
     src = ev_id.split(":", 1)[0] if ":" in ev_id else "unknown"
     reason = sanitize_string(str(row.get("reason") or ""))
@@ -828,6 +838,7 @@ def _parse_event_metrics(
         or row.get("updated_at")
     )
     dt = _parse_iso(str(ts_raw)) if ts_raw else None
+    prompt_version = str(dec_obj.get("prompt_version") or "").strip()
 
     if state in ("risk_rejected", "target_rejected") or reason.startswith(
         (
@@ -842,7 +853,7 @@ def _parse_event_metrics(
         eff_action = str(dec_obj.get("portfolio_action") or "HOLD")
         eff_dir = _extract_target_direction(dec_obj)
 
-    return ev_id, dt, src, headline, eff_dir, eff_action
+    return ev_id, dt, src, headline, eff_dir, eff_action, prompt_version
 
 
 def _cluster_record_from_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -1050,11 +1061,12 @@ async def _evaluate_profile_on_slice(
 
         matched_tier: int | None = None
         if marker_ts:
-            pos = bisect_left(marker_ts, ev_ts - 900)
-            while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 900:
+            pos = bisect_left(marker_ts, ev_ts - 300)
+            while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 1200:
                 mt = int(algo_markers[pos].get("tier") or 1)
                 matched_tier = mt if matched_tier is None else max(matched_tier, mt)
                 pos += 1
+        drifts = compute_natural_drifts(bars_m1, m1_ts, ev_ts)
 
         sim_long = simulate_single_exit_policy(
             bars_m1,
@@ -1095,7 +1107,11 @@ async def _evaluate_profile_on_slice(
             m1_ts=m1_ts,
         )
         qual_ok, qual_tier = is_tradable_qualified_setup(
-            sess, sim_long, sim_short, matched_tier=matched_tier
+            sess,
+            sim_long,
+            sim_short,
+            matched_tier=matched_tier,
+            immediate_move_60m_pips=drifts["post_60m_pips"],
         )
         sc = score_decision_net_r(
             action=eff_action,
@@ -1417,7 +1433,11 @@ async def run_evolution_tick(
             # First retain existing settled events not overridden
             seen_events: set[str] = set()
             for r in raw_rows:
-                ev_id, ev_dt, src, headline, eff_dir, eff_action = _parse_event_metrics(r)
+                if _is_operator_halt(r):
+                    continue
+                ev_id, ev_dt, src, headline, eff_dir, eff_action, prompt_version = (
+                    _parse_event_metrics(r)
+                )
                 if ev_dt is None:
                     continue
                 ev_ts = int(ev_dt.timestamp())
@@ -1442,14 +1462,21 @@ async def run_evolution_tick(
                     continue
 
                 ev_iso = ev_dt.isoformat()
-                prof_at_ev = store.version_for_timestamp(ev_iso)
+                if prompt_version and not prompt_version.startswith("single-pass-agent-v5"):
+                    prof_at_ev = StrategyProfile.baseline_v5()
+                    assigned_version = "legacy_pre_v5"
+                else:
+                    prof_at_ev = store.version_for_timestamp(ev_iso)
+                    assigned_version = prof_at_ev.version_id
+
                 matched_tier: int | None = None
                 if marker_ts:
-                    pos = bisect_left(marker_ts, ev_ts - 900)
-                    while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 900:
+                    pos = bisect_left(marker_ts, ev_ts - 300)
+                    while pos < len(marker_ts) and marker_ts[pos] <= ev_ts + 1200:
                         mt = int(algo_markers[pos].get("tier") or 1)
                         matched_tier = mt if matched_tier is None else max(matched_tier, mt)
                         pos += 1
+                drifts = compute_natural_drifts(bars_m1, m1_ts, ev_ts)
 
                 sim_long = simulate_single_exit_policy(
                     bars_m1,
@@ -1490,7 +1517,11 @@ async def run_evolution_tick(
                     m1_ts=m1_ts,
                 )
                 qual_ok, qual_tier = is_tradable_qualified_setup(
-                    sess, sim_long, sim_short, matched_tier=matched_tier
+                    sess,
+                    sim_long,
+                    sim_short,
+                    matched_tier=matched_tier,
+                    immediate_move_60m_pips=drifts["post_60m_pips"],
                 )
                 sc = score_decision_net_r(
                     action=eff_action,
@@ -1508,7 +1539,7 @@ async def run_evolution_tick(
                     "session": sess,
                     "source": src,
                     "headline": headline,
-                    "strategy_version": prof_at_ev.version_id,
+                    "strategy_version": assigned_version,
                     "runtime_action": eff_action,
                     "runtime_direction": eff_dir,
                     "filter_reason": sanitize_string(str(r.get("reason") or "")) or None,
@@ -1568,16 +1599,22 @@ async def run_evolution_tick(
                 "SELECT * FROM scored_events ORDER BY event_ts ASC"
             ).fetchall()
         ]
+        v5_settled = [r for r in all_settled if str(r["strategy_version"]) != "legacy_pre_v5"]
+        legacy_clusters = sum(
+            1
+            for r in all_settled
+            if r.get("cluster_primary") and str(r["strategy_version"]) == "legacy_pre_v5"
+        )
         dedup_records = [
             _cluster_record_from_row(r) | {"cluster_primary": bool(r["cluster_primary"])}
-            for r in all_settled
+            for r in v5_settled
         ]
         gate_overall = evaluate_anti_turtle_gate(dedup_records, min_capture_rate=MIN_CAPTURE_RATE)
-        total_clusters = sum(1 for r in all_settled if r.get("cluster_primary"))
+        total_clusters = sum(1 for r in v5_settled if r.get("cluster_primary"))
         cum_reward_total = round(
             sum(
                 float(r["reward_score"])
-                for r in all_settled
+                for r in v5_settled
                 if r.get("cluster_primary") and r.get("reward_score") is not None
             ),
             3,
@@ -1593,7 +1630,7 @@ async def run_evolution_tick(
         )
         ver_primary_rows = [
             r
-            for r in all_settled
+            for r in v5_settled
             if r.get("cluster_primary") and str(r["strategy_version"]) == active.version_id
         ]
         ver_reward_sum = round(
@@ -1631,6 +1668,7 @@ async def run_evolution_tick(
                 "active_version_after": restored.version_id,
                 "newly_scored_events": newly_settled_count,
                 "matured_clusters_total": total_clusters,
+                "legacy_benchmark_clusters": legacy_clusters,
                 "cumulative_reward_score": cum_reward_total,
                 "version_reward_score": ver_reward_sum,
                 "capture_rate": gate_overall["capture_rate"],
@@ -1646,7 +1684,7 @@ async def run_evolution_tick(
         # Phase 4: Fast 6-Cluster / 48h Meta-Optimizer & Head-to-Head Arena
         clusters_since_promo = sum(
             1
-            for r in all_settled
+            for r in v5_settled
             if r.get("cluster_primary") and str(r["strategy_version"]) == active.version_id
         )
         last_arena = store.last_arena_time()
@@ -1674,6 +1712,7 @@ async def run_evolution_tick(
                 "active_version_after": active.version_id,
                 "newly_scored_events": newly_settled_count,
                 "matured_clusters_total": total_clusters,
+                "legacy_benchmark_clusters": legacy_clusters,
                 "clusters_since_promotion": clusters_since_promo,
                 "cumulative_reward_score": cum_reward_total,
                 "capture_rate": gate_overall["capture_rate"],
@@ -1681,7 +1720,7 @@ async def run_evolution_tick(
                 "live_realized_r": live_realized_r,
                 "llm_calls_used": 0,
                 "detail": (
-                    f"Settled {newly_settled_count} events; clusters={clusters_since_promo}/{ARENA_CLUSTER_TRIGGER}"
+                    f"Settled {newly_settled_count} events; v5_clusters={clusters_since_promo}/{ARENA_CLUSTER_TRIGGER}; legacy={legacy_clusters}"
                 ),
             }
             store.record_run(summary)
@@ -1899,6 +1938,7 @@ def load_evolution_dashboard_summary(
             "captured_clusters": 0,
             "missed_clusters": 0,
             "matured_clusters_total": 0,
+            "legacy_benchmark_clusters": 0,
             "clusters_since_promotion": 0,
             "arena_cluster_target": ARENA_CLUSTER_TRIGGER,
             "consecutive_losses": 0,
@@ -1948,16 +1988,20 @@ def load_evolution_dashboard_summary(
             if _table_exists(evo_conn, "scored_events")
             else []
         )
+        v5_primary = [r for r in all_primary if str(r["strategy_version"]) != "legacy_pre_v5"]
+        legacy_clusters = sum(
+            1 for r in all_primary if str(r["strategy_version"]) == "legacy_pre_v5"
+        )
         dedup_records = [
-            _cluster_record_from_row(r) | {"cluster_primary": True} for r in all_primary
+            _cluster_record_from_row(r) | {"cluster_primary": True} for r in v5_primary
         ]
         gate = evaluate_anti_turtle_gate(dedup_records, min_capture_rate=MIN_CAPTURE_RATE)
         cum_score = round(
-            sum(float(r["reward_score"]) for r in all_primary if r.get("reward_score") is not None),
+            sum(float(r["reward_score"]) for r in v5_primary if r.get("reward_score") is not None),
             3,
         )
         clusters_since_promo = sum(
-            1 for r in all_primary if str(r["strategy_version"]) == active.version_id
+            1 for r in v5_primary if str(r["strategy_version"]) == active.version_id
         )
         misses = [
             {
@@ -1971,7 +2015,7 @@ def load_evolution_dashboard_summary(
                 "miss_tier": r.get("miss_tier"),
                 "reward_score": r.get("reward_score"),
             }
-            for r in all_primary
+            for r in v5_primary
             if r.get("reward_regime") == "missed_qualified_setup"
         ][:8]
 
@@ -1990,7 +2034,7 @@ def load_evolution_dashboard_summary(
                 "missed_r": r.get("missed_r"),
                 "miss_tier": r.get("miss_tier"),
             }
-            for r in all_primary[:15]
+            for r in v5_primary[:15]
         ]
 
         runs = (
@@ -2067,7 +2111,8 @@ def load_evolution_dashboard_summary(
             "capture_rate": gate["capture_rate"],
             "captured_clusters": gate["captured_clusters"],
             "missed_clusters": gate["missed_clusters"],
-            "matured_clusters_total": len(all_primary),
+            "matured_clusters_total": len(v5_primary),
+            "legacy_benchmark_clusters": legacy_clusters,
             "clusters_since_promotion": clusters_since_promo,
             "arena_cluster_target": ARENA_CLUSTER_TRIGGER,
             "consecutive_losses": consec_losses,

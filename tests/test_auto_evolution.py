@@ -103,6 +103,8 @@ def _seed_runtime_event(
     direction: str = "flat",
     state: str = "no_target",
     reason: str = "no_target",
+    prompt_version: str = "single-pass-agent-v5.0",
+    assessment_json: str | None = None,
 ) -> None:
     store = SQLiteRuntimeStore(shadow_db)
     try:
@@ -113,7 +115,7 @@ def _seed_runtime_event(
             "based_on_snapshot_id": "snap-1",
             "provider": "gemini",
             "model_version": "gemini-4-hydrogen",
-            "prompt_version": "single-pass-agent-v5.0",
+            "prompt_version": prompt_version,
             "started_at": ts.isoformat(),
             "completed_at": ts.isoformat(),
             "valid_until": (ts + timedelta(minutes=2)).isoformat(),
@@ -185,6 +187,7 @@ def _seed_runtime_event(
             ),
             decision_id=f"dec-{event_id}",
             decision_json=json.dumps(dec_obj),
+            assessment_json=assessment_json,
         )
     finally:
         store.close()
@@ -691,3 +694,79 @@ def test_cli_evolve_tick_and_dashboard_evolution_snapshot_sanitization(
     assert snap["evolution"]["active_version"] == "v5.0"
     assert snap["evolution"]["rollback_loss_limit"] == 2
     assert snap["evolution"]["rollback_reward_floor"] == -1.5
+
+
+def test_legacy_pre_v5_and_kill_switch_events_excluded_from_live_v5_scorecard(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 11, 20, 11, 0, tzinfo=UTC)
+    q_db = _make_quotes_db_with_move(
+        tmp_path / "live-quotes.sqlite",
+        start=start,
+        bars_count=420,
+        move_start_min=60,
+        move_pips_total=28.0,
+    )
+    shd_db = tmp_path / "shadow-ledger.sqlite"
+    evo_db = tmp_path / "evolution.sqlite"
+    active_json = tmp_path / "active_strategy.json"
+
+    # Legacy v4.1 event -> settles only into legacy_benchmark_clusters, leaving live v5 scorecard clean
+    _seed_runtime_event(
+        shd_db,
+        event_id="ev-legacy-v41",
+        ts=start + timedelta(minutes=60),
+        headline="ECB hawkish surprise triggers rally",
+        action="HOLD",
+        direction="flat",
+        prompt_version="single-pass-agent-v4.1",
+    )
+    # Operator kill-switch halts (one in reason, one inside assessment_json) -> completely skipped
+    _seed_runtime_event(
+        shd_db,
+        event_id="ev-ks-reason",
+        ts=start + timedelta(minutes=70),
+        headline="Major US payrolls print",
+        action="SET_TARGET",
+        direction="long",
+        state="risk_rejected",
+        reason="kill_switch_active",
+        prompt_version="single-pass-agent-v5.0",
+    )
+    _seed_runtime_event(
+        shd_db,
+        event_id="ev-ks-assess",
+        ts=start + timedelta(minutes=80),
+        headline="Major US CPI print",
+        action="SET_TARGET",
+        direction="long",
+        state="risk_rejected",
+        reason="risk_rejected",
+        prompt_version="single-pass-agent-v5.0",
+        assessment_json=json.dumps({"reasons": ["kill_switch_active"]}),
+    )
+
+    fake_llm = _FakeArenaLLM()
+    res = asyncio.run(
+        run_evolution_tick(
+            evolution_db=evo_db,
+            active_strategy_path=active_json,
+            shadow_db=shd_db,
+            quotes_db=q_db,
+            llm_client=fake_llm,
+            maturity_seconds=14400,
+            clock=lambda: start + timedelta(hours=6),
+        )
+    )
+    assert res["outcome"] == "insufficient_data"
+    assert res["legacy_benchmark_clusters"] == 1
+    assert res["matured_clusters_total"] == 0
+    assert res["clusters_since_promotion"] == 0
+    assert res["cumulative_reward_score"] == 0.0
+    assert res["llm_calls_used"] == 0
+    assert fake_llm.calls == []
+
+    # Verify DB contains only ev-legacy-v41 (kill_switch rows skipped)
+    with sqlite3.connect(evo_db) as conn:
+        ids = [r[0] for r in conn.execute("SELECT event_id FROM scored_events").fetchall()]
+        assert ids == ["ev-legacy-v41"]

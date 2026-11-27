@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-4D6BFE?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/Tests-167_Passing-10b981?style=flat-square" alt="167 Passing Tests" />
+  <img src="https://img.shields.io/badge/Tests-168_Passing-10b981?style=flat-square" alt="168 Passing Tests" />
   <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/Web_Dashboard-Live_PWA-2563eb?style=flat-square" alt="Live Web Dashboard" /></a>
   <a href="https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" /></a>
   <img src="https://img.shields.io/badge/Strategy-v5_Auto--Evolution-6366f1?style=flat-square" alt="Strategy v5 + Auto-Evolution" />
@@ -123,7 +123,7 @@ EventLens treats **unfiltered forward telemetry** as first-class scientific evid
 
 | Verification Tier | Current Evidence |
 |---|---|
-| **Offline-Verified** | **`167` automated tests** (`pytest -q`), strict `mypy src` (`24 source files`), `ruff check .`, and `ruff format --check .` covering Gemini 4 failover, Strategy v5 risk gates, Auto-Evolution settlement, dual rollback, anti-turtle capture veto, and `research_lab` exports |
+| **Offline-Verified** | **`168` automated tests** (`pytest -q`), strict `mypy src` (`24 source files`), `ruff check .`, and `ruff format --check .` covering Gemini 4 failover, Strategy v5 risk gates, Auto-Evolution settlement, dual rollback, anti-turtle capture veto, and `research_lab` exports |
 | **Live-Observed** | Ubuntu 24.04 GCP `gemini-4-hydrogen` live connectivity, `demo-reconcile`, bounded `demo-smoke`, continuous `24×5` EUR/USD tick & Tier-1 macro SQLite accumulation (`Nov 11–present`), and Strategy v5 forward Demo execution |
 | **Autonomous Evolution** | Cloud `eventlens-evolution.timer` (`30m` settlement, `-1.0x / -1.25x` T3 miss penalties, `>= 40%` capture veto, `6`-cluster/`48h` Meta-Optimizer Arena, `active_strategy.json` hot-reload, and `2`-loss / `-1.5` score rollback guard) |
 | **Hard-Blocked** | Real-money Live broker endpoints and accounts (`!Account.IsLive` enforced in code & execution bridge) |
@@ -167,7 +167,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
-# Run full quality & test gate (CI parity: 167 tests)
+# Run full quality & test gate (CI parity: 168 tests)
 ruff check .
 ruff format --check .
 mypy src
@@ -241,7 +241,7 @@ eventlens/
 │   ├── dashboard/                   Live bilingual PWA Web Dashboard, Evolution Scoreboard & Chart Lab
 │   └── research/                    Preflight audits, overnight audits & historical FOMC studies
 ├── configs/ & notebooks/            Stage A Colab Quant & Reward Lab + diagnostic notebooks
-└── tests/                           167 unit, protocol, integration, cloud-audit & auto-evolution tests
+└── tests/                           168 unit, protocol, integration, cloud-audit & auto-evolution tests
 ```
 </details>
 

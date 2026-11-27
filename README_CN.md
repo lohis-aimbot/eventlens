@@ -5,7 +5,7 @@
 <p align="center">
   <a href="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml"><img src="https://github.com/lohis-aimbot/eventlens/actions/workflows/tests.yml/badge.svg?branch=main" alt="CI Checks" /></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-4D6BFE?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
-  <img src="https://img.shields.io/badge/Tests-167_Passing-10b981?style=flat-square" alt="167 项测试通过" />
+  <img src="https://img.shields.io/badge/Tests-168_Passing-10b981?style=flat-square" alt="168 项测试通过" />
   <a href="https://lohis-aimbot.github.io/eventlens/dashboard/"><img src="https://img.shields.io/badge/实时看板-Live_PWA-2563eb?style=flat-square" alt="在线实时看板" /></a>
   <a href="https://colab.research.google.com/github/lohis-aimbot/eventlens/blob/main/notebooks/stage_a_quant_reward_lab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" /></a>
   <img src="https://img.shields.io/badge/Strategy-v5_自动进化-6366f1?style=flat-square" alt="Strategy v5 自动进化" />
@@ -123,7 +123,7 @@ EventLens 坚持将**真实运行结果（包括策略亏损与隐藏故障）**
 
 | 可信等级 | 当前已覆盖范围 |
 |---|---|
-| **离线验证（Offline-Verified）** | **`167` 项自动化测试**（`pytest -q`）、严格 `mypy src`（`24 个源码文件`）、`ruff check .` 与 `ruff format --check .`，全面覆盖 Gemini 4 容灾、Strategy v5 硬风控、自动进化算分与双回滚、反乌龟捕获门禁及只读导出管线 |
+| **离线验证（Offline-Verified）** | **`168` 项自动化测试**（`pytest -q`）、严格 `mypy src`（`24 个源码文件`）、`ruff check .` 与 `ruff format --check .`，全面覆盖 Gemini 4 容灾、Strategy v5 硬风控、自动进化算分与双回滚、反乌龟捕获门禁及只读导出管线 |
 | **真实观测（Live-Observed）** | Ubuntu 24.04 GCP 云端 `gemini-4-hydrogen` 实网调用、`demo-reconcile`、有界 `demo-smoke`、`24×5` 连续 EUR/USD 报价与一手新闻 SQLite 沉淀（11 月 11 日至今）及 Strategy v5 受控 Demo 前向运行 |
 | **持续自动进化** | 云端 `eventlens-evolution.timer`（每 `30m` 结算、`-1.0x / -1.25x` T3 踏空倒扣、`>= 40%` 捕获一票否决、`6` 簇/`48h` Meta-Optimizer 打擂、无感热更新及 `2` 连亏 / `-1.5` 分自动回滚） |
 | **物理阻断（Hard-Blocked）** | 一切真实资金账户（Live）与实盘券商接口（代码与桥接器双层 `!Account.IsLive` 拦截） |
@@ -167,7 +167,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
 
-# 运行完整 CI 质量门禁（167 项测试通过）
+# 运行完整 CI 质量门禁（168 项测试通过）
 ruff check .
 ruff format --check .
 mypy src
@@ -241,7 +241,7 @@ eventlens/
 │   ├── dashboard/                   在线双语 PWA Web 看板、自动进化考评台与 Chart Lab
 │   └── research/                    云端预检审计、跨夜事故复盘与历史 FOMC 研究文档
 ├── configs/ & notebooks/            Stage A Colab 量化与 Reward 实验室及诊断 Notebook
-└── tests/                           167 项单元、协议、状态机、云端故障与自动进化测试
+└── tests/                           168 项单元、协议、状态机、云端故障与自动进化测试
 ```
 </details>
 
